@@ -4,7 +4,6 @@ import fs from 'fs'
 import dotenv from 'dotenv'
 dotenv.config()
 
-import { createServer as createViteServer } from 'vite'
 import { GoogleGenAI } from '@google/genai'
 import { createClient } from '@supabase/supabase-js'
 
@@ -170,7 +169,10 @@ async function callGeminiWithFallbacks(prompt: string, responseJson = false): Pr
 
 async function startServer() {
   const app = express()
-  const PORT = process.env.NODE_ENV === 'production' && process.env.PORT ? parseInt(process.env.PORT, 10) : 3000
+  const PORT = parseInt(
+    process.env.PORT || (process.env.NODE_ENV === 'production' ? '8080' : '3000'),
+    10
+  )
 
   app.use(express.json({ limit: '20mb' }))
 
@@ -1764,6 +1766,7 @@ ${JSON.stringify(questions, null, 2)}
   // VITE / STATIC SERVING
   // --------------------------------------------------------------------------
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite')
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
