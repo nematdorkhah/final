@@ -1,0 +1,17 @@
+{
+  "test_preview_student": {
+    "studentId": "test_preview_student",
+    "studentName": "دانش‌آموز نمونه (تست معلم)",
+    "totalXp": 0,
+    "gems": 25,
+    "streak": 1,
+    "hearts": 5,
+    "lastActiveDate": "2026-10-20",
+    "unlockedTopicIndex": 0,
+    "completedTopics": {},
+    "completedQuestionIds": [],
+    "openedChests": [],
+    "wrongQuestionIds": [],
+    "updatedAt": "2026-10-20T16:36:16.018Z"
+  }
+}
