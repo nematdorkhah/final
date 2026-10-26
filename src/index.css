@@ -33,10 +33,18 @@
   --black: #0f172a;
 }
 
+@theme {
+  --font-sans: 'Vazirmatn', sans-serif;
+}
+
+*, *::before, *::after {
+  font-family: 'Vazirmatn', sans-serif;
+}
+
 html {
   direction: rtl;
   text-align: right;
-  font-family: 'Vazirmatn', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: 'Vazirmatn', sans-serif;
   background-color: #f8fafc;
   color: #0f172a;
   -webkit-tap-highlight-color: transparent;
@@ -50,8 +58,13 @@ body {
   direction: rtl;
   text-align: right;
   overflow-x: hidden;
+  font-family: 'Vazirmatn', sans-serif;
   background-color: #f8fafc;
   color: #0f172a;
+}
+
+button, input, select, textarea {
+  font-family: 'Vazirmatn', sans-serif !important;
 }
 
 /* Netlify Floating Badge & Drawer Suppression */

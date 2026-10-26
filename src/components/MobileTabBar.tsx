@@ -17,12 +17,12 @@ export default function MobileTabBar({
   studentName?: string
 }) {
   return (
-    <nav
-      className="fixed bottom-0 left-0 right-0 z-[9999] flex flex-col pointer-events-auto select-none"
-      aria-label="ناوبری اصلی برنامه"
-    >
-      {/* لایه ۱: نوار دکمه‌های اصلی ناوبری (کاملاً بالاتر از نشان Netlify) */}
-      <div className="w-full bg-white/98 backdrop-blur-md border-t border-slate-200/90 shadow-[0_-4px_24px_rgba(0,0,0,0.08)]">
+    <>
+      {/* ۱. نوار اصلی منوی سفید (دقیقاً روی سقف نوار مشکی، ارتفاع bottom-[56px] و z-40) */}
+      <nav
+        className="fixed bottom-[56px] left-0 right-0 w-full z-40 bg-white border-t border-slate-200/90 shadow-md select-none pointer-events-auto"
+        aria-label="ناوبری اصلی برنامه"
+      >
         <div className="max-w-2xl mx-auto px-2 py-1.5 flex items-center justify-around gap-1">
           {tabs.map((tab) => {
             const isActive = activeTab === tab.id
@@ -58,19 +58,22 @@ export default function MobileTabBar({
             )
           })}
         </div>
-      </div>
+      </nav>
 
-      {/* لایه ۲: نوار پس‌زمینه پایینی همرنگ با کپسول Netlify (ادغام بصری و تضمین فاصله حداقل ۴۵ پیکسلی) */}
-      <div className="w-full bg-[#0e1e25] text-slate-400 border-t border-[#1a2f38] px-4 py-2.5 min-h-[46px] pb-[max(0.6rem,env(safe-area-inset-bottom,0px))] flex items-center justify-between text-[11px] font-medium">
-        <div className="flex items-center gap-1.5 text-slate-300">
-          <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-          <span>دبستان حضرت قائم (عج)</span>
+      {/* ۲. نوار فوتر کاملاً مشکی چسبیده به انتهای صفحه (ارتفاع ثابت ۵۶ پیکسل، z-30 و bottom-0) */}
+      <div
+        className="fixed bottom-0 left-0 right-0 w-full h-[56px] z-30 bg-[#0e1e25] text-slate-300 border-t border-slate-800/80 px-4 flex items-center justify-between text-[11px] font-medium select-none pointer-events-auto"
+        aria-label="فوتر پایین صفحه"
+      >
+        <div className="flex items-center gap-2 text-slate-300">
+          <span className="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+          <span className="font-bold tracking-tight">دبستان حضرت قائم (عج)</span>
         </div>
-        <div className="flex items-center gap-1 text-sky-300 font-bold text-xs truncate max-w-[55%]">
+        <div className="flex items-center gap-1.5 text-sky-300 font-bold text-xs truncate max-w-[55%]">
           <span className="text-[13px]">👤</span>
           <span className="truncate">{studentName || 'دانش‌آموز پایه ششم'}</span>
         </div>
       </div>
-    </nav>
+    </>
   )
 }
