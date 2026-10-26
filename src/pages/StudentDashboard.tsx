@@ -537,7 +537,7 @@ export default function StudentDashboard({
   }
 
   return (
-    <div dir="rtl" className="min-h-screen bg-slate-50 text-slate-800 flex flex-col font-sans pb-32 sm:pb-28">
+    <div dir="rtl" className="min-h-screen bg-slate-50 text-slate-800 flex flex-col font-sans pb-36 sm:pb-32">
       {/* Teacher View Preview Sticky Banner */}
       {isTeacherPreview && (
         <div className="sticky top-0 z-50 bg-gradient-to-r from-blue-900 to-blue-700 text-white px-4 py-2.5 shadow-md border-b-2 border-blue-400 flex items-center justify-between gap-3">
@@ -570,7 +570,7 @@ export default function StudentDashboard({
         onLogout={onLogout}
       />
 
-      <main className="max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-5 pb-12 flex-1">
+      <main className="max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-5 pb-16 flex-1">
         {/* New Homework Notification Banner */}
         {showHomeworkNotification && (
           <div
@@ -1614,6 +1614,7 @@ export default function StudentDashboard({
         tabs={tabs}
         activeTab={activeTab}
         onChange={(id) => setActiveTab(id as StudentTab)}
+        studentName={student?.full_name}
       />
 
       {/* Student Official Report Card Modal */}
