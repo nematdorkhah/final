@@ -168,7 +168,7 @@ export default function TeacherDashboard({
   }
 
   return (
-    <div dir="rtl" className="min-h-screen bg-slate-50 text-slate-800 flex flex-col font-sans pb-28 md:pb-20">
+    <div dir="rtl" className="min-h-screen bg-slate-50 text-slate-800 flex flex-col font-sans pb-32 sm:pb-28">
       {/* Native Mobile Top Bar */}
       <MobileHeader
         title="کلاس ششم دبستان"
@@ -179,7 +179,7 @@ export default function TeacherDashboard({
       />
 
       {/* Main Tab Views */}
-      <main className="max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-5 flex-1">
+      <main className="max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-5 pb-12 flex-1">
         {/* TAB 1: HOME (Dashboard Overview) */}
         {activeTab === 'home' && (
           <div className="space-y-6 animate-[mobileFadeIn_0.2s_ease-out]">

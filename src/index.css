@@ -54,6 +54,23 @@ body {
   color: #0f172a;
 }
 
+/* Netlify Floating Badge & Drawer Suppression */
+netlify-drawer,
+#netlify-feedback-badge,
+div[data-netlify-deploy-id],
+a[href*="netlify.com"],
+div:has(> a[href*="netlify.com"]),
+body > div:last-child:has(a[href*="netlify.com"]) {
+  display: none !important;
+  position: fixed !important;
+  bottom: -9999px !important;
+  left: -9999px !important;
+  opacity: 0 !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
+  max-height: 0 !important;
+}
+
 /* Animations */
 @keyframes mobileFadeIn {
   from {
