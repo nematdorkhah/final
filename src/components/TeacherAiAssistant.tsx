@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useMemo } from 'react'
 import { toPersianDigits } from '../utils/persianNumbers'
 import { sortByLastName } from '../utils/persianSort'
+import { classroomChatHybrid } from '../services/geminiHybridService'
 
 interface Message {
   id: string
@@ -116,29 +117,12 @@ export default function TeacherAiAssistant({
 
     try {
       const context = buildClassroomContext()
-      const teacherPass = typeof window !== 'undefined' ? sessionStorage.getItem('teacherPassword') || '' : ''
-      const res = await fetch('/api/ai/classroom-chat', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(teacherPass ? { 'x-teacher-password': teacherPass } : {}),
-        },
-        body: JSON.stringify({
-          message: trimmed,
-          classroomContext: context,
-          teacherPassword: teacherPass,
-        }),
-      })
-
-      const data = await res.json()
-      if (!data.success) {
-        throw new Error(data.error || 'خطا در ارتباط با سرور')
-      }
+      const reply = await classroomChatHybrid(trimmed, context)
 
       const assistantMsg: Message = {
         id: String(Date.now() + 1),
         role: 'assistant',
-        text: data.reply,
+        text: reply,
         time: new Date().toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit' }),
       }
       setMessages((prev) => [...prev, assistantMsg])

@@ -1,5 +1,14 @@
 import { Exam, ExamQuestion, QuestionType, StudentExamSubmission } from '../types/examTypes'
 import { supabase } from '../supabaseClient'
+import {
+  generateExamQuestionsHybrid,
+  regenerateSingleQuestionHybrid,
+  convertPracticeToQuestionsHybrid,
+  gradeSubmissionHybrid,
+  isClientGeminiEnabled,
+  callGeminiDirectClient,
+  translateGeminiError,
+} from '../services/geminiHybridService'
 
 const EXAMS_STORAGE_KEY = 'school_classroom_exams_v1'
 const SUBMISSIONS_STORAGE_KEY = 'school_classroom_exam_subs_v1'
@@ -281,51 +290,11 @@ export async function generateAiExamQuestions(params: {
   extraInstructions?: string
   teacherPassword?: string
 }): Promise<ExamQuestion[]> {
-  let lastError = ''
-  const teacherPass =
-    params.teacherPassword || (typeof window !== 'undefined' ? sessionStorage.getItem('teacherPassword') || '' : '')
-  
-  // Try up to 2 attempts
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    try {
-      const res = await fetch('/api/ai/generate-exam', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(teacherPass ? { 'x-teacher-password': teacherPass } : {}),
-        },
-        body: JSON.stringify({ ...params, teacherPassword: teacherPass }),
-      })
-
-      if (res.ok) {
-        const data = await res.json()
-        if (data.success && Array.isArray(data.questions) && data.questions.length > 0) {
-          return data.questions.map((item: any, idx: number) => ({
-            id: item.id || `q_${Date.now()}_${idx + 1}`,
-            type: item.type || 'multiple_choice',
-            question: item.question,
-            options: item.options || (item.type === 'multiple_choice' ? ['الف', 'ب', 'ج', 'د'] : undefined),
-            correctAnswer: item.correctAnswer ?? 0,
-            rubricOrHint: item.rubricOrHint || '',
-            points: Number(item.points) || 2,
-          }))
-        }
-      } else {
-        const errData = await res.json().catch(() => ({}))
-        lastError = errData.error || `خطای سرور (${res.status})`
-        console.warn(`Attempt ${attempt} failed:`, lastError)
-      }
-    } catch (err: any) {
-      lastError = err?.message || 'خطای شبکه در ارتباط با سرور'
-      console.warn(`Attempt ${attempt} network error:`, lastError)
-    }
+  try {
+    return await generateExamQuestionsHybrid(params)
+  } catch (err: any) {
+    throw new Error(translateGeminiError(err))
   }
-
-  // Never silently substitute a completely different topic! Throw real error so teacher is informed.
-  throw new Error(
-    lastError ||
-      `هوش مصنوعی در حال حاضر نتوانست سوالات موضوع «${params.topic}» را آماده کند. لطفاً دوباره دکمه را بزنید.`
-  )
 }
 
 // ----------------------------------------------------------------------
@@ -341,37 +310,10 @@ export async function regenerateSingleAiQuestion(params: {
   extraInstructions?: string
   teacherPassword?: string
 }): Promise<ExamQuestion> {
-  const teacherPass =
-    params.teacherPassword || (typeof window !== 'undefined' ? sessionStorage.getItem('teacherPassword') || '' : '')
-
-  const res = await fetch('/api/ai/regenerate-question', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(teacherPass ? { 'x-teacher-password': teacherPass } : {}),
-    },
-    body: JSON.stringify({ ...params, teacherPassword: teacherPass }),
-  })
-
-  if (!res.ok) {
-    const errData = await res.json().catch(() => ({}))
-    throw new Error(errData.error || 'خطا در بازتولید سوال با هووش مصنوعی')
-  }
-
-  const data = await res.json()
-  if (!data.success || !data.question) {
-    throw new Error(data.error || 'پاسخ معتبری از هوش مصنوعی دریافت نشد')
-  }
-
-  const item = data.question
-  return {
-    id: item.id || `q_${Date.now()}`,
-    type: item.type || params.type,
-    question: item.question,
-    options: item.options || (item.type === 'multiple_choice' ? ['الف', 'ب', 'ج', 'د'] : undefined),
-    correctAnswer: item.correctAnswer ?? 0,
-    rubricOrHint: item.rubricOrHint || '',
-    points: Number(item.points) || params.points || 2,
+  try {
+    return await regenerateSingleQuestionHybrid(params)
+  } catch (err: any) {
+    throw new Error(translateGeminiError(err))
   }
 }
 
@@ -380,33 +322,11 @@ export async function convertPracticeTextToQuestions(
   subject = 'پایه ششم',
   teacherPassword?: string
 ): Promise<ExamQuestion[]> {
-  const teacherPass =
-    teacherPassword || (typeof window !== 'undefined' ? sessionStorage.getItem('teacherPassword') || '' : '')
-  const res = await fetch('/api/ai/convert-practice-to-exam', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(teacherPass ? { 'x-teacher-password': teacherPass } : {}),
-    },
-    body: JSON.stringify({ text, subject, teacherPassword: teacherPass }),
-  })
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}))
-    throw new Error(err.error || 'خطا در تبدیل تمرین به سوالات آزمون')
+  try {
+    return await convertPracticeToQuestionsHybrid(text, subject)
+  } catch (err: any) {
+    throw new Error(translateGeminiError(err))
   }
-  const data = await res.json()
-  if (!data.success || !Array.isArray(data.questions) || data.questions.length === 0) {
-    throw new Error('سوال معتبری از متن کاربرگ استخراج نشد.')
-  }
-  return data.questions.map((item: any, idx: number) => ({
-    id: item.id || `q_${Date.now()}_${idx + 1}`,
-    type: item.type || 'multiple_choice',
-    question: item.question,
-    options: item.options || (item.type === 'multiple_choice' ? ['الف', 'ب', 'ج', 'د'] : undefined),
-    correctAnswer: item.correctAnswer ?? 0,
-    rubricOrHint: item.rubricOrHint || '',
-    points: Number(item.points) || 2,
-  }))
 }
 
 // ----------------------------------------------------------------------
@@ -679,41 +599,29 @@ export async function gradeExamWithAI(
   })
 
   try {
-    const teacherPass = typeof window !== 'undefined' ? sessionStorage.getItem('teacherPassword') || '' : ''
-    const res = await fetch('/api/ai/grade-submission', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(teacherPass ? { 'x-teacher-password': teacherPass } : {}),
-      },
-      body: JSON.stringify({
-        questions: allQuestionsData,
-        studentName,
-        totalPoints: exam.totalPoints,
-        teacherPassword: teacherPass,
-      }),
+    const data = await gradeSubmissionHybrid({
+      questions: allQuestionsData,
+      studentName,
+      totalPoints: exam.totalPoints,
     })
 
-    if (res.ok) {
-      const data = await res.json()
-      if (data.teacherSummaryNote) {
-        serverTeacherNote = data.teacherSummaryNote
-      }
-      if (data.success && Array.isArray(data.grades)) {
-        for (const item of data.grades) {
-          const matchingQ = exam.questions.find((q) => q.id === item.id)
-          if (matchingQ && matchingQ.type !== 'multiple_choice') {
-            const maxPts = matchingQ.points || 2
-            const assignedScore = Math.min(maxPts, Math.max(0, Number(item.score) || 0))
-            questionScores[item.id] = assignedScore
-            questionFeedbacks[item.id] = item.feedback || `نمره پیشنهادی: ${assignedScore} از ${maxPts}`
-            totalScore += assignedScore
-          }
+    if (data.teacherSummaryNote) {
+      serverTeacherNote = data.teacherSummaryNote
+    }
+    if (data.success && Array.isArray(data.grades)) {
+      for (const item of data.grades) {
+        const matchingQ = exam.questions.find((q) => q.id === item.id)
+        if (matchingQ && matchingQ.type !== 'multiple_choice') {
+          const maxPts = matchingQ.points || 2
+          const assignedScore = Math.min(maxPts, Math.max(0, Number(item.score) || 0))
+          questionScores[item.id] = assignedScore
+          questionFeedbacks[item.id] = item.feedback || `نمره پیشنهادی: ${assignedScore} از ${maxPts}`
+          totalScore += assignedScore
         }
       }
     }
   } catch (e) {
-    console.warn('Backend grading request failed, using heuristic evaluation', e)
+    console.warn('Hybrid grading request failed, using heuristic evaluation', e)
   }
 
   // Fallback for complex questions if server did not score them
