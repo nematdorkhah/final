@@ -10,35 +10,47 @@ export async function generatePractice({
   topic,
   count,
   difficulty,
+  teacherPassword,
 }: {
   topic: string
   count: number | string
   difficulty: string
   bookUrl?: string | null
+  teacherPassword?: string
 }): Promise<string> {
   return await generatePracticeHybrid({
     topic,
     count,
     difficulty,
+    teacherPassword,
   })
 }
 
 export async function generateSamplePreview({
   topic,
   difficulty,
+  teacherPassword,
 }: {
   topic: string
   difficulty: string
   bookUrl?: string | null
+  teacherPassword?: string
 }): Promise<string> {
   return await generateSamplePreviewHybrid({
     topic,
     difficulty,
+    teacherPassword,
   })
 }
 
-export async function generateAnnouncement({ topic }: { topic: string }): Promise<string> {
-  return await generateAnnouncementHybrid({ topic })
+export async function generateAnnouncement({
+  topic,
+  teacherPassword,
+}: {
+  topic: string
+  teacherPassword?: string
+}): Promise<string> {
+  return await generateAnnouncementHybrid({ topic, teacherPassword })
 }
 
 export async function generateInteractiveQuiz({

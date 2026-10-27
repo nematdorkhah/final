@@ -41,7 +41,12 @@ export default function AiPracticeForm({
     setPreviewing(true)
     setPreview('')
     try {
-      const text = await generateSamplePreview({ topic: topic.trim(), difficulty, bookUrl: selectedBook?.file_path })
+      const text = await generateSamplePreview({
+        topic: topic.trim(),
+        difficulty,
+        bookUrl: selectedBook?.file_path,
+        teacherPassword,
+      })
       setPreview(text)
     } catch (error: any) {
       setErr(error.message)
@@ -58,11 +63,20 @@ export default function AiPracticeForm({
     setDraft(null)
     try {
       if (subTab === 'announcement') {
-        const text = await generateAnnouncement({ topic: topic.trim() })
+        const text = await generateAnnouncement({
+          topic: topic.trim(),
+          teacherPassword,
+        })
         const lines = text.split('\n').filter((l) => l.trim() !== '')
         setDraft({ title: lines[0]?.trim() || 'اعلان', body: lines.slice(1).join('\n').trim(), type: 'announcement' })
       } else {
-        const text = await generatePractice({ topic: topic.trim(), count, difficulty, bookUrl: selectedBook?.file_path })
+        const text = await generatePractice({
+          topic: topic.trim(),
+          count,
+          difficulty,
+          bookUrl: selectedBook?.file_path,
+          teacherPassword,
+        })
         const lines = text.split('\n')
         const title = lines[0].trim() || 'تمرین'
         const body = lines.slice(1).join('\n').trim()

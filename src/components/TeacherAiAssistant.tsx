@@ -17,6 +17,7 @@ export default function TeacherAiAssistant({
   grades,
   allAttendance,
   weakSubjects,
+  teacherPassword,
 }: {
   students: any[]
   statsRows: any[]
@@ -24,6 +25,7 @@ export default function TeacherAiAssistant({
   grades: any[]
   allAttendance: any[]
   weakSubjects?: any[]
+  teacherPassword?: string
 }) {
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -117,7 +119,7 @@ export default function TeacherAiAssistant({
 
     try {
       const context = buildClassroomContext()
-      const reply = await classroomChatHybrid(trimmed, context)
+      const reply = await classroomChatHybrid(trimmed, context, teacherPassword)
 
       const assistantMsg: Message = {
         id: String(Date.now() + 1),

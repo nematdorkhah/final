@@ -20,6 +20,7 @@ import {
   getLocalExams,
   getLocalSubmissions,
   flushPendingExamSyncQueue,
+  extractExamsFromPosts,
 } from '../utils/examStore'
 import { isItemExpiredForStudent } from '../utils/expiration'
 import { sanitizeTeacherFeedback } from '../utils/cleanFeedback'
@@ -229,12 +230,30 @@ export default function StudentDashboard({
       const [p, sub, g, att, examList] = (await Promise.race([fetchPromise, timeoutPromise])) as any[]
 
       // Filter out all system posts so students only see genuine announcements and homework
-      const cleanPosts = (p?.data || []).filter((post: any) => !isSystemRecord(post))
+      const rawPosts = p?.data || []
+      const cleanPosts = rawPosts.filter((post: any) => !isSystemRecord(post))
       setPosts(cleanPosts)
       setMySubmissions(sub?.data || [])
       setMyGrades(g?.data || [])
       setMyAttendance(att?.data || [])
-      setExams(examList || [])
+
+      // Double-layer exam resolution: merge fetchPublishedExams with any exams directly in list_published_posts
+      const extractedFromPosts = extractExamsFromPosts(rawPosts)
+      const mergedExamsMap = new Map<string, Exam>()
+      ;(examList || []).forEach((e: Exam) => mergedExamsMap.set(e.id, e))
+      extractedFromPosts.forEach((e: Exam) => {
+        if (!mergedExamsMap.has(e.id)) {
+          const { questions, ...rest } = e
+          const safeQ = (questions || []).map((q: any) => {
+            const { correctAnswer, rubricOrHint, ...safe } = q
+            return safe
+          })
+          mergedExamsMap.set(e.id, { ...rest, questions: safeQ })
+        }
+      })
+      const finalExams = Array.from(mergedExamsMap.values())
+      console.log(`[StudentDashboard] Resolved ${finalExams.length} published exams for student`)
+      setExams(finalExams)
       hasLoadedOnce.current = true
 
       // Auto-resume active exam if browser was refreshed or reopened mid-exam
@@ -874,79 +893,83 @@ export default function StudentDashboard({
               </div>
             </div>
 
-            {/* INTERACTIVE ASSIGNMENTS SECTION (If teacher posted assignment exams) */}
-            {activeExams.filter((e) => e.mode === 'assignment').length > 0 && (
+            {/* INTERACTIVE ASSIGNMENTS & ONLINE EXAMS SECTION */}
+            {activeExams.length > 0 && (
               <div className="space-y-3">
                 <div className="flex items-center gap-2">
                   <span className="text-lg">🌟</span>
                   <h3 className="text-base font-black text-slate-900 tracking-tight">
-                    تکالیف و تمرین‌های تعاملی آنلاین
+                    آزمون‌ها و تکالیف هوشمند آنلاین
                   </h3>
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {activeExams
-                    .filter((e) => e.mode === 'assignment')
-                    .map((assignment) => {
-                      const sub = getStudentExamSubmission(assignment.id, student.id)
-                      const isSubmitted = Boolean(sub)
-                      const isApproved = Boolean(sub?.teacherGrading?.approved || (sub as any)?.approved)
-                      return (
-                        <div
-                          key={assignment.id}
-                          className="bg-blue-50/60 border border-blue-200/90 rounded-2xl p-4.5 shadow-xs flex flex-col justify-between"
-                        >
-                          <div>
-                            <div className="flex justify-between items-start gap-2 mb-2">
-                              <div>
-                                <span className="text-[11px] font-black bg-blue-100 text-blue-800 px-2 py-0.5 rounded-md">
-                                  {assignment.subject} · تکلیف تعاملی
-                                </span>
-                                <h4 className="text-base font-black text-slate-900 mt-1.5 mb-1">
-                                  {sanitizeExamTitle(assignment.title, assignment.subject)}
-                                </h4>
-                              </div>
-                              <span
-                                className={`text-[11px] font-black px-2.5 py-1 rounded-lg border whitespace-nowrap ${
-                                  isApproved
-                                    ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                                    : isSubmitted
-                                    ? 'bg-amber-50 text-amber-800 border-amber-200'
-                                    : 'bg-slate-100 text-slate-700 border-slate-200'
-                                }`}
-                              >
-                                {isApproved ? '✅ تایید شد' : isSubmitted ? '✓ ارسال شد' : '⭕ در انتظار حل'}
+                  {activeExams.map((assignment) => {
+                    const sub = getStudentExamSubmission(assignment.id, student.id)
+                    const isSubmitted = Boolean(sub)
+                    const isApproved = Boolean(sub?.teacherGrading?.approved || (sub as any)?.approved)
+                    const isQuizMode = assignment.mode !== 'assignment'
+                    return (
+                      <div
+                        key={assignment.id}
+                        className="bg-blue-50/60 border border-blue-200/90 rounded-2xl p-4.5 shadow-xs flex flex-col justify-between"
+                      >
+                        <div>
+                          <div className="flex justify-between items-start gap-2 mb-2">
+                            <div>
+                              <span className="text-[11px] font-black bg-blue-100 text-blue-800 px-2 py-0.5 rounded-md">
+                                {assignment.subject} · {isQuizMode ? 'آزمون آنلاین' : 'تکلیف تعاملی'}
                               </span>
+                              <h4 className="text-base font-black text-slate-900 mt-1.5 mb-1">
+                                {sanitizeExamTitle(assignment.title, assignment.subject)}
+                              </h4>
                             </div>
-
-                            <div className="text-xs text-slate-500 mb-3">
-                              <span>تعداد سوالات: {toPersianDigits(assignment.questions.length)} سوال · بارم: {toPersianDigits(assignment.totalPoints)} نمره</span>
-                              {assignment.dueDate && (
-                                <div className="mt-1 text-blue-700 font-bold">
-                                  ⏰ مهلت تحویل: {toPersianDigits(new Date(assignment.dueDate).toLocaleString('fa-IR'))}
-                                </div>
-                              )}
-                            </div>
+                            <span
+                              className={`text-[11px] font-black px-2.5 py-1 rounded-lg border whitespace-nowrap ${
+                                isApproved
+                                  ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                                  : isSubmitted
+                                  ? 'bg-amber-50 text-amber-800 border-amber-200'
+                                  : 'bg-slate-100 text-slate-700 border-slate-200'
+                              }`}
+                            >
+                              {isApproved ? '✅ تایید شد' : isSubmitted ? '✓ ارسال شد' : '⭕ در انتظار حل'}
+                            </span>
                           </div>
 
-                          <button
-                            type="button"
-                            className="w-full py-2 px-3 text-xs font-black text-white bg-blue-600 hover:bg-blue-700 rounded-xl shadow-xs transition-colors cursor-pointer inline-flex items-center justify-center gap-1.5"
-                            onClick={() => setTakingExam(assignment)}
-                          >
-                            {isApproved
-                              ? '📊 مشاهده کارنامه و نمره تکلیف'
-                              : isSubmitted
-                              ? '✏️ مشاهده یا ویرایش پاسخ‌ها'
-                              : '📝 ورود و شروع حل تکلیف تعاملی'}
-                          </button>
+                          <div className="text-xs text-slate-500 mb-3">
+                            <span>
+                              تعداد سوالات: {toPersianDigits(assignment.questions?.length || 0)} سوال · بارم:{' '}
+                              {toPersianDigits(assignment.totalPoints || 20)} نمره
+                            </span>
+                            {assignment.dueDate && (
+                              <div className="mt-1 text-blue-700 font-bold">
+                                ⏰ مهلت تحویل: {toPersianDigits(new Date(assignment.dueDate).toLocaleString('fa-IR'))}
+                              </div>
+                            )}
+                          </div>
                         </div>
-                      )
-                    })}
+
+                        <button
+                          type="button"
+                          className="w-full py-2 px-3 text-xs font-black text-white bg-blue-600 hover:bg-blue-700 rounded-xl shadow-xs transition-colors cursor-pointer inline-flex items-center justify-center gap-1.5"
+                          onClick={() => setTakingExam(assignment)}
+                        >
+                          {isApproved
+                            ? '📊 مشاهده کارنامه و نمره'
+                            : isSubmitted
+                            ? '✏️ مشاهده یا ویرایش پاسخ‌ها'
+                            : isQuizMode
+                            ? '📝 ورود و شروع آزمون'
+                            : '📝 ورود و شروع حل تکلیف تعاملی'}
+                        </button>
+                      </div>
+                    )
+                  })}
                 </div>
               </div>
             )}
 
-            {homeworkPosts.length === 0 && activeExams.filter((e) => e.mode === 'assignment').length === 0 && (
+            {homeworkPosts.length === 0 && activeExams.length === 0 && (
               <div className="bg-white border border-slate-200/80 rounded-2xl p-8 text-center shadow-xs">
                 <div className="w-14 h-14 mx-auto mb-3 rounded-2xl bg-slate-50 text-slate-400 flex items-center justify-center text-2xl shadow-2xs">
                   📝

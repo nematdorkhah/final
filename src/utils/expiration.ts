@@ -15,27 +15,31 @@ export function isItemExpiredForStudent(
   if (item.isExpired) return true
 
   const now = Date.now()
+  const graceMs = (daysLimit && daysLimit > 0 ? daysLimit : 0) * 24 * 60 * 60 * 1000
 
   // 1. Check explicit due date/deadline if present
   const dueStr = item.due_at || item.due_date || item.dueDate || item.deadline
   if (dueStr) {
     try {
       const dueTime = new Date(dueStr).getTime()
-      if (!isNaN(dueTime) && dueTime < now) {
-        return true
+      if (!isNaN(dueTime)) {
+        // If daysLimit is specified, item remains visible for daysLimit days after due date/deadline
+        if (now > dueTime + graceMs) {
+          return true
+        }
+        return false
       }
     } catch {}
   }
 
-  // 2. Check days limit from creation if specified
+  // 2. Check days limit from creation if specified and no due date
   if (daysLimit && daysLimit > 0) {
     const createdStr = item.created_at || item.createdAt
     if (createdStr) {
       try {
         const createdTime = new Date(createdStr).getTime()
         if (!isNaN(createdTime)) {
-          const maxAgeMs = daysLimit * 24 * 60 * 60 * 1000
-          if (now - createdTime > maxAgeMs) {
+          if (now - createdTime > graceMs) {
             return true
           }
         }
@@ -45,3 +49,4 @@ export function isItemExpiredForStudent(
 
   return false
 }
+

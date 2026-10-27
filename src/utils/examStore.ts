@@ -8,6 +8,7 @@ import {
   isClientGeminiEnabled,
   callGeminiDirectClient,
   translateGeminiError,
+  getStoredTeacherPassword,
 } from '../services/geminiHybridService'
 
 const EXAMS_STORAGE_KEY = 'school_classroom_exams_v1'
@@ -36,55 +37,109 @@ export function saveLocalExams(exams: Exam[]) {
   }
 }
 
+/**
+ * Extracts exams from any list of Supabase posts (either dedicated 'exam' posts or '__SYSTEM_EXAMS__' array post)
+ */
+export function extractExamsFromPosts(posts: any[]): Exam[] {
+  const examsMap = new Map<string, Exam>()
+  if (!Array.isArray(posts)) return []
+
+  for (const p of posts) {
+    if (!p) continue
+    // 1. Array of exams stored in __SYSTEM_EXAMS__ container post
+    if (p.title === '__SYSTEM_EXAMS__' && p.body) {
+      try {
+        const arr = typeof p.body === 'string' ? JSON.parse(p.body) : p.body
+        if (Array.isArray(arr)) {
+          arr.forEach((item) => {
+            if (item && item.id && Array.isArray(item.questions)) {
+              examsMap.set(item.id, { ...item, published: item.published !== false })
+            }
+          })
+        }
+      } catch (e) {
+        console.warn('Failed parsing __SYSTEM_EXAMS__ body', e)
+      }
+    }
+
+    // 2. Individual exam post (type === 'exam' or title starting with 📝 آزمون)
+    const isExamPost =
+      p.type === 'exam' ||
+      (typeof p.title === 'string' && (p.title.includes('آزمون:') || p.title.startsWith('📝 آزمون')))
+    if (isExamPost && p.body) {
+      try {
+        const parsed = typeof p.body === 'string' ? JSON.parse(p.body) : p.body
+        if (parsed && parsed.id && Array.isArray(parsed.questions)) {
+          examsMap.set(parsed.id, { ...parsed, published: parsed.published !== false })
+        }
+      } catch {}
+    }
+  }
+
+  return Array.from(examsMap.values())
+}
+
 export async function fetchAllExams(teacherPassword?: string): Promise<Exam[]> {
   const local = getLocalExams()
-  const teacherPass =
-    teacherPassword ||
-    (typeof window !== 'undefined' ? sessionStorage.getItem('teacherPassword') || '' : '')
+  const teacherPass = getStoredTeacherPassword(teacherPassword)
+  const mergedMap = new Map<string, Exam>()
+  local.forEach((e) => mergedMap.set(e.id, e))
 
+  console.log('[ExamStore:fetchAllExams] Syncing exams from all available backends...')
+
+  // 1. Try server exams endpoint
   try {
-    // 1. Try server exams endpoint
     const headers: Record<string, string> = {}
     if (teacherPass) {
       headers['x-teacher-password'] = teacherPass
     }
-    const res = await fetch(`/api/exams?role=teacher${teacherPass ? `&teacherPassword=${encodeURIComponent(teacherPass)}` : ''}`, {
-      headers,
-    })
+    const res = await fetch(
+      `/api/exams?role=teacher${teacherPass ? `&teacherPassword=${encodeURIComponent(teacherPass)}` : ''}`,
+      { headers }
+    )
     if (res.ok) {
       const data = await res.json()
       if (data.success && Array.isArray(data.exams) && data.exams.length > 0) {
-        saveLocalExams(data.exams)
-        return data.exams
+        data.exams.forEach((e: Exam) => mergedMap.set(e.id, e))
+        console.log(`[ExamStore:fetchAllExams] Synced ${data.exams.length} exams from /api/exams`)
       }
     }
   } catch (err) {
-    console.warn('Could not sync with /api/exams, falling back to Supabase/local', err)
+    console.warn('[ExamStore:fetchAllExams] /api/exams sync skipped:', err)
   }
 
-  try {
-    const { data: posts } = await supabase.from('posts').select('*').eq('type', 'exam')
-    if (posts && posts.length > 0) {
-      const mergedMap = new Map<string, Exam>()
-      local.forEach((e) => mergedMap.set(e.id, e))
-      posts.forEach((p: any) => {
-        try {
-          const parsed = JSON.parse(p.body)
-          if (parsed && parsed.id) {
-            mergedMap.set(parsed.id, parsed)
-          }
-        } catch {
-          // ignore
-        }
+  // 2. Query Supabase teacher_list_posts if teacher password is present
+  if (teacherPass) {
+    try {
+      const { data: posts, error } = await supabase.rpc('teacher_list_posts', {
+        p_password: teacherPass,
       })
-      const merged = Array.from(mergedMap.values())
-      saveLocalExams(merged)
-      return merged
+      if (!error && Array.isArray(posts) && posts.length > 0) {
+        const extracted = extractExamsFromPosts(posts)
+        extracted.forEach((e) => mergedMap.set(e.id, e))
+        console.log(`[ExamStore:fetchAllExams] Synced ${extracted.length} exams from Supabase teacher_list_posts`)
+      }
+    } catch (err) {
+      console.warn('[ExamStore:fetchAllExams] Supabase teacher_list_posts skipped:', err)
+    }
+  }
+
+  // 3. Query Supabase list_published_posts as universal fallback
+  try {
+    const { data: pubPosts, error } = await supabase.rpc('list_published_posts')
+    if (!error && Array.isArray(pubPosts) && pubPosts.length > 0) {
+      const extracted = extractExamsFromPosts(pubPosts)
+      extracted.forEach((e) => {
+        if (!mergedMap.has(e.id)) mergedMap.set(e.id, e)
+      })
     }
   } catch (err) {
-    console.warn('Could not sync exams with Supabase posts, using local copy', err)
+    console.warn('[ExamStore:fetchAllExams] Supabase list_published_posts skipped:', err)
   }
-  return local
+
+  const merged = Array.from(mergedMap.values())
+  saveLocalExams(merged)
+  return merged
 }
 
 export function isPromptLike(text: string): boolean {
@@ -117,37 +172,73 @@ export function sanitizeExamTitle(title: string, subject?: string): string {
 }
 
 export async function fetchPublishedExams(forStudent = true): Promise<Exam[]> {
+  console.log('[ExamStore:fetchPublishedExams] Fetching published exams, forStudent:', forStudent)
+  const local = getLocalExams()
+  const mergedMap = new Map<string, Exam>()
+  local.filter((e) => e.published).forEach((e) => mergedMap.set(e.id, e))
+
+  // 1. Try server student endpoint
   if (forStudent) {
     try {
-      // SECURITY FIX: Request sanitized exams with answer keys stripped
       const res = await fetch('/api/exams?role=student')
       if (res.ok) {
         const data = await res.json()
         if (data.success && Array.isArray(data.exams)) {
-          return data.exams
+          data.exams.forEach((e: Exam) => mergedMap.set(e.id, e))
+          console.log(`[ExamStore:fetchPublishedExams] Synced ${data.exams.length} exams from /api/exams`)
         }
       }
     } catch (err) {
-      console.warn('Failed to fetch student exams from server, falling back to local sanitized', err)
+      console.warn('[ExamStore:fetchPublishedExams] /api/exams?role=student skipped:', err)
     }
   }
 
-  const all = await fetchAllExams()
-  const published = all.filter((e) => e.published)
+  // 2. Query Supabase list_published_posts (WORKS FOR MOBILE & INCOGNITO ON ALL DEVICES)
+  try {
+    const { data: posts, error } = await supabase.rpc('list_published_posts')
+    if (!error && Array.isArray(posts) && posts.length > 0) {
+      const extracted = extractExamsFromPosts(posts)
+      extracted.forEach((e) => mergedMap.set(e.id, e))
+      console.log(`[ExamStore:fetchPublishedExams] Synced ${extracted.length} exams from Supabase list_published_posts`)
+    }
+  } catch (err) {
+    console.warn('[ExamStore:fetchPublishedExams] Supabase list_published_posts error:', err)
+  }
+
+  // 3. Fallback to full fetch if still empty
+  if (mergedMap.size === 0) {
+    const all = await fetchAllExams()
+    all.filter((e) => e.published).forEach((e) => mergedMap.set(e.id, e))
+  }
+
+  const resolved = Array.from(mergedMap.values())
+  if (resolved.length > 0) {
+    // Keep local cache fresh
+    const allLocal = getLocalExams()
+    const allLocalMap = new Map<string, Exam>()
+    allLocal.forEach((e) => allLocalMap.set(e.id, e))
+    resolved.forEach((e) => allLocalMap.set(e.id, { ...allLocalMap.get(e.id), ...e }))
+    saveLocalExams(Array.from(allLocalMap.values()))
+  }
+
+  console.log(`[ExamStore:fetchPublishedExams] Total published exams resolved: ${resolved.length}`)
+
   if (forStudent) {
-    // Client-side sanitization fallback
-    return published.map((exam) => ({
+    // Client-side sanitization: strip correct answers so inspect element never leaks answers
+    return resolved.map((exam) => ({
       ...exam,
-      questions: exam.questions.map((q) => {
+      questions: (exam.questions || []).map((q) => {
         const { correctAnswer, rubricOrHint, ...safeQ } = q as any
         return safeQ as ExamQuestion
       }),
     }))
   }
-  return published
+
+  return resolved
 }
 
 export async function saveExam(exam: Exam, teacherPassword?: string): Promise<void> {
+  console.log('[ExamStore:saveExam] Saving exam:', exam.id, exam.title)
   const current = getLocalExams()
   const idx = current.findIndex((e) => e.id === exam.id)
   if (idx >= 0) {
@@ -157,36 +248,93 @@ export async function saveExam(exam: Exam, teacherPassword?: string): Promise<vo
   }
   saveLocalExams(current)
 
-  const teacherPass =
-    teacherPassword ||
-    (typeof window !== 'undefined' ? sessionStorage.getItem('teacherPassword') || '' : '')
+  const teacherPass = getStoredTeacherPassword(teacherPassword)
 
+  // 1. Sync to Express server backend (/api/exams/save)
   try {
-    await fetch('/api/exams/save', {
+    const res = await fetch('/api/exams/save', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'x-teacher-password': teacherPass,
+        Authorization: `Bearer ${teacherPass}`,
       },
       body: JSON.stringify({ exam, teacherPassword: teacherPass }),
     })
+    if (res.ok) {
+      console.log('[ExamStore:saveExam] Synced to server backend /api/exams/save successfully')
+    }
   } catch (e) {
-    console.warn('Failed to sync exam to server /api/exams/save', e)
+    console.warn('[ExamStore:saveExam] Server sync warning (will rely on Supabase):', e)
   }
 
+  // 2. Direct Sync to Supabase Posts table (CRITICAL FOR CROSS-DEVICE & INCOGNITO)
   if (teacherPass) {
+    const examPostTitle = `📝 آزمون: ${exam.title} (${exam.subject})`
+    const examBodyJson = JSON.stringify(exam)
+    const calculatedDueAt =
+      exam.dueDate ||
+      new Date(
+        new Date(exam.scheduledStartTime).getTime() + (Number(exam.durationMinutes) || 30) * 60000
+      ).toISOString()
+
     try {
-      await supabase.rpc('teacher_create_post', {
-        p_password: teacherPass,
-        p_type: 'exam',
-        p_title: `📝 آزمون: ${exam.title} (${exam.subject})`,
-        p_body: JSON.stringify(exam),
-        p_due_at: new Date(new Date(exam.scheduledStartTime).getTime() + (Number(exam.durationMinutes) || 30) * 60000).toISOString(),
-        p_publish_at: new Date(exam.scheduledStartTime).toISOString(),
-        p_attachment_path: null,
-      })
+      // Find existing exam post to update instead of duplicating
+      let existingPostId: string | null = null
+      try {
+        const { data: posts } = await supabase.rpc('teacher_list_posts', {
+          p_password: teacherPass,
+        })
+        if (Array.isArray(posts)) {
+          const found = posts.find(
+            (p: any) =>
+              p.title === examPostTitle ||
+              (p.type === 'exam' && p.body && p.body.includes(`"id":"${exam.id}"`))
+          )
+          if (found?.id) existingPostId = found.id
+        }
+      } catch {}
+
+      if (existingPostId) {
+        await supabase.rpc('teacher_update_post', {
+          p_password: teacherPass,
+          p_post_id: existingPostId,
+          p_title: examPostTitle,
+          p_body: examBodyJson,
+          p_type: 'exam',
+          p_due_at: calculatedDueAt,
+          p_publish_at: new Date().toISOString(), // CRITICAL: Publish NOW so student queries return it immediately!
+          p_attachment_path: null,
+        })
+        console.log('[ExamStore:saveExam] Updated existing exam post in Supabase:', existingPostId)
+      } else {
+        await supabase.rpc('teacher_create_post', {
+          p_password: teacherPass,
+          p_type: 'exam',
+          p_title: examPostTitle,
+          p_body: examBodyJson,
+          p_due_at: calculatedDueAt,
+          p_publish_at: new Date().toISOString(), // CRITICAL: Publish NOW so student queries return it immediately!
+          p_attachment_path: null,
+        })
+        console.log('[ExamStore:saveExam] Created new exam post in Supabase')
+      }
+
+      // Also sync __SYSTEM_EXAMS__ container post in Supabase for 100% redundancy
+      try {
+        const allExams = getLocalExams()
+        await supabase.rpc('teacher_create_post', {
+          p_password: teacherPass,
+          p_type: 'announcement',
+          p_title: '__SYSTEM_EXAMS__',
+          p_body: JSON.stringify(allExams),
+          p_due_at: null,
+          p_publish_at: new Date().toISOString(),
+          p_attachment_path: null,
+        })
+      } catch {}
     } catch (e) {
-      console.warn('Supabase post sync for exam failed, local exam saved', e)
+      console.warn('[ExamStore:saveExam] Supabase post sync for exam failed:', e)
     }
   }
 }
@@ -818,7 +966,7 @@ export function computeInstantExamResult(
         questionFeedbacks[q.id] = '✅ پاسخ جای‌خالی کاملاً درست است.'
       } else if (studentText.length > 0) {
         // Optimistic partial credit for effort while AI/teacher reviews
-        const partial = Math.round(qPts * 0.7 * 10) / 10
+        const partial = Math.round((qPts * 0.7) * 10) / 10
         earnedPoints += partial
         questionScores[q.id] = partial
         questionFeedbacks[q.id] = `🔍 پاسخ ثبت شد (ارزیابی اولیه: ${partial} از ${qPts})`
@@ -844,7 +992,7 @@ export function computeInstantExamResult(
       // Descriptive, image, open-ended
       if (hasText || hasImage) {
         const textLen = String(ans?.textAnswer || '').trim().length
-        const estimatedScore = textLen > 25 || hasImage ? qPts : Math.round(qPts * 0.6 * 10) / 10
+        const estimatedScore = textLen > 25 || hasImage ? qPts : Math.round((qPts * 0.6) * 10) / 10
         earnedPoints += estimatedScore
         questionScores[q.id] = estimatedScore
         questionFeedbacks[q.id] = hasImage

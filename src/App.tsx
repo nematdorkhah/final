@@ -160,6 +160,11 @@ export default function App() {
           setTeacherAuthed(true)
           setRoleMode('teacher')
           setIsLoading(false)
+          try {
+            sessionStorage.setItem('teacherAuthed', '1')
+            sessionStorage.setItem('teacherPassword', stored.teacherPassword)
+            localStorage.setItem('teacher_password', stored.teacherPassword)
+          } catch {}
         } else if (stored.role === 'student' && stored.student) {
           setStudent(stored.student)
           setRoleMode('student')

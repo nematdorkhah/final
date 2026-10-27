@@ -535,6 +535,7 @@ export default function TeacherDashboard({
                   grades={combinedGrades}
                   allAttendance={allAttendance}
                   weakSubjects={weakSubjects}
+                  teacherPassword={teacherPassword}
                 />
               ) : (
                 <AiPracticeForm

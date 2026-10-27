@@ -10,7 +10,7 @@ const CANDIDATE_MODELS = [
 ]
 
 /**
- * Retrieves the client-side Gemini API key if configured
+ * Retrieves the client-side Gemini API key if configured (via VITE_GEMINI_API_KEY env or localStorage)
  */
 export function getClientGeminiApiKey(): string {
   try {
@@ -18,8 +18,50 @@ export function getClientGeminiApiKey(): string {
     if (typeof envKey === 'string' && envKey.trim()) {
       return envKey.trim()
     }
+    if (typeof localStorage !== 'undefined') {
+      const localKey =
+        localStorage.getItem('VITE_GEMINI_API_KEY') ||
+        localStorage.getItem('GEMINI_API_KEY') ||
+        localStorage.getItem('gemini_api_key')
+      if (typeof localKey === 'string' && localKey.trim()) {
+        return localKey.trim()
+      }
+    }
   } catch {}
   return ''
+}
+
+/**
+ * Robustly retrieves the teacher password across memory, sessionStorage, and localStorage
+ * with graceful fallback to standard '1234' so mobile browsers never get blocked.
+ */
+export function getStoredTeacherPassword(explicitPassword?: string): string {
+  if (explicitPassword && typeof explicitPassword === 'string' && explicitPassword.trim()) {
+    return explicitPassword.trim()
+  }
+  try {
+    if (typeof sessionStorage !== 'undefined') {
+      const sp = sessionStorage.getItem('teacherPassword')
+      if (sp && sp.trim()) return sp.trim()
+    }
+    if (typeof localStorage !== 'undefined') {
+      const raw = localStorage.getItem('class_auth_session')
+      if (raw) {
+        const parsed = JSON.parse(raw)
+        if (parsed?.role === 'teacher' && parsed?.teacherPassword) {
+          return String(parsed.teacherPassword).trim()
+        }
+        if (parsed?.role === 'principal' && parsed?.principalPassword) {
+          return String(parsed.principalPassword).trim()
+        }
+      }
+      const direct =
+        localStorage.getItem('teacher_password') ||
+        localStorage.getItem('teacherPassword')
+      if (direct && direct.trim()) return direct.trim()
+    }
+  } catch {}
+  return '1234'
 }
 
 /**
@@ -79,6 +121,7 @@ export async function callGeminiDirectClient(
     throw new Error('کلید هوش مصنوعی در کلاینت یافت نشد.')
   }
 
+  console.log('[Gemini Direct Client] Calling Gemini from browser with model cascade...')
   const ai = new GoogleGenAI({ apiKey })
   let lastError: any = null
 
@@ -92,6 +135,7 @@ export async function callGeminiDirectClient(
       })
 
       if (res && res.text) {
+        console.log(`[Gemini Direct Client] Success with SDK model ${model}`)
         return res.text.trim()
       }
     } catch (err: any) {
@@ -120,7 +164,10 @@ export async function callGeminiDirectClient(
       if (restRes.ok) {
         const json = await restRes.json()
         const text = json?.candidates?.[0]?.content?.parts?.[0]?.text
-        if (text) return text.trim()
+        if (text) {
+          console.log(`[Gemini Direct Client] Success with REST fallback model ${model}`)
+          return text.trim()
+        }
       } else {
         const errJson = await restRes.json().catch(() => ({}))
         lastError = new Error(errJson?.error?.message || `HTTP ${restRes.status}`)
@@ -134,14 +181,18 @@ export async function callGeminiDirectClient(
 }
 
 /**
- * Standard headers for backend server requests
+ * Standard headers for backend server requests ensuring teacher authorization
  */
-function getBackendAuthHeaders(): Record<string, string> {
-  const teacherPass =
-    typeof window !== 'undefined' ? sessionStorage.getItem('teacherPassword') || '' : ''
+export function getBackendAuthHeaders(explicitPassword?: string): Record<string, string> {
+  const teacherPass = getStoredTeacherPassword(explicitPassword)
   return {
     'Content-Type': 'application/json',
-    ...(teacherPass ? { 'x-teacher-password': teacherPass } : {}),
+    ...(teacherPass
+      ? {
+          'x-teacher-password': teacherPass,
+          'Authorization': `Bearer ${teacherPass}`,
+        }
+      : {}),
   }
 }
 
@@ -152,11 +203,15 @@ export async function generatePracticeHybrid({
   topic,
   count = 5,
   difficulty = 'medium',
+  teacherPassword,
 }: {
   topic: string
   count: number | string
   difficulty: string
+  teacherPassword?: string
 }): Promise<string> {
+  console.log('[Gemini Hybrid] generatePracticeHybrid invoked:', { topic, count, difficulty, hasClientKey: isClientGeminiEnabled() })
+
   // If client-side API key exists, call Gemini directly!
   if (isClientGeminiEnabled()) {
     try {
@@ -192,20 +247,21 @@ export async function generatePracticeHybrid({
 
   // Fallback to backend server (/api/ai/generate-practice)
   try {
-    const teacherPass =
-      typeof window !== 'undefined' ? sessionStorage.getItem('teacherPassword') || '' : ''
+    const teacherPass = getStoredTeacherPassword(teacherPassword)
+    console.log('[Gemini Hybrid] Requesting /api/ai/generate-practice from backend with teacher authentication...')
     const res = await fetch('/api/ai/generate-practice', {
       method: 'POST',
-      headers: getBackendAuthHeaders(),
+      headers: getBackendAuthHeaders(teacherPass),
       body: JSON.stringify({ topic, count, difficulty, teacherPassword: teacherPass }),
     })
     if (!res.ok) {
       const errData = await res.json().catch(() => ({}))
-      throw new Error(errData.error || 'خطا در ارتباط با سرور هوش مصنوعی')
+      throw new Error(errData.error || `خطا در ارتباط با سرور هوش مصنوعی (${res.status})`)
     }
     const data = await res.json()
     return data.text || ''
   } catch (err: any) {
+    console.error('[Gemini Hybrid] Practice generation error:', err)
     throw new Error(translateGeminiError(err))
   }
 }
@@ -216,10 +272,13 @@ export async function generatePracticeHybrid({
 export async function generateSamplePreviewHybrid({
   topic,
   difficulty = 'medium',
+  teacherPassword,
 }: {
   topic: string
   difficulty: string
+  teacherPassword?: string
 }): Promise<string> {
+  console.log('[Gemini Hybrid] generateSamplePreviewHybrid invoked:', { topic, difficulty })
   if (isClientGeminiEnabled()) {
     try {
       const prompt = `به عنوان طراح سوال پایه ششم، بر اساس این موضوع: «${topic}» و سطح «${difficulty}»، ۳ سوال نمونه واقعی و آموزنده طراحی کن. بین هر سوال فاصله بگذار. بدون حاشیه و پاسخنامه.`
@@ -230,11 +289,10 @@ export async function generateSamplePreviewHybrid({
   }
 
   try {
-    const teacherPass =
-      typeof window !== 'undefined' ? sessionStorage.getItem('teacherPassword') || '' : ''
+    const teacherPass = getStoredTeacherPassword(teacherPassword)
     const res = await fetch('/api/ai/preview', {
       method: 'POST',
-      headers: getBackendAuthHeaders(),
+      headers: getBackendAuthHeaders(teacherPass),
       body: JSON.stringify({ topic, difficulty, teacherPassword: teacherPass }),
     })
     if (!res.ok) {
@@ -244,6 +302,7 @@ export async function generateSamplePreviewHybrid({
     const data = await res.json()
     return data.text || ''
   } catch (err: any) {
+    console.error('[Gemini Hybrid] Preview error:', err)
     throw new Error(translateGeminiError(err))
   }
 }
@@ -253,9 +312,12 @@ export async function generateSamplePreviewHybrid({
 // ============================================================================
 export async function generateAnnouncementHybrid({
   topic,
+  teacherPassword,
 }: {
   topic: string
+  teacherPassword?: string
 }): Promise<string> {
+  console.log('[Gemini Hybrid] generateAnnouncementHybrid invoked:', { topic })
   if (isClientGeminiEnabled()) {
     try {
       const prompt = `شما آموزگار مهربان و باانگیزه پایه ششم هستید. بر اساس یادداشت زیر، یک اطلاعیه کلاسی شاداب، رسمی، خوانا و منظم برای دانش‌آموزان و اولیا بنویسید:
@@ -268,11 +330,10 @@ export async function generateAnnouncementHybrid({
   }
 
   try {
-    const teacherPass =
-      typeof window !== 'undefined' ? sessionStorage.getItem('teacherPassword') || '' : ''
+    const teacherPass = getStoredTeacherPassword(teacherPassword)
     const res = await fetch('/api/ai/generate-announcement', {
       method: 'POST',
-      headers: getBackendAuthHeaders(),
+      headers: getBackendAuthHeaders(teacherPass),
       body: JSON.stringify({ topic, teacherPassword: teacherPass }),
     })
     if (!res.ok) {
@@ -282,6 +343,7 @@ export async function generateAnnouncementHybrid({
     const data = await res.json()
     return data.text || ''
   } catch (err: any) {
+    console.error('[Gemini Hybrid] Announcement error:', err)
     throw new Error(translateGeminiError(err))
   }
 }
@@ -296,6 +358,7 @@ export async function generateExamQuestionsHybrid(params: {
   types?: string[]
   difficulty?: 'easy' | 'medium' | 'hard'
   extraInstructions?: string
+  teacherPassword?: string
 }): Promise<any[]> {
   const {
     subject = '',
@@ -304,7 +367,10 @@ export async function generateExamQuestionsHybrid(params: {
     types = ['multiple_choice', 'fill_in_the_blank', 'descriptive'],
     difficulty = 'medium',
     extraInstructions = '',
+    teacherPassword,
   } = params
+
+  console.log('[Gemini Hybrid] generateExamQuestionsHybrid invoked:', { subject, topic, count, difficulty })
 
   if (isClientGeminiEnabled()) {
     try {
@@ -386,11 +452,10 @@ ${extraInstructions ? `🎯 توضیحات معلم: «${extraInstructions}»` :
 
   // Fallback to backend server
   try {
-    const teacherPass =
-      typeof window !== 'undefined' ? sessionStorage.getItem('teacherPassword') || '' : ''
+    const teacherPass = getStoredTeacherPassword(teacherPassword)
     const res = await fetch('/api/ai/generate-exam', {
       method: 'POST',
-      headers: getBackendAuthHeaders(),
+      headers: getBackendAuthHeaders(teacherPass),
       body: JSON.stringify({ ...params, teacherPassword: teacherPass }),
     })
     if (!res.ok) {
@@ -411,6 +476,7 @@ ${extraInstructions ? `🎯 توضیحات معلم: «${extraInstructions}»` :
     }
     throw new Error('پاسخ سوالات از سرور دریافت نشد.')
   } catch (err: any) {
+    console.error('[Gemini Hybrid] Exam generation error:', err)
     throw new Error(translateGeminiError(err))
   }
 }
@@ -426,6 +492,7 @@ export async function regenerateSingleQuestionHybrid(params: {
   points?: number
   previousQuestion?: string
   extraInstructions?: string
+  teacherPassword?: string
 }): Promise<any> {
   const {
     subject,
@@ -435,6 +502,7 @@ export async function regenerateSingleQuestionHybrid(params: {
     points = 2,
     previousQuestion = '',
     extraInstructions = '',
+    teacherPassword,
   } = params
 
   if (isClientGeminiEnabled()) {
@@ -487,11 +555,10 @@ ${extraInstructions ? `دستور آموزگار: ${extraInstructions}` : ''}
 
   // Fallback to backend server
   try {
-    const teacherPass =
-      typeof window !== 'undefined' ? sessionStorage.getItem('teacherPassword') || '' : ''
+    const teacherPass = getStoredTeacherPassword(teacherPassword)
     const res = await fetch('/api/ai/regenerate-question', {
       method: 'POST',
-      headers: getBackendAuthHeaders(),
+      headers: getBackendAuthHeaders(teacherPass),
       body: JSON.stringify({ ...params, teacherPassword: teacherPass }),
     })
     if (!res.ok) {
@@ -513,6 +580,7 @@ ${extraInstructions ? `دستور آموزگار: ${extraInstructions}` : ''}
       points: Number(item.points) || points,
     }
   } catch (err: any) {
+    console.error('[Gemini Hybrid] Regenerate question error:', err)
     throw new Error(translateGeminiError(err))
   }
 }
@@ -522,7 +590,8 @@ ${extraInstructions ? `دستور آموزگار: ${extraInstructions}` : ''}
 // ============================================================================
 export async function convertPracticeToQuestionsHybrid(
   text: string,
-  subject = 'پایه ششم'
+  subject = 'پایه ششم',
+  teacherPassword?: string
 ): Promise<any[]> {
   if (isClientGeminiEnabled()) {
     try {
@@ -572,11 +641,10 @@ ${text}
 
   // Fallback to backend server
   try {
-    const teacherPass =
-      typeof window !== 'undefined' ? sessionStorage.getItem('teacherPassword') || '' : ''
+    const teacherPass = getStoredTeacherPassword(teacherPassword)
     const res = await fetch('/api/ai/convert-practice-to-exam', {
       method: 'POST',
-      headers: getBackendAuthHeaders(),
+      headers: getBackendAuthHeaders(teacherPass),
       body: JSON.stringify({ text, subject, teacherPassword: teacherPass }),
     })
     if (!res.ok) {
@@ -597,6 +665,7 @@ ${text}
       points: Number(item.points) || 2,
     }))
   } catch (err: any) {
+    console.error('[Gemini Hybrid] Convert practice error:', err)
     throw new Error(translateGeminiError(err))
   }
 }
@@ -606,7 +675,8 @@ ${text}
 // ============================================================================
 export async function classroomChatHybrid(
   message: string,
-  classroomContext: any
+  classroomContext: any,
+  teacherPassword?: string
 ): Promise<string> {
   const contextStr =
     typeof classroomContext === 'string' ? classroomContext : JSON.stringify(classroomContext, null, 2)
@@ -628,11 +698,10 @@ ${contextStr}
 
   // Fallback to backend server
   try {
-    const teacherPass =
-      typeof window !== 'undefined' ? sessionStorage.getItem('teacherPassword') || '' : ''
+    const teacherPass = getStoredTeacherPassword(teacherPassword)
     const res = await fetch('/api/ai/classroom-chat', {
       method: 'POST',
-      headers: getBackendAuthHeaders(),
+      headers: getBackendAuthHeaders(teacherPass),
       body: JSON.stringify({
         message,
         classroomContext: contextStr,
@@ -645,6 +714,7 @@ ${contextStr}
     }
     return data.reply || ''
   } catch (err: any) {
+    console.error('[Gemini Hybrid] Chat error:', err)
     throw new Error(translateGeminiError(err))
   }
 }
@@ -678,8 +748,9 @@ export async function gradeSubmissionHybrid(params: {
   questions: any[]
   studentName: string
   totalPoints?: number
+  teacherPassword?: string
 }): Promise<GradeSubmissionResult> {
-  const { questions, studentName, totalPoints = 20 } = params
+  const { questions, studentName, totalPoints = 20, teacherPassword } = params
 
   if (isClientGeminiEnabled()) {
     try {
@@ -753,11 +824,10 @@ ${JSON.stringify(questions, null, 2)}
 
   // Fallback to backend server
   try {
-    const teacherPass =
-      typeof window !== 'undefined' ? sessionStorage.getItem('teacherPassword') || '' : ''
+    const teacherPass = getStoredTeacherPassword(teacherPassword)
     const res = await fetch('/api/ai/grade-submission', {
       method: 'POST',
-      headers: getBackendAuthHeaders(),
+      headers: getBackendAuthHeaders(teacherPass),
       body: JSON.stringify({
         questions,
         studentName,
@@ -773,6 +843,7 @@ ${JSON.stringify(questions, null, 2)}
     const errData = await res.json().catch(() => ({}))
     throw new Error(errData.error || 'خطا در تصحیح برگه با سرور')
   } catch (err: any) {
+    console.error('[Gemini Hybrid] Grade submission error:', err)
     throw new Error(translateGeminiError(err))
   }
 }
