@@ -13,7 +13,14 @@ import ExamReviewModal from '../components/ExamReviewModal'
 import StudentReportCard from '../components/StudentReportCard'
 import MathRenderer from '../components/MathRenderer'
 import { Exam } from '../types/examTypes'
-import { fetchPublishedExams, getStudentExamSubmission, sanitizeExamTitle, getLocalExams, getLocalSubmissions } from '../utils/examStore'
+import {
+  fetchPublishedExams,
+  getStudentExamSubmission,
+  sanitizeExamTitle,
+  getLocalExams,
+  getLocalSubmissions,
+  flushPendingExamSyncQueue,
+} from '../utils/examStore'
 import { isItemExpiredForStudent } from '../utils/expiration'
 import { sanitizeTeacherFeedback } from '../utils/cleanFeedback'
 import { toPersianDigits } from '../utils/persianNumbers'
@@ -263,6 +270,7 @@ export default function StudentDashboard({
 
   useEffect(() => {
     loadAll()
+    flushPendingExamSyncQueue().catch(() => {})
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
