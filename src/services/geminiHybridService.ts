@@ -1,6 +1,6 @@
 import { GoogleGenAI } from '@google/genai'
 
-// Models to try in order (User requested gemini-1.5-flash, with automatic fallbacks)
+// Models to try in order (Prioritizing gemini-1.5-flash and gemini-2.5-flash as requested)
 const CANDIDATE_MODELS = [
   'gemini-1.5-flash',
   'gemini-2.5-flash',
@@ -10,25 +10,57 @@ const CANDIDATE_MODELS = [
 ]
 
 /**
- * Retrieves the client-side Gemini API key if configured (via VITE_GEMINI_API_KEY env or localStorage)
+ * Retrieves the client-side Gemini API key if configured
+ * Checks import.meta.env.VITE_GEMINI_API_KEY, localStorage, and sessionStorage.
  */
 export function getClientGeminiApiKey(): string {
   try {
-    const envKey = import.meta.env.VITE_GEMINI_API_KEY
-    if (typeof envKey === 'string' && envKey.trim()) {
+    const envKey = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_GEMINI_API_KEY) || ''
+    if (typeof envKey === 'string' && envKey.trim() && !envKey.includes('PLACEHOLDER')) {
       return envKey.trim()
     }
     if (typeof localStorage !== 'undefined') {
-      const localKey =
-        localStorage.getItem('VITE_GEMINI_API_KEY') ||
-        localStorage.getItem('GEMINI_API_KEY') ||
-        localStorage.getItem('gemini_api_key')
-      if (typeof localKey === 'string' && localKey.trim()) {
-        return localKey.trim()
+      const keys = [
+        'VITE_GEMINI_API_KEY',
+        'GEMINI_API_KEY',
+        'gemini_api_key',
+        'geminiApiKey',
+        'client_gemini_api_key',
+        'school_gemini_api_key',
+      ]
+      for (const k of keys) {
+        const val = localStorage.getItem(k)
+        if (typeof val === 'string' && val.trim()) {
+          return val.trim()
+        }
+      }
+    }
+    if (typeof sessionStorage !== 'undefined') {
+      const sessKey = sessionStorage.getItem('VITE_GEMINI_API_KEY') || sessionStorage.getItem('GEMINI_API_KEY')
+      if (typeof sessKey === 'string' && sessKey.trim()) {
+        return sessKey.trim()
       }
     }
   } catch {}
   return ''
+}
+
+/**
+ * Saves a client-side Gemini API key to localStorage for mobile browsers & standalone SPAs
+ */
+export function setClientGeminiApiKey(key: string): void {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const trimmed = key.trim()
+      if (trimmed) {
+        localStorage.setItem('VITE_GEMINI_API_KEY', trimmed)
+        localStorage.setItem('GEMINI_API_KEY', trimmed)
+      } else {
+        localStorage.removeItem('VITE_GEMINI_API_KEY')
+        localStorage.removeItem('GEMINI_API_KEY')
+      }
+    }
+  } catch {}
 }
 
 /**
@@ -83,7 +115,7 @@ export function translateGeminiError(err: any): string {
     msg.includes('Forbidden') ||
     msg.includes('not configured')
   ) {
-    return 'کلید هوش مصنوعی (API Key) معتبر نیست یا دسترسی آن محدود شده است. لطفاً متغیر VITE_GEMINI_API_KEY یا تنظیمات سرور را بررسی کنید.'
+    return 'کلید هوش مصنوعی (API Key) معتبر نیست یا دسترسی آن محدود شده است. لطفاً متغیر VITE_GEMINI_API_KEY یا تنظیمات کلید را بررسی کنید.'
   }
   if (
     msg.includes('RESOURCE_EXHAUSTED') ||
@@ -110,7 +142,7 @@ export function translateGeminiError(err: any): string {
 
 /**
  * Calls Google Gen AI directly from the frontend using the official @google/genai SDK
- * with automatic model fallback and REST fallback
+ * with cascading models and direct REST fallback. Full error details logged to console.
  */
 export async function callGeminiDirectClient(
   prompt: string,
@@ -118,16 +150,17 @@ export async function callGeminiDirectClient(
 ): Promise<string> {
   const apiKey = getClientGeminiApiKey()
   if (!apiKey) {
-    throw new Error('کلید هوش مصنوعی در کلاینت یافت نشد.')
+    throw new Error('کلید هوش مصنوعی در کلاینت یافت نشد. لطفاً VITE_GEMINI_API_KEY را در متغیرها تنظیم کنید.')
   }
 
   console.log('[Gemini Direct Client] Calling Gemini from browser with model cascade...')
   const ai = new GoogleGenAI({ apiKey })
   let lastError: any = null
 
-  // 1. Try with GoogleGenAI SDK through candidate models
+  // 1. Try with GoogleGenAI SDK through candidate models (gemini-1.5-flash and gemini-2.5-flash first)
   for (const model of CANDIDATE_MODELS) {
     try {
+      console.log(`[Gemini SDK] Attempting model: ${model}`)
       const res = await ai.models.generateContent({
         model,
         contents: prompt,
@@ -135,11 +168,11 @@ export async function callGeminiDirectClient(
       })
 
       if (res && res.text) {
-        console.log(`[Gemini Direct Client] Success with SDK model ${model}`)
+        console.log(`[Gemini SDK] Successfully generated content using model: ${model}`)
         return res.text.trim()
       }
     } catch (err: any) {
-      console.warn(`[Client-Gemini SDK] Model ${model} failed:`, err?.message || err)
+      console.warn(`[Gemini SDK Error] Model "${model}" failed:`, err?.message || err)
       lastError = err
     }
   }
@@ -147,6 +180,7 @@ export async function callGeminiDirectClient(
   // 2. Direct REST fallback if SDK encountered browser-level issue
   for (const model of CANDIDATE_MODELS) {
     try {
+      console.log(`[Gemini REST Fallback] Attempting direct REST fetch for model: ${model}`)
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`
       const bodyPayload: any = {
         contents: [{ parts: [{ text: prompt }] }],
@@ -165,19 +199,23 @@ export async function callGeminiDirectClient(
         const json = await restRes.json()
         const text = json?.candidates?.[0]?.content?.parts?.[0]?.text
         if (text) {
-          console.log(`[Gemini Direct Client] Success with REST fallback model ${model}`)
+          console.log(`[Gemini REST Fallback] Successfully generated content using model: ${model}`)
           return text.trim()
         }
       } else {
         const errJson = await restRes.json().catch(() => ({}))
+        console.error(`[Gemini REST Error] Model "${model}" returned HTTP ${restRes.status}:`, errJson)
         lastError = new Error(errJson?.error?.message || `HTTP ${restRes.status}`)
       }
     } catch (restErr: any) {
+      console.error(`[Gemini REST Error] Model "${model}" network/fetch error:`, restErr)
       lastError = restErr
     }
   }
 
-  throw new Error(translateGeminiError(lastError))
+  const translated = translateGeminiError(lastError)
+  console.error('[Gemini Direct Client] All candidate models failed. Final error:', translated, lastError)
+  throw new Error(translated)
 }
 
 /**
@@ -194,6 +232,54 @@ export function getBackendAuthHeaders(explicitPassword?: string): Record<string,
         }
       : {}),
   }
+}
+
+/**
+ * Safely calls backend AI route with content-type inspection and HTML 404 detection
+ * to prevent JSON parse errors on static hosting (Netlify/Cloudflare Workers).
+ */
+export async function callBackendAiSafe(
+  endpoint: string,
+  payload: any,
+  teacherPassword?: string
+): Promise<any> {
+  const teacherPass = getStoredTeacherPassword(teacherPassword)
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), 15000)
+
+  let res: Response
+  try {
+    res = await fetch(endpoint, {
+      method: 'POST',
+      headers: getBackendAuthHeaders(teacherPass),
+      body: JSON.stringify({ ...payload, teacherPassword: teacherPass }),
+      signal: controller.signal,
+    })
+  } catch (netErr: any) {
+    clearTimeout(timeoutId)
+    if (netErr?.name === 'AbortError') {
+      throw new Error('زمان انتظار ارتباط با سرور هوش مصنوعی به پایان رسید.')
+    }
+    throw new Error('عدم امکان برقراری ارتباط با سرور بک‌اند.')
+  } finally {
+    clearTimeout(timeoutId)
+  }
+
+  // Detect HTML response (happens when Netlify / Cloudflare SPA rewrite serves index.html on missing /api routes)
+  const contentType = res.headers.get('content-type') || ''
+  if (contentType.includes('text/html') || res.status === 404) {
+    console.warn(`[Gemini Hybrid] Endpoint ${endpoint} returned 404/HTML (Static deployment).`);
+    throw new Error(
+      'سرویس هوش مصنوعی نیازمند تنظیم کلید VITE_GEMINI_API_KEY است. به دلیل استقرار استاتیک (بدون سرور بک‌اند)، لطفاً کلید رسمی جمینای را در تنظیمات هاست یا مرورگر قرار دهید.'
+    )
+  }
+
+  if (!res.ok) {
+    const errData = await res.json().catch(() => ({}))
+    throw new Error(errData.error || `خطا در ارتباط با سرور هوش مصنوعی (${res.status})`)
+  }
+
+  return await res.json()
 }
 
 // ============================================================================
@@ -245,20 +331,14 @@ export async function generatePracticeHybrid({
     }
   }
 
-  // Fallback to backend server (/api/ai/generate-practice)
+  // Fallback to backend server (/api/ai/generate-practice) safely
   try {
-    const teacherPass = getStoredTeacherPassword(teacherPassword)
-    console.log('[Gemini Hybrid] Requesting /api/ai/generate-practice from backend with teacher authentication...')
-    const res = await fetch('/api/ai/generate-practice', {
-      method: 'POST',
-      headers: getBackendAuthHeaders(teacherPass),
-      body: JSON.stringify({ topic, count, difficulty, teacherPassword: teacherPass }),
-    })
-    if (!res.ok) {
-      const errData = await res.json().catch(() => ({}))
-      throw new Error(errData.error || `خطا در ارتباط با سرور هوش مصنوعی (${res.status})`)
-    }
-    const data = await res.json()
+    console.log('[Gemini Hybrid] Requesting /api/ai/generate-practice via safe backend call...')
+    const data = await callBackendAiSafe(
+      '/api/ai/generate-practice',
+      { topic, count, difficulty },
+      teacherPassword
+    )
     return data.text || ''
   } catch (err: any) {
     console.error('[Gemini Hybrid] Practice generation error:', err)
@@ -289,17 +369,11 @@ export async function generateSamplePreviewHybrid({
   }
 
   try {
-    const teacherPass = getStoredTeacherPassword(teacherPassword)
-    const res = await fetch('/api/ai/preview', {
-      method: 'POST',
-      headers: getBackendAuthHeaders(teacherPass),
-      body: JSON.stringify({ topic, difficulty, teacherPassword: teacherPass }),
-    })
-    if (!res.ok) {
-      const errData = await res.json().catch(() => ({}))
-      throw new Error(errData.error || 'خطا در دریافت پیش‌نمایش')
-    }
-    const data = await res.json()
+    const data = await callBackendAiSafe(
+      '/api/ai/preview',
+      { topic, difficulty },
+      teacherPassword
+    )
     return data.text || ''
   } catch (err: any) {
     console.error('[Gemini Hybrid] Preview error:', err)
@@ -330,17 +404,11 @@ export async function generateAnnouncementHybrid({
   }
 
   try {
-    const teacherPass = getStoredTeacherPassword(teacherPassword)
-    const res = await fetch('/api/ai/generate-announcement', {
-      method: 'POST',
-      headers: getBackendAuthHeaders(teacherPass),
-      body: JSON.stringify({ topic, teacherPassword: teacherPass }),
-    })
-    if (!res.ok) {
-      const errData = await res.json().catch(() => ({}))
-      throw new Error(errData.error || 'خطا در نگارش متن اعلان')
-    }
-    const data = await res.json()
+    const data = await callBackendAiSafe(
+      '/api/ai/generate-announcement',
+      { topic },
+      teacherPassword
+    )
     return data.text || ''
   } catch (err: any) {
     console.error('[Gemini Hybrid] Announcement error:', err)
@@ -450,19 +518,9 @@ ${extraInstructions ? `🎯 توضیحات معلم: «${extraInstructions}»` :
     }
   }
 
-  // Fallback to backend server
+  // Fallback to backend server safely
   try {
-    const teacherPass = getStoredTeacherPassword(teacherPassword)
-    const res = await fetch('/api/ai/generate-exam', {
-      method: 'POST',
-      headers: getBackendAuthHeaders(teacherPass),
-      body: JSON.stringify({ ...params, teacherPassword: teacherPass }),
-    })
-    if (!res.ok) {
-      const errData = await res.json().catch(() => ({}))
-      throw new Error(errData.error || `خطای سرور (${res.status})`)
-    }
-    const data = await res.json()
+    const data = await callBackendAiSafe('/api/ai/generate-exam', params, teacherPassword)
     if (data.success && Array.isArray(data.questions) && data.questions.length > 0) {
       return data.questions.map((item: any, idx: number) => ({
         id: item.id || `q_${Date.now()}_${idx + 1}`,
@@ -553,19 +611,9 @@ ${extraInstructions ? `دستور آموزگار: ${extraInstructions}` : ''}
     }
   }
 
-  // Fallback to backend server
+  // Fallback to backend server safely
   try {
-    const teacherPass = getStoredTeacherPassword(teacherPassword)
-    const res = await fetch('/api/ai/regenerate-question', {
-      method: 'POST',
-      headers: getBackendAuthHeaders(teacherPass),
-      body: JSON.stringify({ ...params, teacherPassword: teacherPass }),
-    })
-    if (!res.ok) {
-      const errData = await res.json().catch(() => ({}))
-      throw new Error(errData.error || 'خطا در بازتولید سوال با هوش مصنوعی')
-    }
-    const data = await res.json()
+    const data = await callBackendAiSafe('/api/ai/regenerate-question', params, teacherPassword)
     if (!data.success || !data.question) {
       throw new Error(data.error || 'پاسخ معتبری از سرور دریافت نشد')
     }
@@ -639,19 +687,13 @@ ${text}
     }
   }
 
-  // Fallback to backend server
+  // Fallback to backend server safely
   try {
-    const teacherPass = getStoredTeacherPassword(teacherPassword)
-    const res = await fetch('/api/ai/convert-practice-to-exam', {
-      method: 'POST',
-      headers: getBackendAuthHeaders(teacherPass),
-      body: JSON.stringify({ text, subject, teacherPassword: teacherPass }),
-    })
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}))
-      throw new Error(err.error || 'خطا در تبدیل تمرین به سوالات آزمون')
-    }
-    const data = await res.json()
+    const data = await callBackendAiSafe(
+      '/api/ai/convert-practice-to-exam',
+      { text, subject },
+      teacherPassword
+    )
     if (!data.success || !Array.isArray(data.questions) || data.questions.length === 0) {
       throw new Error('سوال معتبری از متن کاربرگ استخراج نشد.')
     }
@@ -696,19 +738,16 @@ ${contextStr}
     }
   }
 
-  // Fallback to backend server
+  // Fallback to backend server safely
   try {
-    const teacherPass = getStoredTeacherPassword(teacherPassword)
-    const res = await fetch('/api/ai/classroom-chat', {
-      method: 'POST',
-      headers: getBackendAuthHeaders(teacherPass),
-      body: JSON.stringify({
+    const data = await callBackendAiSafe(
+      '/api/ai/classroom-chat',
+      {
         message,
         classroomContext: contextStr,
-        teacherPassword: teacherPass,
-      }),
-    })
-    const data = await res.json()
+      },
+      teacherPassword
+    )
     if (!data.success) {
       throw new Error(data.error || 'خطا در ارتباط با سرور')
     }
@@ -822,26 +861,18 @@ ${JSON.stringify(questions, null, 2)}
     }
   }
 
-  // Fallback to backend server
+  // Fallback to backend server safely
   try {
-    const teacherPass = getStoredTeacherPassword(teacherPassword)
-    const res = await fetch('/api/ai/grade-submission', {
-      method: 'POST',
-      headers: getBackendAuthHeaders(teacherPass),
-      body: JSON.stringify({
+    const data = await callBackendAiSafe(
+      '/api/ai/grade-submission',
+      {
         questions,
         studentName,
         totalPoints,
-        teacherPassword: teacherPass,
-      }),
-    })
-
-    if (res.ok) {
-      const data = await res.json()
-      return data
-    }
-    const errData = await res.json().catch(() => ({}))
-    throw new Error(errData.error || 'خطا در تصحیح برگه با سرور')
+      },
+      teacherPassword
+    )
+    return data
   } catch (err: any) {
     console.error('[Gemini Hybrid] Grade submission error:', err)
     throw new Error(translateGeminiError(err))
