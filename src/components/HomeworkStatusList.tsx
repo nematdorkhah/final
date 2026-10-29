@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useCallback } from 'react'
 import { toPersianDigits } from '../utils/persianNumbers'
-import { getLocalExams, getLocalSubmissions } from '../utils/examStore'
+import { getLocalExams, getLocalSubmissions, fetchExamSubmissions } from '../utils/examStore'
 import { sortByLastName } from '../utils/persianSort'
 import { supabase } from '../supabaseClient'
 import AttachmentViewerModal from './AttachmentViewerModal'
@@ -59,16 +59,15 @@ export default function HomeworkStatusList({
     }
   }
 
-  // Fetch online exam/assignment submissions from server
+  // Fetch online exam/assignment submissions directly from Supabase
   const fetchServerExamSubs = useCallback(async () => {
     try {
-      const res = await fetch('/api/exams/submissions')
-      const data = await res.json()
-      if (data.success && Array.isArray(data.submissions)) {
-        setServerExamSubs(data.submissions)
+      const subs = await fetchExamSubmissions()
+      if (Array.isArray(subs)) {
+        setServerExamSubs(subs)
       }
     } catch (err) {
-      console.warn('Failed to load server exam submissions', err)
+      console.warn('Failed to load exam submissions from Supabase', err)
     }
   }, [])
 

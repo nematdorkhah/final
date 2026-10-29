@@ -14,6 +14,7 @@ import {
   releaseExamResultsForAll,
   sanitizeExamTitle,
   isPromptLike,
+  generateUuid,
 } from '../utils/examStore'
 import { CLASS_STUDENTS_ROSTER } from '../classStudents'
 import { sortByLastName } from '../utils/persianSort'
@@ -339,7 +340,7 @@ export default function TeacherExamBuilder({
       }
 
       const newDraft: Exam = {
-        id: `exam_${Date.now()}`,
+        id: typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : generateUuid(),
         title: cleanTitle,
         subject: examSubject,
         description: `آزمون کلاسی شامل ${generatedQuestions.length} سوال متنوع طراحی‌شده برای دانش‌آموزان پایه ششم.`,
@@ -380,7 +381,7 @@ export default function TeacherExamBuilder({
     }
 
     const blankDraft: Exam = {
-      id: `exam_${Date.now()}`,
+      id: typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : generateUuid(),
       title: cleanTitle,
       subject: examSubject,
       description: 'آزمون طراحی‌شده توسط آموزگار',
