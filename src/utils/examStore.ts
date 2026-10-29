@@ -427,7 +427,7 @@ export async function saveExam(exam: Exam, teacherPassword?: string): Promise<vo
     const calculatedDueAt =
       exam.dueDate ||
       new Date(
-        new Date(exam.scheduledStartTime).getTime() + (Number(exam.durationMinutes) || 30) * 60000
+        new Date(exam.scheduledStartTime || exam.createdAt || Date.now()).getTime() + (Number(exam.durationMinutes) || 30) * 60000
       ).toISOString()
 
     try {
@@ -581,7 +581,391 @@ export function saveLocalSubmissions(subs: StudentExamSubmission[]) {
   }
 }
 
+/**
+ * Checks whether the exam results, report card and answer key should be visible to the student.
+ * - For untimed exams / assignments: ONLY visible if teacher explicitly clicked release.
+ * - For timed exams: visible if exam deadline / schedule has ended OR teacher released.
+ */
+export function isExamResultsReleased(exam: Exam, submission?: StudentExamSubmission): boolean {
+  if (!exam) return false
+
+  // 1. Explicit release flags set by teacher on the exam or submission:
+  if (exam.resultsPublished || exam.results_published || exam.isResultsReleased) {
+    return true
+  }
+  if (submission?.isReleased || submission?.is_released) {
+    return true
+  }
+
+  // 2. Untimed exams / homework / assignments:
+  // Strictly requires teacher release!
+  const isUntimed = exam.mode === 'assignment' || Boolean(exam.isUntimed) || Number(exam.durationMinutes) <= 0
+  if (isUntimed) {
+    return false
+  }
+
+  // 3. Timed exams with deadline / schedule:
+  // "برای آزمون‌های دارای بازه زمانی: کلید و کارنامه تنها پس از اتمام کامل مهلت کلی آزمون (یعنی وقتی دیگر هیچ دانش‌آموزی اجازه ورود ندارد) یا پس از تایید معلم فعال شود."
+  if (exam.dueDate) {
+    const dueTime = new Date(exam.dueDate).getTime()
+    if (!isNaN(dueTime) && Date.now() > dueTime) {
+      return true
+    }
+  }
+
+  if (exam.scheduledStartTime) {
+    const startMs = new Date(exam.scheduledStartTime).getTime()
+    const durationMs = (Number(exam.durationMinutes) || 30) * 60 * 1000
+    // Total window: after scheduled start + duration (plus 5 min buffer)
+    const windowEnd = startMs + durationMs + 5 * 60 * 1000
+    if (!isNaN(windowEnd) && Date.now() > windowEnd) {
+      return true
+    }
+  }
+
+  return false
+}
+
+/**
+ * Syncs the entire exam submissions array to Supabase __SYSTEM_EXAM_SUBMISSIONS__ row.
+ */
+export async function syncExamSubmissionsToSupabase(
+  submissions: StudentExamSubmission[],
+  teacherPassword?: string
+): Promise<boolean> {
+  const teacherPass = getStoredTeacherPassword(teacherPassword)
+  const bodyJson = JSON.stringify(submissions)
+  let directSuccess = false
+
+  console.log(`[ExamStore:syncExamSubmissionsToSupabase] Syncing ${submissions.length} exam submissions to Supabase...`)
+
+  // 1. Update or Insert into __SYSTEM_EXAM_SUBMISSIONS__ row in posts table
+  try {
+    const { data: existingRows } = await supabase
+      .from('posts')
+      .select('id, title')
+      .eq('title', '__SYSTEM_EXAM_SUBMISSIONS__')
+      .order('created_at', { ascending: false })
+      .limit(1)
+
+    const existingRow = existingRows?.[0]
+    if (existingRow?.id) {
+      const { error: updErr } = await supabase
+        .from('posts')
+        .update({
+          body: bodyJson,
+          type: 'announcement', // Allowed by posts_type_check!
+          publish_at: new Date().toISOString(),
+        })
+        .eq('id', existingRow.id)
+
+      if (!updErr) {
+        console.log('[ExamStore:syncExamSubmissionsToSupabase] Successfully updated __SYSTEM_EXAM_SUBMISSIONS__')
+        directSuccess = true
+      }
+    } else {
+      const { error: insErr } = await supabase
+        .from('posts')
+        .insert({
+          title: '__SYSTEM_EXAM_SUBMISSIONS__',
+          type: 'announcement',
+          body: bodyJson,
+          publish_at: new Date().toISOString(),
+        })
+
+      if (!insErr) {
+        console.log('[ExamStore:syncExamSubmissionsToSupabase] Successfully inserted __SYSTEM_EXAM_SUBMISSIONS__')
+        directSuccess = true
+      }
+    }
+  } catch (err) {
+    console.warn('[ExamStore:syncExamSubmissionsToSupabase] Direct posts table sync error:', err)
+  }
+
+  // 2. Backup to teacher RPC if available
+  if (teacherPass) {
+    try {
+      await supabase.rpc('teacher_create_post', {
+        p_password: teacherPass,
+        p_type: 'announcement',
+        p_title: '__SYSTEM_EXAM_SUBMISSIONS__',
+        p_body: bodyJson,
+        p_due_at: null,
+        p_publish_at: new Date().toISOString(),
+        p_attachment_path: null,
+      })
+      directSuccess = true
+    } catch {}
+  }
+
+  return directSuccess
+}
+
+/**
+ * Saves a student exam submission directly to Supabase posts table and quiz_submissions table.
+ */
+export async function saveExamSubmissionDirectToSupabase(
+  submission: StudentExamSubmission,
+  exam: Exam,
+  teacherPassword?: string
+): Promise<boolean> {
+  let success = false
+  console.log(`[ExamStore:saveExamSubmissionDirectToSupabase] Direct Supabase persistence for student ${submission.studentName} (${submission.studentId})...`)
+
+  const syncBody = JSON.stringify({
+    ...submission,
+    syncStatus: 'synced',
+    clientExamTitle: exam.title,
+    clientSubject: exam.subject,
+  })
+
+  // 1. Direct Supabase posts table: Save individual submission post
+  try {
+    const postTitle = `__EXAM_SUB__:${exam.id}:${submission.studentId}`
+    const { error: postErr } = await supabase.from('posts').insert({
+      title: postTitle,
+      body: syncBody,
+      type: 'announcement', // Allowed by posts_type_check!
+      publish_at: new Date().toISOString(),
+    })
+
+    if (!postErr) {
+      console.log('[ExamStore:saveExamSubmissionDirectToSupabase] Saved individual post to Supabase:', postTitle)
+      success = true
+    } else {
+      console.warn('[ExamStore:saveExamSubmissionDirectToSupabase] Individual post insert error:', postErr)
+    }
+  } catch (err) {
+    console.warn('[ExamStore:saveExamSubmissionDirectToSupabase] Error saving individual post:', err)
+  }
+
+  // 2. Direct Supabase posts table: Update __SYSTEM_EXAM_SUBMISSIONS__ container
+  try {
+    const allSubs = getLocalSubmissions()
+    const idx = allSubs.findIndex((s) => s.id === submission.id || (s.examId === submission.examId && String(s.studentId) === String(submission.studentId)))
+    if (idx >= 0) {
+      allSubs[idx] = submission
+    } else {
+      allSubs.push(submission)
+    }
+    saveLocalSubmissions(allSubs)
+    await syncExamSubmissionsToSupabase(allSubs, teacherPassword)
+    success = true
+  } catch (err) {
+    console.warn('[ExamStore:saveExamSubmissionDirectToSupabase] Error updating __SYSTEM_EXAM_SUBMISSIONS__:', err)
+  }
+
+  // 3. Direct Supabase quiz_submissions table: Insert row with student foreign key resolution
+  try {
+    let studentUUID: string | null = null
+    const isValidUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(submission.studentId)
+    if (isValidUUID) {
+      studentUUID = submission.studentId
+    } else {
+      // Lookup student UUID from students table by access_code (national code)
+      const { data: stRow } = await supabase
+        .from('students')
+        .select('id')
+        .eq('access_code', String(submission.studentId))
+        .maybeSingle()
+      if (stRow?.id) {
+        studentUUID = stRow.id
+      }
+    }
+
+    if (studentUUID) {
+      const isExamUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(exam.id)
+      const earned = Number(submission.instantStats?.scaledScore20 ?? submission.aiGrading?.scaledScore20 ?? 0)
+      const { error: qsErr } = await supabase.from('quiz_submissions').insert({
+        student_id: studentUUID,
+        quiz_id: isExamUuid ? exam.id : null,
+        answers: {
+          ...submission.answers,
+          exam_id: exam.id,
+          student_name: submission.studentName,
+          student_national_code: submission.studentId,
+        },
+        score: earned,
+        submitted_at: submission.submittedAt || new Date().toISOString(),
+      })
+
+      if (!qsErr) {
+        console.log('[ExamStore:saveExamSubmissionDirectToSupabase] Inserted into quiz_submissions table!')
+        success = true
+      } else {
+        console.warn('[ExamStore:saveExamSubmissionDirectToSupabase] quiz_submissions insert error:', qsErr)
+      }
+    }
+  } catch (err) {
+    console.warn('[ExamStore:saveExamSubmissionDirectToSupabase] quiz_submissions table error:', err)
+  }
+
+  return success
+}
+
+/**
+ * Releases report cards and answer keys for all students in an exam.
+ */
+export async function releaseExamResultsForAll(
+  examId: string,
+  teacherPassword?: string,
+  unpublish = false
+): Promise<{ success: boolean; exam?: Exam }> {
+  const teacherPass = getStoredTeacherPassword(teacherPassword)
+  const allExams = getLocalExams()
+  const examIdx = allExams.findIndex((e) => e.id === examId)
+  if (examIdx === -1) {
+    console.warn('[ExamStore:releaseExamResultsForAll] Exam not found locally:', examId)
+    return { success: false }
+  }
+
+  const updatedExam: Exam = {
+    ...allExams[examIdx],
+    resultsPublished: !unpublish,
+    results_published: !unpublish,
+    isResultsReleased: !unpublish,
+  }
+  allExams[examIdx] = updatedExam
+  saveLocalExams(allExams)
+
+  // Update in Supabase __SYSTEM_EXAMS__
+  await saveExam(updatedExam, teacherPass)
+
+  // Update all submissions for this exam
+  const allSubs = getLocalSubmissions()
+  const updatedSubs = allSubs.map((sub) => {
+    if (sub.examId === examId) {
+      return {
+        ...sub,
+        isReleased: !unpublish,
+        is_released: !unpublish,
+        status: !unpublish ? ('released' as const) : ('pending_approval' as const),
+        teacherGrading: {
+          ...(sub.teacherGrading || {}),
+          approved: !unpublish,
+          approvedAt: !unpublish ? new Date().toISOString() : undefined,
+          totalScore: sub.teacherGrading?.totalScore ?? sub.aiGrading?.totalScore ?? sub.instantStats?.earnedPoints ?? 0,
+          scaledScore20: sub.teacherGrading?.scaledScore20 ?? sub.aiGrading?.scaledScore20 ?? sub.instantStats?.scaledScore20 ?? 0,
+        },
+      }
+    }
+    return sub
+  })
+  saveLocalSubmissions(updatedSubs)
+
+  // Sync updated submissions array to Supabase
+  await syncExamSubmissionsToSupabase(updatedSubs, teacherPass)
+
+  // Dispatch events to refresh both student views and teacher views
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('exam_results_released', { detail: { examId, released: !unpublish } }))
+    window.dispatchEvent(new CustomEvent('exam_submission_updated', { detail: { examId } }))
+  }
+
+  return { success: true, exam: updatedExam }
+}
+
 export async function fetchExamSubmissions(examId?: string, studentId?: string): Promise<StudentExamSubmission[]> {
+  const local = getLocalSubmissions()
+  const mergedMap = new Map<string, StudentExamSubmission>()
+  local.forEach((s) => mergedMap.set(s.id, s))
+
+  console.log('[ExamStore:fetchExamSubmissions] Fetching exam submissions from Supabase...', { examId, studentId })
+
+  // 1. Direct Supabase Query: __SYSTEM_EXAM_SUBMISSIONS__ from posts table
+  try {
+    const { data: sysRows, error: sysErr } = await supabase
+      .from('posts')
+      .select('id, title, body')
+      .eq('title', '__SYSTEM_EXAM_SUBMISSIONS__')
+      .order('created_at', { ascending: false })
+      .limit(1)
+
+    if (!sysErr && sysRows && sysRows[0]?.body) {
+      try {
+        const parsed = typeof sysRows[0].body === 'string' ? JSON.parse(sysRows[0].body) : sysRows[0].body
+        if (Array.isArray(parsed)) {
+          parsed.forEach((s: StudentExamSubmission) => {
+            if (s && s.id) mergedMap.set(s.id, { ...(mergedMap.get(s.id) || {}), ...s })
+          })
+          console.log(`[ExamStore:fetchExamSubmissions] Synced ${parsed.length} submissions from __SYSTEM_EXAM_SUBMISSIONS__`)
+        }
+      } catch (parseErr) {
+        console.warn('[ExamStore:fetchExamSubmissions] Parse error in __SYSTEM_EXAM_SUBMISSIONS__:', parseErr)
+      }
+    }
+  } catch (err) {
+    console.warn('[ExamStore:fetchExamSubmissions] Error querying __SYSTEM_EXAM_SUBMISSIONS__:', err)
+  }
+
+  // 2. Direct Supabase Query: Individual submissions __EXAM_SUB__:% from posts table
+  try {
+    let query = supabase
+      .from('posts')
+      .select('id, title, body')
+      .like('title', examId ? `__EXAM_SUB__:${examId}:%` : '__EXAM_SUB__:%')
+      .order('created_at', { ascending: false })
+      .limit(100)
+
+    const { data: indRows, error: indErr } = await query
+    if (!indErr && Array.isArray(indRows)) {
+      indRows.forEach((row) => {
+        if (row?.body) {
+          try {
+            const parsed = typeof row.body === 'string' ? JSON.parse(row.body) : row.body
+            if (parsed && parsed.id) {
+              mergedMap.set(parsed.id, { ...(mergedMap.get(parsed.id) || {}), ...parsed })
+            }
+          } catch {}
+        }
+      })
+      console.log(`[ExamStore:fetchExamSubmissions] Synced ${indRows.length} individual submission posts from Supabase`)
+    }
+  } catch (err) {
+    console.warn('[ExamStore:fetchExamSubmissions] Error querying individual submission posts:', err)
+  }
+
+  // 3. Direct Supabase Query: quiz_submissions table
+  try {
+    const { data: qSubs, error: qErr } = await supabase
+      .from('quiz_submissions')
+      .select('id, quiz_id, student_id, answers, score, submitted_at')
+      .order('submitted_at', { ascending: false })
+      .limit(100)
+
+    if (!qErr && Array.isArray(qSubs)) {
+      qSubs.forEach((qs) => {
+        const answersObj = qs.answers || {}
+        const targetExamId = answersObj.exam_id || answersObj.quiz_id || qs.quiz_id || examId
+        const targetStudentId = answersObj.student_national_code || qs.student_id
+        const targetStudentName = answersObj.student_name
+
+        if (targetExamId && targetStudentId) {
+          const subId = `sub_${targetExamId}_${targetStudentId}`
+          if (!mergedMap.has(subId)) {
+            mergedMap.set(subId, {
+              id: subId,
+              examId: targetExamId,
+              studentId: String(targetStudentId),
+              studentName: targetStudentName,
+              submittedAt: qs.submitted_at,
+              answers: answersObj,
+              syncStatus: 'synced',
+              teacherGrading: {
+                totalScore: qs.score,
+                scaledScore20: qs.score,
+                approved: true,
+              },
+            })
+          }
+        }
+      })
+    }
+  } catch (err) {
+    console.warn('[ExamStore:fetchExamSubmissions] Error querying quiz_submissions:', err)
+  }
+
+  // 4. Best-effort non-blocking check to server backend if present
   try {
     let url = '/api/exams/submissions'
     const params = new URLSearchParams()
@@ -589,34 +973,40 @@ export async function fetchExamSubmissions(examId?: string, studentId?: string):
     if (studentId) params.append('studentId', studentId)
     if (params.toString()) url += `?${params.toString()}`
 
-    const res = await fetch(url)
-    if (res.ok) {
-      const data = await res.json()
-      if (data.success && Array.isArray(data.submissions)) {
-        const local = getLocalSubmissions()
-        const mergedMap = new Map<string, StudentExamSubmission>()
-        local.forEach((s) => mergedMap.set(s.id, s))
-        data.submissions.forEach((s: StudentExamSubmission) => mergedMap.set(s.id, s))
-        const merged = Array.from(mergedMap.values())
-        saveLocalSubmissions(merged)
-        return examId ? merged.filter((s) => s.examId === examId) : merged
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 1800)
+    const res = await fetch(url, { signal: controller.signal }).catch(() => null)
+    clearTimeout(timeoutId)
+    if (res && res.ok) {
+      const contentType = res.headers.get('content-type') || ''
+      if (contentType.includes('application/json')) {
+        const data = await res.json()
+        if (data.success && Array.isArray(data.submissions)) {
+          data.submissions.forEach((s: StudentExamSubmission) => mergedMap.set(s.id, { ...(mergedMap.get(s.id) || {}), ...s }))
+        }
       }
     }
-  } catch (err) {
-    console.warn('Failed to fetch submissions from server', err)
-  }
-  const local = getLocalSubmissions()
-  return examId ? local.filter((s) => s.examId === examId) : local
+  } catch {}
+
+  const merged = Array.from(mergedMap.values())
+  saveLocalSubmissions(merged)
+
+  let filtered = merged
+  if (examId) filtered = filtered.filter((s) => s.examId === examId)
+  if (studentId) filtered = filtered.filter((s) => String(s.studentId) === String(studentId))
+
+  console.log(`[ExamStore:fetchExamSubmissions] Resolved ${filtered.length} submissions for exam ${examId || 'all'}`)
+  return filtered
 }
 
 export function getExamSubmissions(examId: string): StudentExamSubmission[] {
-  // Trigger background sync with server
+  // Trigger background sync with Supabase and server
   fetchExamSubmissions(examId).catch(() => {})
   return getLocalSubmissions().filter((s) => s.examId === examId)
 }
 
 export function getStudentExamSubmission(examId: string, studentId: string): StudentExamSubmission | undefined {
-  return getLocalSubmissions().find((s) => s.examId === examId && s.studentId === studentId)
+  return getLocalSubmissions().find((s) => s.examId === examId && String(s.studentId) === String(studentId))
 }
 
 // ----------------------------------------------------------------------
@@ -1250,6 +1640,9 @@ export function submitStudentExamOptimistic(params: {
     answers,
     syncStatus: 'syncing',
     isOptimistic: true,
+    isReleased: false,
+    is_released: false,
+    status: 'pending_approval',
     instantStats: {
       totalQuestions: instant.totalQuestions,
       answeredCount: instant.answeredCount,
@@ -1332,20 +1725,22 @@ export async function submitStudentExam(params: {
 }
 
 /**
- * Asynchronous background worker: Saves to server, runs AI evaluation and backs up to Supabase.
+ * Asynchronous background worker: Saves directly to Supabase posts & quiz_submissions,
+ * and pings local server if present.
  */
 export async function runBackgroundExamSync(
   submission: StudentExamSubmission,
   exam: Exam
 ): Promise<void> {
   try {
-    // A. Attempt backend submission with a bounded timeout (15s)
-    let serverSynced = false
+    // A. Direct Supabase Persistence: Posts table (__SYSTEM_EXAM_SUBMISSIONS__ & individual) + quiz_submissions
+    await saveExamSubmissionDirectToSupabase(submission, exam)
+
+    // B. Best-effort non-blocking server ping (if running backend exists)
     try {
       const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), 16000)
-
-      const res = await fetch('/api/exams/submit', {
+      const timer = setTimeout(() => controller.abort(), 3500)
+      fetch('/api/exams/submit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1357,46 +1752,9 @@ export async function runBackgroundExamSync(
         }),
         signal: controller.signal,
       })
-      clearTimeout(timer)
-
-      if (res.ok) {
-        const data = await res.json()
-        if (data.success && data.submission) {
-          serverSynced = true
-          const finalSub: StudentExamSubmission = {
-            ...submission,
-            ...data.submission,
-            syncStatus: 'synced',
-            instantStats: submission.instantStats,
-          }
-          updateLocalSubmission(finalSub)
-          removeFromPendingExamSyncQueue(submission.id)
-          notifySubmissionUpdated(finalSub)
-          return
-        }
-      }
-    } catch (fetchErr) {
-      console.warn('[Background Sync] Server submit endpoint warning:', fetchErr)
-    }
-
-    // B. Backup sync to Supabase posts table
-    try {
-      const syncBody = JSON.stringify({
-        ...submission,
-        syncStatus: 'synced',
-        clientExamTitle: exam.title,
-        clientSubject: exam.subject,
-      })
-
-      await supabase.from('posts').insert({
-        title: `__EXAM_SUB__:${exam.id}:${submission.studentId}`,
-        body: syncBody,
-        type: 'exam',
-        publish_at: new Date().toISOString(),
-      })
-    } catch (spErr) {
-      console.warn('[Background Sync] Supabase post backup error:', spErr)
-    }
+        .then(() => clearTimeout(timer))
+        .catch(() => clearTimeout(timer))
+    } catch {}
 
     // C. Mark as synced locally
     const syncedSub: StudentExamSubmission = {
@@ -1407,7 +1765,7 @@ export async function runBackgroundExamSync(
     removeFromPendingExamSyncQueue(submission.id)
     notifySubmissionUpdated(syncedSub)
   } catch (err) {
-    console.warn('[Background Sync] Network failure, kept in queue for auto-retry', err)
+    console.warn('[Background Sync] Exception during sync, kept in queue for retry', err)
     const failedSub: StudentExamSubmission = {
       ...submission,
       syncStatus: 'failed',

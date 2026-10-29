@@ -9,10 +9,13 @@ import {
   regenerateSingleAiQuestion,
   convertPracticeTextToQuestions,
   getExamSubmissions,
+  fetchExamSubmissions,
   approveExamSubmission,
+  releaseExamResultsForAll,
   sanitizeExamTitle,
   isPromptLike,
 } from '../utils/examStore'
+import { CLASS_STUDENTS_ROSTER } from '../classStudents'
 import { sortByLastName } from '../utils/persianSort'
 import WhatsappPosterModal from './WhatsappPosterModal'
 import { WhatsappPosterData } from '../types/whatsappPoster'
@@ -82,6 +85,9 @@ export default function TeacherExamBuilder({
   const [teacherNoteDraft, setTeacherNoteDraft] = useState('')
   const [gradingSuccessMsg, setGradingSuccessMsg] = useState('')
   const [whatsappModalData, setWhatsappModalData] = useState<WhatsappPosterData | null>(null)
+  const [isReleasingResults, setIsReleasingResults] = useState(false)
+  const [isRefreshingSubs, setIsRefreshingSubs] = useState(false)
+  const [releaseFeedbackMsg, setReleaseFeedbackMsg] = useState('')
 
   function handleExportWhatsappExam(exam: Exam) {
     setWhatsappModalData({
@@ -609,6 +615,63 @@ export default function TeacherExamBuilder({
     setSelectedExamForSubs(exam)
     setSelectedSubForGrading(null)
     setActiveView('review_subs')
+    setReleaseFeedbackMsg('')
+    // Fresh fetch from Supabase to load all student submissions
+    setIsRefreshingSubs(true)
+    fetchExamSubmissions(exam.id)
+      .catch((err) => console.warn('Could not fetch submissions from Supabase:', err))
+      .finally(() => setIsRefreshingSubs(false))
+  }
+
+  async function handleRefreshSubmissions() {
+    if (!selectedExamForSubs) return
+    setIsRefreshingSubs(true)
+    setReleaseFeedbackMsg('')
+    try {
+      await fetchExamSubmissions(selectedExamForSubs.id)
+      setReleaseFeedbackMsg('✓ پاسخ‌های دانش‌آموزان از پایگاه‌داده همگام‌سازی و به‌روز شدند.')
+    } catch (err: any) {
+      alert('خطا در دریافت پاسخ‌ها از سرور: ' + err.message)
+    } finally {
+      setIsRefreshingSubs(false)
+    }
+  }
+
+  async function handleToggleReleaseResults() {
+    if (!selectedExamForSubs) return
+    const isCurrentlyReleased = !!(selectedExamForSubs.resultsPublished || selectedExamForSubs.isResultsReleased)
+    const promptMsg = isCurrentlyReleased
+      ? 'آیا مایلید کارنامه و کلید پاسخ‌ها را مجدداً برای دانش‌آموزان قفل و مخفی کنید؟'
+      : 'آیا مایلید کارنامه، نمرات و کلید سوالات برای تمامی دانش‌آموزان تایید و منتشر شود؟\nپس از تایید، دانش‌آموزان قادر خواهند بود کارنامه کامل خود را مشاهده نمایند.'
+
+    if (!window.confirm(promptMsg)) return
+
+    setIsReleasingResults(true)
+    setReleaseFeedbackMsg('')
+    try {
+      await releaseExamResultsForAll(selectedExamForSubs.id, teacherPassword, isCurrentlyReleased)
+      setSelectedExamForSubs((prev) =>
+        prev
+          ? {
+              ...prev,
+              resultsPublished: !isCurrentlyReleased,
+              isResultsReleased: !isCurrentlyReleased,
+              results_published: !isCurrentlyReleased,
+            }
+          : null
+      )
+      await loadExams()
+      await fetchExamSubmissions(selectedExamForSubs.id)
+      setReleaseFeedbackMsg(
+        !isCurrentlyReleased
+          ? '🎉 کارنامه و کلید سوالات با موفقیت تایید و برای تمامی دانش‌آموزان منتشر شد.'
+          : '🔒 انتشار کارنامه لغو شد و دسترسی دانش‌آموزان مجدداً به حالت انتظار درآمد.'
+      )
+    } catch (err: any) {
+      alert('خطا در انتشار کارنامه: ' + (err.message || 'مشکل در ارتباط با سرور'))
+    } finally {
+      setIsReleasingResults(false)
+    }
   }
 
   function startGradingSubmission(sub: StudentExamSubmission, exam: Exam) {
@@ -706,7 +769,7 @@ export default function TeacherExamBuilder({
                 const subs = getExamSubmissions(exam.id)
                 const pendingSubs = subs.filter((s) => !s.teacherGrading?.approved)
                 const approvedSubs = subs.filter((s) => s.teacherGrading?.approved)
-                const startTimeDate = new Date(exam.scheduledStartTime)
+                const startTimeDate = new Date(exam.scheduledStartTime || exam.createdAt || Date.now())
                 const isUpcoming = startTimeDate.getTime() > Date.now()
 
                 return (
@@ -2071,7 +2134,116 @@ export default function TeacherExamBuilder({
                 بررسی پاسخ‌های آزمون: {selectedExamForSubs.title}
               </h3>
             </div>
+
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                className="btn secondary"
+                onClick={handleRefreshSubmissions}
+                disabled={isRefreshingSubs}
+                style={{ fontSize: 12, padding: '6px 12px' }}
+              >
+                {isRefreshingSubs ? '⏳ در حال دریافت پاسخ‌ها...' : '🔄 بروزرسانی پاسخ‌ها از سرور'}
+              </button>
+            </div>
           </div>
+
+          {/* Release and Statistics Banner */}
+          {(() => {
+            const currentSubmissions = getExamSubmissions(selectedExamForSubs.id)
+            const isReleased = !!(selectedExamForSubs.resultsPublished || selectedExamForSubs.isResultsReleased)
+            const totalClassStudents = CLASS_STUDENTS_ROSTER.length || 40
+            const submissionCount = currentSubmissions.length
+
+            return (
+              <div
+                style={{
+                  background: isReleased ? '#F0FDF4' : '#FFFBEB',
+                  border: isReleased ? '2px solid #22C55E' : '2px solid #F59E0B',
+                  borderRadius: 14,
+                  padding: '14px 16px',
+                  marginBottom: 16,
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
+                  gap: 12,
+                }}
+              >
+                <div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                    <span
+                      style={{
+                        fontSize: 12,
+                        fontWeight: 900,
+                        padding: '3px 10px',
+                        borderRadius: 999,
+                        background: isReleased ? '#DCFCE7' : '#FEF3C7',
+                        color: isReleased ? '#15803D' : '#B45309',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 4,
+                      }}
+                    >
+                      {isReleased ? '🟢 کارنامه منتشر شده است' : '🔒 کارنامه قفل است (در انتظار تایید معلم)'}
+                    </span>
+                    <span style={{ fontSize: 13, fontWeight: 800, color: '#1E293B' }}>
+                      تعداد پاسخ‌های دریافتی: <strong>{submissionCount}</strong> از <strong>{totalClassStudents}</strong> دانش‌آموز ({Math.round((submissionCount / totalClassStudents) * 100)}%)
+                    </span>
+                  </div>
+                  <p style={{ margin: 0, fontSize: 12, color: '#475569', lineHeight: 1.5 }}>
+                    {isReleased
+                      ? 'هم‌اکنون تمامی دانش‌آموزانی که آزمون را ثبت کرده‌اند، می‌توانند کارنامه، نمره و کلید سوالات را مشاهده کنند.'
+                      : 'تا زمانی که دکمه «تایید و انتشار کارنامه برای همه» را نزنید، دانش‌آموزان به نمرات و کلید سوالات دسترسی نخواهند داشت و پیام «در انتظار تایید معلم» می‌بینند.'}
+                  </p>
+                </div>
+
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <button
+                    type="button"
+                    onClick={handleToggleReleaseResults}
+                    disabled={isReleasingResults}
+                    style={{
+                      background: isReleased ? '#DC2626' : '#16A34A',
+                      color: '#FFFFFF',
+                      border: '2px solid var(--black)',
+                      borderRadius: 10,
+                      padding: '8px 16px',
+                      fontSize: 13,
+                      fontWeight: 900,
+                      cursor: isReleasingResults ? 'wait' : 'pointer',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 6,
+                    }}
+                  >
+                    {isReleasingResults
+                      ? 'در حال اعمال...'
+                      : isReleased
+                      ? '🔒 لغو انتشار و مخفی‌سازی کارنامه'
+                      : '📢 تایید و انتشار کارنامه برای همه'}
+                  </button>
+                </div>
+              </div>
+            )
+          })()}
+
+          {releaseFeedbackMsg && (
+            <div
+              style={{
+                background: '#EFF6FF',
+                color: '#1E40AF',
+                border: '1.5px solid #93C5FD',
+                borderRadius: 10,
+                padding: '8px 12px',
+                fontSize: 12.5,
+                fontWeight: 700,
+                marginBottom: 14,
+              }}
+            >
+              {releaseFeedbackMsg}
+            </div>
+          )}
 
           {/* If a specific student submission is open for grading */}
           {selectedSubForGrading ? (

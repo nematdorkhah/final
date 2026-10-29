@@ -21,6 +21,7 @@ import {
   getLocalSubmissions,
   flushPendingExamSyncQueue,
   extractExamsFromPosts,
+  isExamResultsReleased,
 } from '../utils/examStore'
 import { isItemExpiredForStudent } from '../utils/expiration'
 import { sanitizeTeacherFeedback } from '../utils/cleanFeedback'
@@ -92,8 +93,24 @@ export default function StudentDashboard({
   }, [])
 
   // Helper to format remaining time until exam starts
-  function getExamCountdownInfo(scheduledStartTime: string) {
+  function getExamCountdownInfo(scheduledStartTime?: string) {
+    if (!scheduledStartTime) {
+      return {
+        isStarted: true,
+        timeLabel: '--:--',
+        remainingText: 'در حال برگزاری',
+        badgeText: '🟢 آماده برگزاری',
+      }
+    }
     const startMs = new Date(scheduledStartTime).getTime()
+    if (isNaN(startMs)) {
+      return {
+        isStarted: true,
+        timeLabel: '--:--',
+        remainingText: 'در حال برگزاری',
+        badgeText: '🟢 آماده برگزاری',
+      }
+    }
     const diffMs = startMs - currentTime
 
     // Exact scheduled time formatted in Persian
@@ -730,7 +747,7 @@ export default function StudentDashboard({
                   {activeExams.map((exam) => {
                     const sub = getStudentExamSubmission(exam.id, student.id)
                     const isSubmitted = Boolean(sub)
-                    const isApproved = sub?.teacherGrading?.approved
+                    const isResultsReleased = sub ? isExamResultsReleased(exam, sub) : false
                     const countdown = getExamCountdownInfo(exam.scheduledStartTime)
                     const isStarted = countdown.isStarted
 
@@ -752,19 +769,19 @@ export default function StudentDashboard({
 
                             <span
                               className={`text-[11px] font-black px-2.5 py-1 rounded-lg border whitespace-nowrap ${
-                                isApproved
+                                isResultsReleased
                                   ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
                                   : isSubmitted
-                                  ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                                  ? 'bg-amber-50 text-amber-800 border-amber-200'
                                   : isStarted
                                   ? 'bg-blue-50 text-blue-800 border-blue-200'
                                   : 'bg-amber-50 text-amber-800 border-amber-200'
                               }`}
                             >
-                              {isApproved
-                                ? `✅ نمره: ${toPersianDigits(sub?.teacherGrading?.totalScore)} از ${toPersianDigits(exam.totalPoints)}`
+                              {isResultsReleased
+                                ? `✅ نمره: ${toPersianDigits(sub?.teacherGrading?.totalScore ?? sub?.aiGrading?.totalScore ?? 0)} از ${toPersianDigits(exam.totalPoints)}`
                                 : isSubmitted
-                                ? '✅ ارسال شد'
+                                ? '⏳ در انتظار تایید معلم'
                                 : isStarted
                                 ? '🟢 آماده برگزاری'
                                 : '⏰ شروع به زودی'}
@@ -792,7 +809,7 @@ export default function StudentDashboard({
                           )}
 
                           <p className="text-xs text-slate-500 mb-4">
-                            {toPersianDigits(exam.questions.length)} سوال ({toPersianDigits(exam.totalPoints)} نمره) · مدت آزمون: {toPersianDigits(exam.durationMinutes)} دقیقه · زمان شروع: {toPersianDigits(new Date(exam.scheduledStartTime).toLocaleString('fa-IR'))}
+                            {toPersianDigits(exam.questions.length)} سوال ({toPersianDigits(exam.totalPoints)} نمره) · مدت آزمون: {toPersianDigits(exam.durationMinutes)} دقیقه · زمان شروع: {toPersianDigits(new Date(exam.scheduledStartTime || exam.createdAt || Date.now()).toLocaleString('fa-IR'))}
                           </p>
                         </div>
 
@@ -801,10 +818,13 @@ export default function StudentDashboard({
                             <button
                               type="button"
                               className="flex-1 py-2 px-3 text-xs font-black text-white bg-emerald-600 hover:bg-emerald-700 rounded-xl shadow-xs transition-colors cursor-pointer inline-flex items-center justify-center gap-1.5"
-                              onClick={() => setReviewExamData({ exam, submission: sub })}
+                              onClick={() => {
+                                sessionStorage.setItem('active_taking_exam_id', exam.id)
+                                setTakingExam(exam)
+                              }}
                             >
                               <span>📋</span>
-                              <span>مشاهده کارنامه و ریز پاسخ‌ها</span>
+                              <span>{isResultsReleased ? 'مشاهده کارنامه و کلید' : 'مشاهده وضعیت ثبت پاسخ'}</span>
                             </button>
                           )}
                           {(() => {
@@ -823,10 +843,10 @@ export default function StudentDashboard({
                                 className={`py-2 px-3 text-xs font-black rounded-xl transition-all cursor-pointer inline-flex items-center justify-center gap-1.5 ${
                                   isSubmitted ? 'flex-1' : 'w-full'
                                 } ${
-                                  isApproved
+                                  isResultsReleased
                                     ? 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs'
                                     : isSubmitted
-                                    ? 'bg-blue-600 hover:bg-blue-700 text-white shadow-xs'
+                                    ? 'bg-amber-600 hover:bg-amber-700 text-white shadow-xs'
                                     : hasDraft
                                     ? 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-md ring-2 ring-emerald-200'
                                     : isStarted
@@ -838,10 +858,10 @@ export default function StudentDashboard({
                                   setTakingExam(exam)
                                 }}
                               >
-                                {isApproved
-                                  ? '📊 بررسی در آزمون‌ساز'
+                                {isResultsReleased
+                                  ? '📊 مشاهده کارنامه و کلید'
                                   : isSubmitted
-                                  ? '🔍 مشاهده آزمون ارسال‌شده'
+                                  ? '🔍 مشاهده وضعیت ثبت پاسخ'
                                   : hasDraft
                                   ? '📝 ادامه آزمون (دارای پاسخ ذخیره‌شده)'
                                   : isStarted

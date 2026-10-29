@@ -8,6 +8,7 @@ import {
   computeInstantExamResult,
   InstantExamResult,
   sanitizeExamTitle,
+  isExamResultsReleased,
 } from '../utils/examStore'
 import { toPersianDigits } from '../utils/persianNumbers'
 import MathRenderer from './MathRenderer'
@@ -276,9 +277,108 @@ export default function StudentExamTaker({
   const seconds = timeLeftSeconds % 60
   const formattedTime = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
 
-  // If student has submitted (Optimistic Instant Result Screen)
+  // If student has submitted:
   if (submittedResult || existingSubmission) {
     const sub = submittedResult || existingSubmission!
+    const resultsReleased = isExamResultsReleased(exam, sub)
+
+    // 1. If teacher has NOT released results yet (or timed exam is still active):
+    // Display reassuring confirmation message WITHOUT revealing scores or answer key!
+    if (!resultsReleased) {
+      const isSyncing = sub.syncStatus === 'syncing'
+      const isFailed = sub.syncStatus === 'failed'
+
+      return (
+        <div
+          dir="rtl"
+          className="fixed inset-0 z-[99999] bg-slate-900/80 backdrop-blur-md flex items-center justify-center p-3 sm:p-4 overflow-y-auto font-sans"
+          onClick={onClose}
+        >
+          <div
+            className="bg-white rounded-3xl p-6 sm:p-8 max-w-lg w-full my-auto border-2 border-slate-800 shadow-2xl text-center relative overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Top colored stripe */}
+            <div className="absolute top-0 right-0 left-0 h-2.5 bg-gradient-to-r from-emerald-500 via-teal-500 to-cyan-500" />
+
+            <div className="text-5xl sm:text-6xl mb-3 animate-pulse">
+              📩
+            </div>
+
+            <h2 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight mb-1">
+              پاسخ شما با موفقیت ثبت شد!
+            </h2>
+
+            <p className="text-xs sm:text-sm text-slate-500 font-medium mb-4">
+              دانش‌آموز گرامی: <strong>{student.full_name || 'دانش‌آموز'}</strong> · {exam.title}
+            </p>
+
+            {/* Primary Status Banner: Awaiting Teacher Confirmation */}
+            <div className="bg-amber-50 border-2 border-amber-300 rounded-2xl p-4 sm:p-5 mb-5 text-center shadow-xs">
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-black bg-amber-100 text-amber-800 border border-amber-300 mb-2">
+                <span className="w-2 h-2 rounded-full bg-amber-500 animate-ping" />
+                <span>⏳ در انتظار بررسی و تایید آموزگار</span>
+              </div>
+              <p className="text-sm font-black text-amber-950 leading-relaxed mb-0">
+                پاسخ شما با موفقیت ثبت شد و در انتظار تایید معلم است.
+              </p>
+              <p className="text-xs text-amber-800 mt-2 font-medium leading-relaxed">
+                {isAssignment
+                  ? 'برای این آزمون/تکلیف، ریزنمرات و کلید پاسخ‌ها پس از بررسی و انتشار رسمی کارنامه توسط معلم فعال خواهد شد.'
+                  : 'کارنامه تفصیلی و کلید پاسخ‌ها پس از اتمام کامل مهلت کلی آزمون یا پس از تایید و انتشار توسط معلم فعال خواهد شد.'}
+              </p>
+            </div>
+
+            {/* Summary Details Grid (Questions count & submission time) */}
+            <div className="grid grid-cols-2 gap-2.5 mb-5 text-center">
+              <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3">
+                <div className="text-xs text-slate-500 font-bold">تعداد سوالات پاسخ‌داده‌شده</div>
+                <div className="text-base sm:text-lg font-black text-slate-800 mt-0.5">
+                  {toPersianDigits(answeredCount)} از {toPersianDigits(exam.questions.length)} سوال
+                </div>
+              </div>
+
+              <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3">
+                <div className="text-xs text-slate-500 font-bold">زمان ثبت پاسخ‌نامه</div>
+                <div className="text-base sm:text-lg font-black text-slate-800 mt-0.5">
+                  {toPersianDigits(new Date(sub.submittedAt || Date.now()).toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit' }))}
+                </div>
+              </div>
+            </div>
+
+            {/* Cloud Sync Status Indicator */}
+            <div className="mb-5">
+              {isSyncing ? (
+                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-bold bg-blue-50 border border-blue-200 text-blue-700 animate-pulse">
+                  <span className="w-2 h-2 rounded-full bg-blue-600 animate-ping" />
+                  <span>☁️ در حال ثبت نهایی در سامانه ابری کلاسی...</span>
+                </div>
+              ) : isFailed ? (
+                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-bold bg-amber-50 border border-amber-200 text-amber-800">
+                  <span>💾</span>
+                  <span>پاسخ‌ها در حافظه دستگاه ذخیره شد و با برقراری شبکه ارسال می‌شود.</span>
+                </div>
+              ) : (
+                <div className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-bold bg-emerald-50 border border-emerald-200 text-emerald-800">
+                  <span>✓</span>
+                  <span>پاسخ‌ها در دیتابیس کلاسی و پنل آموزگار ذخیره گردید</span>
+                </div>
+              )}
+            </div>
+
+            <button
+              type="button"
+              onClick={onClose}
+              className="w-full py-3 px-4 bg-slate-900 hover:bg-slate-800 active:scale-95 text-white font-black text-sm rounded-xl transition-all shadow-md cursor-pointer"
+            >
+              متوجه شدم (بازگشت به کلاس)
+            </button>
+          </div>
+        </div>
+      )
+    }
+
+    // 2. If results ARE officially released: Show full report card & answers breakdown
     const isApproved = sub.teacherGrading?.approved
     const isSyncing = sub.syncStatus === 'syncing'
     const isFailed = sub.syncStatus === 'failed'

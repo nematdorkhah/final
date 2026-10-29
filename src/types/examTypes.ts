@@ -51,6 +51,9 @@ export interface StudentExamSubmission {
     teacherNotes?: string
     [key: string]: any
   }
+  isReleased?: boolean
+  is_released?: boolean
+  status?: 'pending_approval' | 'released' | 'graded'
   [key: string]: any
 }
 
@@ -64,11 +67,16 @@ export interface Exam {
   mode?: 'assignment' | 'exam'
   isUntimed?: boolean
   dueDate?: string
+  scheduledStartTime?: string
   created_at?: string
   questions: ExamQuestion[]
   published?: boolean
   active?: boolean
   isPublished?: boolean
+  resultsPublished?: boolean
+  results_published?: boolean
+  isResultsReleased?: boolean
   allowedStudents?: string[]
   [key: string]: any
 }
+

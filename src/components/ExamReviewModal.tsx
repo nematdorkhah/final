@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { toPersianDigits } from '../utils/persianNumbers'
 import MathRenderer from './MathRenderer'
+import { isExamResultsReleased } from '../utils/examStore'
 
 interface ExamReviewModalProps {
   exam: any
@@ -24,6 +25,103 @@ export default function ExamReviewModal({
   }, [onClose])
 
   if (!exam || !submission) return null
+
+  const isReleased = isExamResultsReleased(exam, submission)
+  if (!isReleased) {
+    const questionsList: any[] = exam.questions || []
+    const answersList: Record<string, any> = submission.answers || {}
+    const answeredCount = Object.keys(answersList).length
+    const totalCount = questionsList.length
+    const subTime = submission?.submittedAt
+      ? new Date(submission.submittedAt).toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit' })
+      : 'ثبت‌شده'
+
+    return (
+      <div
+        style={{
+          position: 'fixed',
+          inset: 0,
+          zIndex: 99999,
+          background: 'rgba(15, 23, 42, 0.85)',
+          backdropFilter: 'blur(8px)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '14px',
+          direction: 'rtl',
+        }}
+        onClick={(e) => {
+          if (e.target === e.currentTarget) onClose()
+        }}
+      >
+        <div
+          style={{
+            background: '#FFFFFF',
+            borderRadius: 20,
+            width: '100%',
+            maxWidth: 500,
+            padding: '24px',
+            boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.45)',
+            textAlign: 'center',
+            border: '2px solid #0F172A',
+          }}
+        >
+          <div style={{ fontSize: 48, marginBottom: 12 }}>🔒</div>
+          <span
+            style={{
+              display: 'inline-block',
+              background: '#FEF3C7',
+              color: '#92400E',
+              padding: '6px 14px',
+              borderRadius: 999,
+              fontSize: 13,
+              fontWeight: 800,
+              marginBottom: 14,
+            }}
+          >
+            ⏳ در انتظار تایید و انتشار آموزگار
+          </span>
+          <h3 style={{ fontSize: 18, fontWeight: 900, color: '#0F172A', margin: '0 0 10px 0' }}>
+            پاسخ شما با موفقیت ثبت شد و در انتظار تایید معلم است
+          </h3>
+          <p style={{ fontSize: 13, color: '#475569', lineHeight: 1.6, margin: '0 0 16px 0' }}>
+            پاسخ‌های شما برای {totalCount} سوال در ساعت {toPersianDigits(subTime)} دریافت شد. به محض پایان زمان آزمون یا انتشار کارنامه توسط معلم کلاس، کلید سوالات و نمره نهایی در این بخش برای شما قابل مشاهده خواهد بود.
+          </p>
+          <div
+            style={{
+              background: '#F8FAFC',
+              border: '1px solid #E2E8F0',
+              borderRadius: 12,
+              padding: '12px',
+              marginBottom: 18,
+              fontSize: 12.5,
+              fontWeight: 700,
+              color: '#334155',
+            }}
+          >
+            تعداد پاسخ‌های ثبت‌شده: <strong>{toPersianDigits(answeredCount)} از {toPersianDigits(totalCount)} سوال</strong>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            style={{
+              width: '100%',
+              padding: '10px 20px',
+              background: '#0F172A',
+              color: '#FFFFFF',
+              borderRadius: 12,
+              fontSize: 14,
+              fontWeight: 800,
+              border: 'none',
+              cursor: 'pointer',
+            }}
+          >
+            متوجه شدم و بازگشت
+          </button>
+        </div>
+      </div>
+    )
+  }
 
 
   // Calculate score scaled to 20
