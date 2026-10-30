@@ -11,6 +11,7 @@ export interface ExamQuestion {
   question: string
   options?: string[]
   correctAnswer?: number | string
+  acceptableAnswers?: string[]
   points?: number
   rubricOrHint?: string
   explanation?: string

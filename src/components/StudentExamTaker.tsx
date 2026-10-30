@@ -12,6 +12,7 @@ import {
 } from '../utils/examStore'
 import { toPersianDigits } from '../utils/persianNumbers'
 import MathRenderer from './MathRenderer'
+import { safeNumber, safeScore, safeScaled20 } from '../utils/persianSemanticGrader'
 
 interface StudentExamDraft {
   examId: string
@@ -387,11 +388,12 @@ export default function StudentExamTaker({
     const stats: InstantExamResult =
       sub.instantStats || computeInstantExamResult(exam, sub.answers || {})
 
+    const maxPts = safeNumber(stats.maxPoints || exam.totalPoints, 20) || 20
     const finalScore = isApproved
-      ? (sub.teacherGrading?.totalScore ?? stats.earnedPoints)
-      : (sub.aiGrading?.totalScore ?? stats.earnedPoints)
+      ? safeScore(sub.teacherGrading?.totalScore ?? stats.earnedPoints, maxPts)
+      : safeScore(sub.aiGrading?.totalScore ?? stats.earnedPoints, maxPts)
 
-    const finalScaled20 = Math.round(((finalScore / (stats.maxPoints || 20)) * 20) * 10) / 10
+    const finalScaled20 = safeScaled20(finalScore, maxPts)
 
     return (
       <div
@@ -524,8 +526,8 @@ export default function StudentExamTaker({
             </div>
             <div className="max-h-52 overflow-y-auto space-y-2 pr-1">
               {exam.questions.map((q, idx) => {
-                const qScore = sub.teacherGrading?.questionScores?.[q.id] ?? stats.questionScores[q.id] ?? 0
-                const qMax = Number(q.points) || 2
+                const qMax = safeScore(q.points, 10, 2)
+                const qScore = safeScore(sub.teacherGrading?.questionScores?.[q.id] ?? stats.questionScores[q.id] ?? 0, qMax)
                 const isFull = qScore >= qMax
                 const isZero = qScore === 0
                 const fb = (sub.teacherGrading?.questionFeedbacks?.[q.id] ?? stats.questionFeedbacks[q.id]) || ''

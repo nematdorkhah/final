@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { supabase } from '../supabaseClient'
+import { resolveCorrectOptionIndex, safeScore, safeScaled20 } from '../utils/persianSemanticGrader'
 
 export default function OnlineQuizModal({
   quiz,
@@ -28,10 +29,12 @@ export default function OnlineQuizModal({
     setIsSubmitting(true)
     let correctCount = 0
     questions.forEach((q: any, idx: number) => {
-      if (selectedAnswers[idx] === q.correctIndex) correctCount++
+      const correctIdx = resolveCorrectOptionIndex(q).index
+      if (selectedAnswers[idx] === correctIdx) correctCount++
     })
 
-    const finalScore = Number(((correctCount / (questions.length || 1)) * 20).toFixed(2))
+    const totalQ = questions.length || 1
+    const finalScore = safeScaled20(correctCount, totalQ)
 
     try {
       const { error } = await supabase.rpc('submit_quiz_attempt', {

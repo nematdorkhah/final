@@ -8,6 +8,13 @@ import {
 } from '../utils/examStore'
 import { CLASS_STUDENTS_ROSTER } from '../classStudents'
 import { sortByLastName } from '../utils/persianSort'
+import {
+  resolveCorrectOptionIndex,
+  resolveStudentSelectedOption,
+  safeNumber,
+  safeScore,
+} from '../utils/persianSemanticGrader'
+import { toPersianDigits } from '../utils/persianNumbers'
 
 interface TeacherExamSubmissionsProps {
   exam: Exam
@@ -256,15 +263,17 @@ export default function TeacherExamSubmissions({
           <div className="space-y-3">
             {currentExam.questions.map((q, idx) => {
               const sAnswer = selectedSubForGrading.answers[q.id]
-              const aiScore = selectedSubForGrading.aiGrading?.questionScores?.[q.id] ?? 0
-              const currentScore = teacherScoresDraft[q.id] ?? aiScore
-              const maxPts = Number(q.points) || 1
+              const maxPts = safeScore(q.points, 10, 1)
+              const aiScore = safeScore(selectedSubForGrading.aiGrading?.questionScores?.[q.id], maxPts, 0)
+              const currentScore = safeScore(teacherScoresDraft[q.id] ?? aiScore, maxPts)
+              const resolvedCorrect = resolveCorrectOptionIndex(q)
+              const resolvedStudent = resolveStudentSelectedOption(sAnswer, q.options)
 
               return (
                 <div key={q.id} className="bg-white border border-slate-300 rounded-lg p-3">
                   <div className="flex items-start justify-between gap-2 mb-2">
                     <span className="text-xs sm:text-sm font-bold text-slate-800">
-                      سوال {idx + 1}: {q.question} ({maxPts} نمره)
+                      سوال {toPersianDigits(idx + 1)}: {q.question} ({toPersianDigits(maxPts)} نمره)
                     </span>
                     <div className="flex items-center gap-1.5 shrink-0">
                       <span className="text-xs font-bold text-slate-600">نمره:</span>
@@ -277,12 +286,12 @@ export default function TeacherExamSubmissions({
                         onChange={(e) =>
                           setTeacherScoresDraft({
                             ...teacherScoresDraft,
-                            [q.id]: Math.min(maxPts, Math.max(0, parseFloat(e.target.value) || 0)),
+                            [q.id]: safeScore(parseFloat(e.target.value) || 0, maxPts),
                           })
                         }
                         className="w-14 px-1.5 py-0.5 text-center text-xs font-extrabold border-2 border-slate-900 rounded"
                       />
-                      <span className="text-xs text-slate-500">از {maxPts}</span>
+                      <span className="text-xs text-slate-500">از {toPersianDigits(maxPts)}</span>
                     </div>
                   </div>
 
@@ -291,10 +300,9 @@ export default function TeacherExamSubmissions({
                     <strong>پاسخ دانش‌آموز: </strong>
                     {q.type === 'multiple_choice' ? (
                       <span>
-                        گزینه {Number(sAnswer?.selectedOption ?? -1) + 1}
-                        {q.options && sAnswer?.selectedOption !== undefined
-                          ? ` (${q.options[sAnswer.selectedOption]})`
-                          : ''}
+                        {resolvedStudent.isValid
+                          ? `${resolvedStudent.label}${resolvedStudent.text ? ` (${resolvedStudent.text})` : ''}`
+                          : 'بدون پاسخ'}
                       </span>
                     ) : (
                       <span>{sAnswer?.textAnswer || 'بدون پاسخ'}</span>
@@ -312,7 +320,9 @@ export default function TeacherExamSubmissions({
 
                   {/* Correct Answer Reference */}
                   <div className="text-[11px] text-slate-500">
-                    کلید: {q.type === 'multiple_choice' ? `گزینه ${Number(q.correctAnswer) + 1} (${q.options?.[Number(q.correctAnswer)] || ''})` : String(q.correctAnswer || '')}
+                    کلید: {q.type === 'multiple_choice'
+                      ? `${resolvedCorrect.label}${resolvedCorrect.text ? ` (${resolvedCorrect.text})` : ''}`
+                      : String(q.correctAnswer || q.rubricOrHint || 'تعیین‌نشده')}
                   </div>
                 </div>
               )
@@ -333,7 +343,11 @@ export default function TeacherExamSubmissions({
             />
             <div className="flex items-center justify-between">
               <span className="text-xs sm:text-sm font-black text-slate-900">
-                مجموع نمره: {Object.values(teacherScoresDraft).reduce((sum, v) => sum + (v || 0), 0)} از {currentExam.totalPoints}
+                مجموع نمره: {toPersianDigits(
+                  Math.round(
+                    Object.values(teacherScoresDraft).reduce((sum, v) => sum + (safeNumber(v, 0)), 0) * 10
+                  ) / 10
+                )} از {toPersianDigits(safeNumber(currentExam.totalPoints, 20))}
               </span>
               <button
                 type="button"

@@ -2,6 +2,14 @@ import { useEffect } from 'react'
 import { toPersianDigits } from '../utils/persianNumbers'
 import MathRenderer from './MathRenderer'
 import { isExamResultsReleased } from '../utils/examStore'
+import {
+  resolveCorrectOptionIndex,
+  resolveStudentSelectedOption,
+  evaluateFillInTheBlank,
+  safeNumber,
+  safeScore,
+  safeScaled20,
+} from '../utils/persianSemanticGrader'
 
 interface ExamReviewModalProps {
   exam: any
@@ -125,14 +133,15 @@ export default function ExamReviewModal({
 
 
   // Calculate score scaled to 20
-  const rawScore =
+  const maxScore = safeNumber(exam.totalPoints || exam.totalScore, 20) || 20
+  const rawScore = safeScore(
     submission?.teacherGrading?.totalScore ??
     submission?.aiGrading?.totalScore ??
     submission?.studentScore ??
-    0
-  const maxScore = Number(exam.totalPoints || exam.totalScore) || 20
-  const scaledScore =
-    maxScore > 0 ? Number(((rawScore / maxScore) * 20).toFixed(1)) : rawScore
+    0,
+    maxScore
+  )
+  const scaledScore = safeScaled20(rawScore, maxScore)
 
   const questions: any[] = exam.questions || []
   const answers: Record<string, any> = submission.answers || {}
@@ -273,18 +282,13 @@ export default function ExamReviewModal({
           ) : (
             questions.map((q, idx) => {
               const rawAns = answers[q.id]
-              const isMultiChoice = Array.isArray(q.options) && q.options.length > 0
-              const qPoints = Number(q.points) || 1
+              const isMultiChoice = q.type === 'multiple_choice' || (Array.isArray(q.options) && q.options.length > 0)
+              const qPoints = safeScore(q.points, 10, 2)
 
-              // Extract student's response
-              const studentOptIndex =
-                typeof rawAns === 'object' && rawAns !== null
-                  ? rawAns.selectedOption
-                  : typeof rawAns === 'number'
-                  ? rawAns
-                  : !isNaN(Number(rawAns)) && rawAns !== '' && rawAns !== null
-                  ? Number(rawAns)
-                  : undefined
+              const resolvedCorrect = resolveCorrectOptionIndex(q)
+              const resolvedStudent = resolveStudentSelectedOption(rawAns, q.options)
+              const correctOptIndex = resolvedCorrect.isValid ? resolvedCorrect.index : undefined
+              const studentOptIndex = resolvedStudent.isValid ? resolvedStudent.index : undefined
 
               const studentText =
                 typeof rawAns === 'object' && rawAns !== null
@@ -295,32 +299,23 @@ export default function ExamReviewModal({
 
               const studentImage = typeof rawAns === 'object' && rawAns !== null ? rawAns.imageAttachment : undefined
 
-              const correctOptIndex =
-                q.correctOptionIndex !== undefined
-                  ? Number(q.correctOptionIndex)
-                  : typeof q.correctAnswer === 'number'
-                  ? q.correctAnswer
-                  : !isNaN(Number(q.correctAnswer)) && q.correctAnswer !== '' && q.correctAnswer !== null
-                  ? Number(q.correctAnswer)
-                  : undefined
-
               // Evaluate correctness
               const isCorrectMC = isMultiChoice && studentOptIndex !== undefined && studentOptIndex === correctOptIndex
-              const isCorrectBlank =
-                !isMultiChoice &&
-                q.correctAnswer &&
-                studentText &&
-                studentText.trim().toLowerCase() === String(q.correctAnswer).trim().toLowerCase()
+              const blankEval = !isMultiChoice ? evaluateFillInTheBlank(q, rawAns) : null
+              const isCorrectBlank = blankEval?.status === 'correct'
 
               // Earned score for question
-              const earned =
+              const earned = safeScore(
                 submission.teacherGrading?.questionScores?.[q.id] ??
                 submission.aiGrading?.questionScores?.[q.id] ??
-                (isCorrectMC || isCorrectBlank ? qPoints : 0)
+                (isCorrectMC || isCorrectBlank ? qPoints : (blankEval?.score ?? 0)),
+                qPoints
+              )
 
               const feedback =
                 submission.teacherGrading?.questionFeedbacks?.[q.id] ||
-                submission.aiGrading?.questionFeedbacks?.[q.id]
+                submission.aiGrading?.questionFeedbacks?.[q.id] ||
+                blankEval?.feedback
 
               const isPassed = earned >= qPoints * 0.75
               const isPartial = earned > 0 && earned < qPoints * 0.75

@@ -20,6 +20,11 @@ import { CLASS_STUDENTS_ROSTER } from '../classStudents'
 import { sortByLastName } from '../utils/persianSort'
 import WhatsappPosterModal from './WhatsappPosterModal'
 import { WhatsappPosterData } from '../types/whatsappPoster'
+import {
+  resolveCorrectOptionIndex,
+  safeNumber,
+  safeScore,
+} from '../utils/persianSemanticGrader'
 
 
 const SUBJECT_PRESETS = [
@@ -514,14 +519,22 @@ export default function TeacherExamBuilder({
 
   function handleSaveQuestionModal(savedQ: ExamQuestion) {
     if (!draftExam) return
+    const sanitizedQ: ExamQuestion = {
+      ...savedQ,
+      points: safeScore(savedQ.points, 10, 2),
+      correctAnswer:
+        savedQ.type === 'multiple_choice'
+          ? resolveCorrectOptionIndex(savedQ).index
+          : savedQ.correctAnswer,
+    }
     let updatedList: ExamQuestion[] = []
     if (isNewQuestionModal) {
-      updatedList = [...draftExam.questions, savedQ]
+      updatedList = [...draftExam.questions, sanitizedQ]
     } else {
-      updatedList = draftExam.questions.map((q) => (q.id === savedQ.id ? savedQ : q))
+      updatedList = draftExam.questions.map((q) => (q.id === sanitizedQ.id ? sanitizedQ : q))
     }
-    const pts = updatedList.reduce((sum, q) => sum + (Number(q.points) || 2), 0)
-    setDraftExam({ ...draftExam, questions: updatedList, totalPoints: pts })
+    const pts = updatedList.reduce((sum, q) => sum + safeScore(q.points, 10, 2), 0)
+    setDraftExam({ ...draftExam, questions: updatedList, totalPoints: Math.round(pts * 10) / 10 })
     setEditingQ(null)
     setIsNewQuestionModal(false)
   }
@@ -1739,7 +1752,7 @@ export default function TeacherExamBuilder({
                         {q.type === 'multiple_choice' && q.options && (
                           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 6, margin: '8px 0' }}>
                             {q.options.map((opt, optIdx) => {
-                              const isCorrect = Number(q.correctAnswer) === optIdx
+                              const isCorrect = resolveCorrectOptionIndex(q).index === optIdx
                               return (
                                 <div
                                   key={optIdx}
@@ -2570,28 +2583,31 @@ export default function TeacherExamBuilder({
             {editingQ.type === 'multiple_choice' && (
               <div style={{ marginBottom: 12 }}>
                 <label style={{ display: 'block', fontSize: 13, fontWeight: 800, marginBottom: 4 }}>گزینه‌ها</label>
-                {(editingQ.options || ['', '', '', '']).map((opt, i) => (
-                  <div key={i} style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 6 }}>
-                    <input
-                      type="radio"
-                      name="correctOption"
-                      checked={Number(editingQ.correctAnswer) === i}
-                      onChange={() => setEditingQ({ ...editingQ, correctAnswer: i })}
-                      title="انتخاب به عنوان گزینه درست"
-                    />
-                    <input
-                      type="text"
-                      value={opt}
-                      onChange={(e) => {
-                        const newOpts = [...(editingQ.options || [])]
-                        newOpts[i] = e.target.value
-                        setEditingQ({ ...editingQ, options: newOpts })
-                      }}
-                      placeholder={`گزینه ${i + 1}`}
-                      style={{ flex: 1, padding: 6, borderRadius: 6, border: '1.5px solid #CBD5E1', fontSize: 13 }}
-                    />
-                  </div>
-                ))}
+                {(editingQ.options || ['', '', '', '']).map((opt, i) => {
+                  const resolvedIndex = resolveCorrectOptionIndex(editingQ).index
+                  return (
+                    <div key={i} style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 6 }}>
+                      <input
+                        type="radio"
+                        name="correctOption"
+                        checked={resolvedIndex === i}
+                        onChange={() => setEditingQ({ ...editingQ, correctAnswer: i })}
+                        title="انتخاب به عنوان گزینه درست"
+                      />
+                      <input
+                        type="text"
+                        value={opt}
+                        onChange={(e) => {
+                          const newOpts = [...(editingQ.options || [])]
+                          newOpts[i] = e.target.value
+                          setEditingQ({ ...editingQ, options: newOpts })
+                        }}
+                        placeholder={`گزینه ${i + 1}`}
+                        style={{ flex: 1, padding: 6, borderRadius: 6, border: '1.5px solid #CBD5E1', fontSize: 13 }}
+                      />
+                    </div>
+                  )
+                })}
                 <span style={{ fontSize: 11, color: '#64748B' }}>دایره کنار گزینه صحیح را تیک بزنید.</span>
               </div>
             )}
@@ -2604,10 +2620,21 @@ export default function TeacherExamBuilder({
                 <input
                   type="text"
                   value={String(editingQ.correctAnswer || '')}
-                  onChange={(e) => setEditingQ({ ...editingQ, correctAnswer: e.target.value })}
-                  placeholder="پاسخ مورد انتظار"
+                  onChange={(e) => {
+                    const rawVal = e.target.value
+                    const alts = rawVal.split(/[\/،,;]/).map((s) => s.trim()).filter(Boolean)
+                    setEditingQ({
+                      ...editingQ,
+                      correctAnswer: rawVal,
+                      acceptableAnswers: alts.length > 0 ? alts : undefined,
+                    })
+                  }}
+                  placeholder="پاسخ مورد انتظار (برای چند پاسخ معتبر از / استفاده کنید، مثلاً: بزرگتر / بیشتر)"
                   style={{ width: '100%', padding: 8, borderRadius: 8, border: '2px solid var(--black)', fontSize: 13 }}
                 />
+                <span style={{ fontSize: 11, color: '#64748B' }}>
+                  می‌توانید پاسخ‌های هم‌معنی دیگر را با علامت / جدا کنید (مثلاً: افزایش می‌یابد / زیاد می‌شود).
+                </span>
               </div>
             )}
 

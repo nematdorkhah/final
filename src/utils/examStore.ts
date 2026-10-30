@@ -11,6 +11,17 @@ import {
   translateGeminiError,
   getStoredTeacherPassword,
 } from '../services/geminiHybridService'
+import {
+  evaluateEntireExamSubmission,
+  evaluateMultipleChoice,
+  evaluateFillInTheBlank,
+  evaluateDescriptiveQuestion,
+  resolveCorrectOptionIndex,
+  resolveStudentSelectedOption,
+  safeNumber,
+  safeScore,
+  safeScaled20,
+} from './persianSemanticGrader'
 
 const EXAMS_STORAGE_KEY = 'school_classroom_exams_v1'
 const SUBMISSIONS_STORAGE_KEY = 'school_classroom_exam_subs_v1'
@@ -1327,28 +1338,35 @@ export async function gradeExamWithAI(
     }
 
     if (q.type === 'multiple_choice') {
-      const selected = studentAns.selectedOption
-      const isCorrect = Number(selected) === Number(q.correctAnswer)
-      const score = isCorrect ? (Number(q.points) || 2) : 0
-      questionScores[q.id] = score
-      totalScore += score
-      questionFeedbacks[q.id] = isCorrect
-        ? `✅ پاسخ صحیح است. (+${score} نمره)`
-        : `❌ پاسخ نادرست است. گزینه درست: ${
-            q.options ? q.options[Number(q.correctAnswer)] || `گزینه ${Number(q.correctAnswer) + 1}` : q.correctAnswer
-          }`
+      const mcResult = evaluateMultipleChoice(q, studentAns)
+      questionScores[q.id] = mcResult.score
+      questionFeedbacks[q.id] = mcResult.feedback
+      totalScore += mcResult.score
+    } else if (q.type === 'fill_in_the_blank') {
+      const fibResult = evaluateFillInTheBlank(q, studentAns)
+      // If full semantic match, record immediately; if partial or complex, also queue for AI review
+      questionScores[q.id] = fibResult.score
+      questionFeedbacks[q.id] = fibResult.feedback
+      totalScore += fibResult.score
+      if (fibResult.status !== 'correct' && fibResult.status !== 'empty') {
+        complexQuestionsToGrade.push({ q, ans: studentAns })
+      }
     } else {
       complexQuestionsToGrade.push({ q, ans: studentAns })
     }
   }
 
-  // Include all questions context for the personalized teacher note
+  // Include rich contextual data for the personalized teacher note & descriptive grading
   const allQuestionsData = exam.questions.map((q) => {
     const ans = answers[q.id]
     let stAns = 'بدون پاسخ'
     if (ans) {
       if (q.type === 'multiple_choice') {
-        stAns = `گزینه انتخابی: ${Number(ans.selectedOption) + 1} (${q.options?.[ans.selectedOption] || ''}) - کلید صحیح: ${Number(q.correctAnswer) + 1}`
+        const resolvedC = resolveCorrectOptionIndex(q)
+        const resolvedS = resolveStudentSelectedOption(ans, q.options)
+        stAns = resolvedS.isValid
+          ? `${resolvedS.label} (${resolvedS.text}) - کلید صحیح: ${resolvedC.label} (${resolvedC.text})`
+          : 'بدون پاسخ'
       } else {
         stAns = ans.textAnswer || (ans.imageAttachment ? '[تصویر برگه ارسال شده]' : 'بدون پاسخ')
       }
@@ -1357,8 +1375,8 @@ export async function gradeExamWithAI(
       id: q.id,
       type: q.type,
       question: q.question,
-      points: q.points,
-      rubric: q.rubricOrHint,
+      points: safeScore(q.points, 10, 2),
+      rubric: q.rubricOrHint || q.correctAnswer || '',
       studentAnswer: stAns,
     }
   })
@@ -1377,8 +1395,10 @@ export async function gradeExamWithAI(
       for (const item of data.grades) {
         const matchingQ = exam.questions.find((q) => q.id === item.id)
         if (matchingQ && matchingQ.type !== 'multiple_choice') {
-          const maxPts = matchingQ.points || 2
-          const assignedScore = Math.min(maxPts, Math.max(0, Number(item.score) || 0))
+          const maxPts = safeScore(matchingQ.points, 10, 2)
+          const assignedScore = safeScore(item.score, maxPts)
+          // Subtract old score before adding AI verified score
+          totalScore -= (questionScores[item.id] || 0)
           questionScores[item.id] = assignedScore
           questionFeedbacks[item.id] = item.feedback || `نمره پیشنهادی: ${assignedScore} از ${maxPts}`
           totalScore += assignedScore
@@ -1386,50 +1406,34 @@ export async function gradeExamWithAI(
       }
     }
   } catch (e) {
-    console.warn('Hybrid grading request failed, using heuristic evaluation', e)
+    console.warn('Hybrid grading request failed, using semantic heuristic evaluation', e)
   }
 
-  // Fallback for complex questions if server did not score them
+  // Heuristic semantic fallback for complex questions if server did not score them
   for (const { q, ans } of complexQuestionsToGrade) {
     if (questionScores[q.id] === undefined) {
-      const text = (ans.textAnswer || '').trim()
-      const hasAttachment = Boolean(ans.imageAttachment)
-      let earned = 0
-      let fb = ''
-
-      const qPts = Number(q.points) || 2
+      const qPts = safeScore(q.points, 10, 2)
       if (q.type === 'fill_in_the_blank') {
-        const expected = String(q.correctAnswer || '').trim().toLowerCase()
-        if (text.toLowerCase() === expected || (expected && text.includes(expected))) {
-          earned = qPts
-          fb = '✅ پاسخ جای خالی کاملاً صحیح است.'
-        } else if (text.length > 0) {
-          earned = Math.round(qPts * 0.5 * 10) / 10
-          fb = `پاسخ نزدیک است. پاسخ مورد انتظار: ${q.correctAnswer}`
-        } else {
-          fb = `پاسخ نادرست. پاسخ صحیح: ${q.correctAnswer}`
-        }
+        const fib = evaluateFillInTheBlank(q, ans)
+        questionScores[q.id] = fib.score
+        questionFeedbacks[q.id] = fib.feedback
+        totalScore += fib.score
       } else {
-        if (text.length > 25 || hasAttachment) {
-          earned = Math.round(qPts * 0.85 * 10) / 10
-          fb = 'پاسخ کامل یا راه حل ثبت شده است.'
-        } else if (text.length > 0) {
-          earned = Math.round(qPts * 0.5 * 10) / 10
-          fb = 'پاسخ مختصر درج شده است.'
-        } else {
-          fb = 'پاسخی ثبت نشده است.'
-        }
+        const desc = evaluateDescriptiveQuestion(q, ans)
+        questionScores[q.id] = desc.score
+        questionFeedbacks[q.id] = desc.feedback
+        totalScore += desc.score
       }
-
-      questionScores[q.id] = earned
-      questionFeedbacks[q.id] = fb
-      totalScore += earned
     }
   }
 
-  // Generate fallback teacher note if server note wasn't returned
+  // Generate personalized teacher note if server note wasn't returned
+  const maxExamPoints = safeNumber(exam.totalPoints, 20) || 20
+  totalScore = safeScore(totalScore, maxExamPoints)
+  const scaledScore20 = safeScaled20(totalScore, maxExamPoints)
+
   if (!serverTeacherNote) {
-    const ratio = totalScore / (exam.totalPoints || 20)
+    const ratio = totalScore / maxExamPoints
     if (ratio >= 0.85) {
       serverTeacherNote = `آفرین ${studentName} عزیزم! عملکردت در این آزمون بسیار عالی و چشم‌گیر بود و تسلط خوبی روی مفاهیم نشان دادی. همین مسیر باانگیزه را ادامه بده.`
     } else if (ratio >= 0.6) {
@@ -1443,6 +1447,7 @@ export async function gradeExamWithAI(
     questionScores,
     questionFeedbacks,
     totalScore: Math.round(totalScore * 10) / 10,
+    scaledScore20,
     gradedAt: new Date().toISOString(),
     summary: serverTeacherNote,
   }
@@ -1528,123 +1533,20 @@ export function computeInstantExamResult(
   exam: Exam,
   answers: Record<string, any>
 ): InstantExamResult {
-  let correctCount = 0
-  let wrongCount = 0
-  let unansweredCount = 0
-  let earnedPoints = 0
-  const questionScores: Record<string, number> = {}
-  const questionFeedbacks: Record<string, string> = {}
-
-  const totalQuestions = exam.questions.length
-  let maxPoints = Number(exam.totalPoints) || 0
-  if (!maxPoints) {
-    maxPoints = exam.questions.reduce((sum, q) => sum + (Number(q.points) || 2), 0)
-  }
-
-  for (const q of exam.questions) {
-    const ans = answers[q.id]
-    const qPts = Number(q.points) || 2
-
-    const hasSelection = ans?.selectedOption !== undefined && ans.selectedOption !== null && ans.selectedOption !== ''
-    const hasText = Boolean(ans?.textAnswer && String(ans.textAnswer).trim().length > 0)
-    const hasImage = Boolean(ans?.imageAttachment)
-
-    if (!hasSelection && !hasText && !hasImage) {
-      unansweredCount++
-      questionScores[q.id] = 0
-      questionFeedbacks[q.id] = 'بدون پاسخ'
-      continue
-    }
-
-    if (q.type === 'multiple_choice') {
-      const selected = Number(ans?.selectedOption)
-      const correct = Number(q.correctAnswer)
-      if (!isNaN(selected) && !isNaN(correct) && selected === correct) {
-        correctCount++
-        earnedPoints += qPts
-        questionScores[q.id] = qPts
-        questionFeedbacks[q.id] = `✅ پاسخ کاملاً درست است (+${qPts} نمره)`
-      } else {
-        wrongCount++
-        questionScores[q.id] = 0
-        const correctLabel = q.options && q.options[correct] ? ` (${q.options[correct]})` : `گزینه ${correct + 1}`
-        questionFeedbacks[q.id] = `❌ پاسخ نادرست است. گزینه صحیح: ${correctLabel}`
-      }
-    } else if (q.type === 'fill_in_the_blank') {
-      const studentText = String(ans?.textAnswer || '').trim().toLowerCase()
-      const correctText = String(q.correctAnswer || '').trim().toLowerCase()
-      const normStudent = studentText.replace(/[\s\u200c]/g, '').replace(/[ي]/g, 'ی').replace(/[ك]/g, 'ک')
-      const normCorrect = correctText.replace(/[\s\u200c]/g, '').replace(/[ي]/g, 'ی').replace(/[ك]/g, 'ک')
-
-      if (normStudent && normCorrect && (normStudent === normCorrect || normStudent.includes(normCorrect) || normCorrect.includes(normStudent))) {
-        correctCount++
-        earnedPoints += qPts
-        questionScores[q.id] = qPts
-        questionFeedbacks[q.id] = '✅ پاسخ جای‌خالی کاملاً درست است.'
-      } else if (studentText.length > 0) {
-        // Optimistic partial credit for effort while AI/teacher reviews
-        const partial = Math.round((qPts * 0.7) * 10) / 10
-        earnedPoints += partial
-        questionScores[q.id] = partial
-        questionFeedbacks[q.id] = `🔍 پاسخ ثبت شد (ارزیابی اولیه: ${partial} از ${qPts})`
-      } else {
-        unansweredCount++
-        questionScores[q.id] = 0
-        questionFeedbacks[q.id] = 'بدون پاسخ'
-      }
-    } else if (q.type === 'true_false') {
-      const studentBool = Boolean(ans?.selectedOption ?? ans?.textAnswer)
-      const correctBool = Boolean(q.correctAnswer)
-      if (studentBool === correctBool) {
-        correctCount++
-        earnedPoints += qPts
-        questionScores[q.id] = qPts
-        questionFeedbacks[q.id] = '✅ پاسخ درست است.'
-      } else {
-        wrongCount++
-        questionScores[q.id] = 0
-        questionFeedbacks[q.id] = '❌ پاسخ نادرست است.'
-      }
-    } else {
-      // Descriptive, image, open-ended
-      if (hasText || hasImage) {
-        const textLen = String(ans?.textAnswer || '').trim().length
-        const estimatedScore = textLen > 25 || hasImage ? qPts : Math.round((qPts * 0.6) * 10) / 10
-        earnedPoints += estimatedScore
-        questionScores[q.id] = estimatedScore
-        questionFeedbacks[q.id] = hasImage
-          ? '📸 تصویر برگه با موفقیت ثبت شد و در صف بازبینی آموزگار قرار گرفت.'
-          : `📝 پاسخ تشریحی ثبت شد (ارزیابی اولیه: ${estimatedScore} از ${qPts}).`
-      } else {
-        unansweredCount++
-        questionScores[q.id] = 0
-        questionFeedbacks[q.id] = 'بدون پاسخ'
-      }
-    }
-  }
-
-  const answeredCount = totalQuestions - unansweredCount
-  earnedPoints = Math.min(maxPoints, Math.round(earnedPoints * 10) / 10)
-  const percentage = maxPoints > 0 ? Math.round((earnedPoints / maxPoints) * 100) : 0
-  const scaledScore20 = maxPoints > 0 ? Math.round(((earnedPoints / maxPoints) * 20) * 10) / 10 : earnedPoints
-
-  let status: 'excellent' | 'good' | 'needs_practice' = 'good'
-  if (percentage >= 80) status = 'excellent'
-  else if (percentage < 60) status = 'needs_practice'
-
+  const result = evaluateEntireExamSubmission(exam, answers)
   return {
-    totalQuestions,
-    answeredCount,
-    unansweredCount,
-    correctCount,
-    wrongCount,
-    earnedPoints,
-    maxPoints,
-    percentage,
-    scaledScore20,
-    questionScores,
-    questionFeedbacks,
-    status,
+    totalQuestions: result.totalQuestions,
+    answeredCount: result.answeredCount,
+    unansweredCount: result.unansweredCount,
+    correctCount: result.correctCount,
+    wrongCount: result.wrongCount,
+    earnedPoints: result.earnedPoints,
+    maxPoints: result.maxPoints,
+    percentage: result.percentage,
+    scaledScore20: result.scaledScore20,
+    questionScores: result.questionScores,
+    questionFeedbacks: result.questionFeedbacks,
+    status: result.status,
   }
 }
 
@@ -1834,20 +1736,28 @@ export async function approveExamSubmission(params: {
   if (!sub) throw new Error('پاسخ آزمون یافت نشد.')
 
   let totalScore = 0
+  const cleanScores: Record<string, number> = {}
   for (const q of exam.questions) {
-    totalScore += approvedScores[q.id] ?? (sub.aiGrading?.questionScores[q.id] || 0)
+    const qPts = safeScore(q.points, 10, 2)
+    const val = approvedScores[q.id] ?? (sub.aiGrading?.questionScores?.[q.id] || 0)
+    const valid = safeScore(val, qPts)
+    cleanScores[q.id] = valid
+    totalScore += valid
   }
-  totalScore = Math.round(totalScore * 10) / 10
+  const maxExamPts = safeNumber(exam.totalPoints, 20) || 20
+  totalScore = safeScore(totalScore, maxExamPts)
+  const scaledScore20 = safeScaled20(totalScore, maxExamPts)
 
   sub.isReleased = true
   sub.is_released = true
   sub.status = 'graded'
   sub.teacherGrading = {
     approved: true,
-    questionScores: approvedScores,
-    questionFeedbacks: sub.teacherGrading?.questionFeedbacks,
+    questionScores: cleanScores,
+    questionFeedbacks: sub.teacherGrading?.questionFeedbacks || sub.aiGrading?.questionFeedbacks,
     teacherNotes: teacherNotes || 'تایید شده توسط آموزگار محترم',
     totalScore,
+    scaledScore20,
     approvedAt: new Date().toISOString(),
   }
 
