@@ -1,11 +1,9 @@
 import { GoogleGenAI } from '@google/genai'
 
-// Models to try in order (Prioritizing gemini-1.5-flash and gemini-2.5-flash as requested)
+// Models to try in order (Modern Gemini 3.x Flash models)
 const CANDIDATE_MODELS = [
-  'gemini-1.5-flash',
-  'gemini-2.5-flash',
-  'gemini-flash-latest',
   'gemini-3.8-flash',
+  'gemini-flash-latest',
   'gemini-3.1-flash-lite',
 ]
 
@@ -19,48 +17,15 @@ export function getClientGeminiApiKey(): string {
     if (typeof envKey === 'string' && envKey.trim() && !envKey.includes('PLACEHOLDER')) {
       return envKey.trim()
     }
-    if (typeof localStorage !== 'undefined') {
-      const keys = [
-        'VITE_GEMINI_API_KEY',
-        'GEMINI_API_KEY',
-        'gemini_api_key',
-        'geminiApiKey',
-        'client_gemini_api_key',
-        'school_gemini_api_key',
-      ]
-      for (const k of keys) {
-        const val = localStorage.getItem(k)
-        if (typeof val === 'string' && val.trim()) {
-          return val.trim()
-        }
-      }
-    }
-    if (typeof sessionStorage !== 'undefined') {
-      const sessKey = sessionStorage.getItem('VITE_GEMINI_API_KEY') || sessionStorage.getItem('GEMINI_API_KEY')
-      if (typeof sessKey === 'string' && sessKey.trim()) {
-        return sessKey.trim()
-      }
-    }
   } catch {}
   return ''
 }
 
 /**
- * Saves a client-side Gemini API key to localStorage for mobile browsers & standalone SPAs
+ * Saves a client-side Gemini API key (no-op as keys are strictly server-side)
  */
-export function setClientGeminiApiKey(key: string): void {
-  try {
-    if (typeof localStorage !== 'undefined') {
-      const trimmed = key.trim()
-      if (trimmed) {
-        localStorage.setItem('VITE_GEMINI_API_KEY', trimmed)
-        localStorage.setItem('GEMINI_API_KEY', trimmed)
-      } else {
-        localStorage.removeItem('VITE_GEMINI_API_KEY')
-        localStorage.removeItem('GEMINI_API_KEY')
-      }
-    }
-  } catch {}
+export function setClientGeminiApiKey(_key: string): void {
+  // Key must reside exclusively on server in GEMINI_API_KEY
 }
 
 /**
@@ -115,7 +80,7 @@ export function translateGeminiError(err: any): string {
     msg.includes('Forbidden') ||
     msg.includes('not configured')
   ) {
-    return 'کلید هوش مصنوعی (API Key) معتبر نیست یا دسترسی آن محدود شده است. لطفاً متغیر VITE_GEMINI_API_KEY یا تنظیمات کلید را بررسی کنید.'
+    return 'سرویس هوش مصنوعی در سرور فعال نشده است یا کلید دسترسی معتبر نیست. لطفاً با مدیر سامانه تماس بگیرید.'
   }
   if (
     msg.includes('RESOURCE_EXHAUSTED') ||
@@ -123,7 +88,7 @@ export function translateGeminiError(err: any): string {
     msg.includes('QuotaExceeded') ||
     msg.includes('429')
   ) {
-    return 'سهمیه استفاده از سرویس هوش مصنوعی گوگل (Quota) تکمیل شده است. لطفاً چند دقیقه دیگر مجدداً تلاش فرمایید.'
+    return 'سهمیه استفاده از سرویس هوش مصنوعی گوگل (Quota) موقتاً تکمیل شده است. لطفاً چند دقیقه دیگر مجدداً تلاش فرمایید.'
   }
   if (
     msg.includes('Failed to fetch') ||
@@ -133,6 +98,9 @@ export function translateGeminiError(err: any): string {
     msg.includes('ECONNREFUSED')
   ) {
     return 'خطای شبکه در برقراری ارتباط با هوش مصنوعی. لطفاً اتصال اینترنت خود را بررسی کنید.'
+  }
+  if (msg.includes('AbortError') || msg.includes('زمان انتظار')) {
+    return 'زمان انتظار ارتباط با سرور هوش مصنوعی به پایان رسید. لطفاً مجدداً امتحان نمایید.'
   }
   if (msg.includes('model') && (msg.includes('not found') || msg.includes('unsupported'))) {
     return 'مدل هوش مصنوعی مورد نظر در دسترس نیست.'
@@ -245,7 +213,7 @@ export async function callBackendAiSafe(
 ): Promise<any> {
   const teacherPass = getStoredTeacherPassword(teacherPassword)
   const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), 15000)
+  const timeoutId = setTimeout(() => controller.abort(), 45000)
 
   let res: Response
   try {
@@ -258,19 +226,19 @@ export async function callBackendAiSafe(
   } catch (netErr: any) {
     clearTimeout(timeoutId)
     if (netErr?.name === 'AbortError') {
-      throw new Error('زمان انتظار ارتباط با سرور هوش مصنوعی به پایان رسید.')
+      throw new Error('زمان انتظار ارتباط با سرور هوش مصنوعی به پایان رسید (۴۵ ثانیه). لطفاً دوباره امتحان کنید.')
     }
-    throw new Error('عدم امکان برقراری ارتباط با سرور بک‌اند.')
+    throw new Error('عدم امکان برقراری ارتباط با سرور هوش مصنوعی. لطفاً اتصال اینترنت را بررسی کنید.')
   } finally {
     clearTimeout(timeoutId)
   }
 
-  // Detect HTML response (happens when Netlify / Cloudflare SPA rewrite serves index.html on missing /api routes)
+  // Detect HTML response (happens when SPA rewrite serves index.html on missing /api routes)
   const contentType = res.headers.get('content-type') || ''
   if (contentType.includes('text/html') || res.status === 404) {
-    console.warn(`[Gemini Hybrid] Endpoint ${endpoint} returned 404/HTML (Static deployment).`);
+    console.warn(`[Gemini Hybrid] Endpoint ${endpoint} returned 404/HTML.`);
     throw new Error(
-      'سرویس هوش مصنوعی نیازمند تنظیم کلید VITE_GEMINI_API_KEY است. به دلیل استقرار استاتیک (بدون سرور بک‌اند)، لطفاً کلید رسمی جمینای را در تنظیمات هاست یا مرورگر قرار دهید.'
+      'سرویس هوش مصنوعی سرور در دسترس نیست یا پاسخ نامعتبر بازگرداند. لطفاً لحظاتی دیگر تلاش فرمایید.'
     )
   }
 
@@ -440,20 +408,36 @@ export async function generateExamQuestionsHybrid(params: {
 
   console.log('[Gemini Hybrid] generateExamQuestionsHybrid invoked:', { subject, topic, count, difficulty })
 
-  if (isClientGeminiEnabled()) {
-    try {
-      const rawTopic = String(topic || '').trim()
-      let effectiveSubject = subject && subject.trim() ? subject.trim() : 'پایه ششم ابتدایی'
-      const numCount = Math.min(25, Math.max(1, Number(count) || 5))
+  // 1. Primary: Secure server backend call (using GEMINI_API_KEY from environment)
+  try {
+    const data = await callBackendAiSafe('/api/ai/generate-exam', params, teacherPassword)
+    if (data.success && Array.isArray(data.questions) && data.questions.length > 0) {
+      return data.questions.map((item: any, idx: number) => ({
+        id: item.id || `q_${Date.now()}_${idx + 1}`,
+        type: item.type || 'multiple_choice',
+        question: item.question,
+        options: item.options || (item.type === 'multiple_choice' ? ['الف', 'ب', 'ج', 'د'] : undefined),
+        correctAnswer: item.correctAnswer ?? 0,
+        rubricOrHint: item.rubricOrHint || '',
+        points: Number(item.points) || 2,
+      }))
+    }
+  } catch (backendErr: any) {
+    console.warn('[Gemini Hybrid] Primary server call failed, checking fallback...', backendErr?.message || backendErr)
+    if (isClientGeminiEnabled()) {
+      try {
+        const rawTopic = String(topic || '').trim()
+        let effectiveSubject = subject && subject.trim() ? subject.trim() : 'پایه ششم ابتدایی'
+        const numCount = Math.min(25, Math.max(1, Number(count) || 5))
 
-      const difficultyDesc =
-        difficulty === 'hard'
-          ? 'سطح دشوار و تحلیلی تیزهوشانی (مدارس سمپاد)'
-          : difficulty === 'easy'
-          ? 'سطح ساده و روان برای تثبیت مفاهیم کتاب درسی'
-          : 'سطح استاندارد امتحانات کلاسی و نهایی پایه ششم'
+        const difficultyDesc =
+          difficulty === 'hard'
+            ? 'سطح دشوار و تحلیلی تیزهوشانی (مدارس سمپاد)'
+            : difficulty === 'easy'
+            ? 'سطح ساده و روان برای تثبیت مفاهیم کتاب درسی'
+            : 'سطح استاندارد امتحانات کلاسی و نهایی پایه ششم'
 
-      const prompt = `شما آموزگار شایسته، دلسوز و حرفه‌ای پایه ششم ابتدایی هستید.
+        const prompt = `شما آموزگار شایسته، دلسوز و حرفه‌ای پایه ششم ابتدایی هستید.
 معلم از شما خواسته است برای این موضوع یک آزمون بسیار باکیفیت و استاندارد طراحی کنید:
 🎯 موضوع: «${rawTopic}»
 🎯 درس: «${effectiveSubject}»
@@ -472,71 +456,39 @@ ${extraInstructions ? `🎯 توضیحات معلم: «${extraInstructions}»` :
     "correctAnswer": 0,
     "rubricOrHint": "توضیح کامل پاسخنامه",
     "points": 2
-  },
-  {
-    "id": "q2",
-    "type": "fill_in_the_blank",
-    "question": "متن سوال با علامت ............ برای جای خالی",
-    "correctAnswer": "پاسخ جای خالی",
-    "rubricOrHint": "توضیح پاسخ",
-    "points": 2
-  },
-  {
-    "id": "q3",
-    "type": "descriptive",
-    "question": "مسئله یا سوال تشریحی",
-    "rubricOrHint": "معیار نمره‌دهی و راه‌حل",
-    "points": 3
   }
 ]`
 
-      const jsonText = await callGeminiDirectClient(prompt, true)
-      let cleaned = jsonText.trim()
-      if (cleaned.startsWith('```json')) cleaned = cleaned.replace(/^```json/, '').replace(/```$/, '').trim()
-      if (cleaned.startsWith('```')) cleaned = cleaned.replace(/^```/, '').replace(/```$/, '').trim()
+        const jsonText = await callGeminiDirectClient(prompt, true)
+        let cleaned = jsonText.trim()
+        if (cleaned.startsWith('```json')) cleaned = cleaned.replace(/^```json/, '').replace(/```$/, '').trim()
+        if (cleaned.startsWith('```')) cleaned = cleaned.replace(/^```/, '').replace(/```$/, '').trim()
 
-      const firstBracket = cleaned.indexOf('[')
-      const lastBracket = cleaned.lastIndexOf(']')
-      if (firstBracket !== -1 && lastBracket !== -1) {
-        cleaned = cleaned.substring(firstBracket, lastBracket + 1)
+        const firstBracket = cleaned.indexOf('[')
+        const lastBracket = cleaned.lastIndexOf(']')
+        if (firstBracket !== -1 && lastBracket !== -1) {
+          cleaned = cleaned.substring(firstBracket, lastBracket + 1)
+        }
+
+        const parsed = JSON.parse(cleaned)
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed.map((item: any, idx: number) => ({
+            id: item.id || `q_${Date.now()}_${idx + 1}`,
+            type: item.type || 'multiple_choice',
+            question: item.question,
+            options: item.options || (item.type === 'multiple_choice' ? ['الف', 'ب', 'ج', 'د'] : undefined),
+            correctAnswer: item.correctAnswer ?? 0,
+            rubricOrHint: item.rubricOrHint || '',
+            points: Number(item.points) || 2,
+          }))
+        }
+      } catch (clientErr: any) {
+        console.error('[Gemini Hybrid] Client direct generation failed:', clientErr)
       }
-
-      const parsed = JSON.parse(cleaned)
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed.map((item: any, idx: number) => ({
-          id: item.id || `q_${Date.now()}_${idx + 1}`,
-          type: item.type || 'multiple_choice',
-          question: item.question,
-          options: item.options || (item.type === 'multiple_choice' ? ['الف', 'ب', 'ج', 'د'] : undefined),
-          correctAnswer: item.correctAnswer ?? 0,
-          rubricOrHint: item.rubricOrHint || '',
-          points: Number(item.points) || 2,
-        }))
-      }
-    } catch (err: any) {
-      console.warn('[Hybrid] Client direct exam generation failed, attempting backend fallback:', err)
     }
+    throw new Error(translateGeminiError(backendErr))
   }
-
-  // Fallback to backend server safely
-  try {
-    const data = await callBackendAiSafe('/api/ai/generate-exam', params, teacherPassword)
-    if (data.success && Array.isArray(data.questions) && data.questions.length > 0) {
-      return data.questions.map((item: any, idx: number) => ({
-        id: item.id || `q_${Date.now()}_${idx + 1}`,
-        type: item.type || 'multiple_choice',
-        question: item.question,
-        options: item.options || (item.type === 'multiple_choice' ? ['الف', 'ب', 'ج', 'د'] : undefined),
-        correctAnswer: item.correctAnswer ?? 0,
-        rubricOrHint: item.rubricOrHint || '',
-        points: Number(item.points) || 2,
-      }))
-    }
-    throw new Error('پاسخ سوالات از سرور دریافت نشد.')
-  } catch (err: any) {
-    console.error('[Gemini Hybrid] Exam generation error:', err)
-    throw new Error(translateGeminiError(err))
-  }
+  throw new Error('پاسخ سوالات از سرور دریافت نشد.')
 }
 
 // ============================================================================

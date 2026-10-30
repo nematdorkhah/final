@@ -564,6 +564,7 @@ export default function TeacherExamBuilder({
   }
 
   async function handleFinalPublish() {
+    if (savingExam) return
     if (!draftExam || draftExam.questions.length === 0) {
       alert('آزمون باید حداقل یک سوال داشته باشد.')
       return
@@ -597,7 +598,6 @@ export default function TeacherExamBuilder({
         totalPoints: draftExam.questions.reduce((sum, q) => sum + (Number(q.points) || 1), 0),
       }
 
-
       await saveExam(readyExam, teacherPassword)
       await loadExams()
       setDraftExam(null)
@@ -606,7 +606,8 @@ export default function TeacherExamBuilder({
       setCreatingStep('prompt')
       if (onDone) onDone()
     } catch (err: any) {
-      alert('خطا در ذخیره آزمون: ' + err.message)
+      console.error('Save exam error:', err)
+      alert('خطا در ذخیره آزمون: ' + (err?.message || 'خطای شبکه'))
     } finally {
       setSavingExam(false)
     }

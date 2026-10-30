@@ -345,57 +345,45 @@ export async function syncExamsToSupabaseSystemRow(
 
   console.log(`[ExamStore:syncExamsToSupabaseSystemRow] Syncing ${exams.length} exams directly to __SYSTEM_EXAMS__...`)
 
-  // 1. Direct Supabase Client: First check if __SYSTEM_EXAMS__ row exists
+  // 1. Direct Supabase Client: Update or insert __SYSTEM_EXAMS__ row using type: 'announcement' (valid for posts_type_check)
   try {
-    const { data: existingRow, error: selectErr } = await supabase
+    const { data: existingRow } = await supabase
       .from('posts')
       .select('id, title')
       .eq('title', '__SYSTEM_EXAMS__')
       .maybeSingle()
 
     if (existingRow?.id) {
-      // Update existing __SYSTEM_EXAMS__ row
       const { error: updateErr } = await supabase
         .from('posts')
         .update({
           body: examsBody,
-          type: 'exam',
+          type: 'announcement',
           publish_at: new Date().toISOString(),
         })
         .eq('title', '__SYSTEM_EXAMS__')
 
-      if (!updateErr) {
-        console.log('[ExamStore:syncExamsToSupabaseSystemRow] Successfully updated __SYSTEM_EXAMS__ directly via Supabase client')
-        directSuccess = true
-      } else {
-        console.warn('[ExamStore:syncExamsToSupabaseSystemRow] Direct update error:', updateErr)
-      }
+      if (!updateErr) directSuccess = true
     } else {
-      // Row doesn't exist yet, insert/upsert
       const { error: insertErr } = await supabase
         .from('posts')
         .upsert(
           {
             title: '__SYSTEM_EXAMS__',
-            type: 'exam',
+            type: 'announcement',
             body: examsBody,
             publish_at: new Date().toISOString(),
           },
           { onConflict: 'title' }
         )
 
-      if (!insertErr) {
-        console.log('[ExamStore:syncExamsToSupabaseSystemRow] Successfully upserted __SYSTEM_EXAMS__ directly via Supabase client')
-        directSuccess = true
-      } else {
-        console.warn('[ExamStore:syncExamsToSupabaseSystemRow] Direct upsert error:', insertErr)
-      }
+      if (!insertErr) directSuccess = true
     }
   } catch (err) {
     console.warn('[ExamStore:syncExamsToSupabaseSystemRow] Direct supabase.from("posts") failed:', err)
   }
 
-  // 2. Also trigger Teacher RPC if available for guaranteed security bypass if RLS restricts direct writes
+  // 2. Teacher RPC if available
   if (teacherPass) {
     try {
       const { data: posts } = await supabase.rpc('teacher_list_posts', {
@@ -409,27 +397,25 @@ export async function syncExamsToSupabaseSystemRow(
           p_post_id: existing.id,
           p_title: '__SYSTEM_EXAMS__',
           p_body: examsBody,
-          p_type: 'exam',
+          p_type: 'announcement',
           p_due_at: null,
           p_publish_at: new Date().toISOString(),
           p_attachment_path: null,
         })
-        console.log('[ExamStore:syncExamsToSupabaseSystemRow] Teacher RPC updated __SYSTEM_EXAMS__ post')
       } else {
         await supabase.rpc('teacher_create_post', {
           p_password: teacherPass,
-          p_type: 'exam',
+          p_type: 'announcement',
           p_title: '__SYSTEM_EXAMS__',
           p_body: examsBody,
           p_due_at: null,
           p_publish_at: new Date().toISOString(),
           p_attachment_path: null,
         })
-        console.log('[ExamStore:syncExamsToSupabaseSystemRow] Teacher RPC created __SYSTEM_EXAMS__ post')
       }
       directSuccess = true
     } catch (rpcErr) {
-      console.warn('[ExamStore:syncExamsToSupabaseSystemRow] Teacher RPC backup sync error:', rpcErr)
+      console.warn('[ExamStore:syncExamsToSupabaseSystemRow] Teacher RPC backup sync warning:', rpcErr)
     }
   }
 
@@ -455,93 +441,66 @@ export async function saveExam(exam: Exam, teacherPassword?: string): Promise<vo
 
   const teacherPass = getStoredTeacherPassword(teacherPassword)
 
-  // 1. Direct persistence to quizzes table (PRIMARY & SEPARATE RECORDS)
-  try {
-    const quizPayload = {
-      id: exam.id,
-      title: exam.title,
-      subject: exam.subject || 'عمومی',
-      questions: exam.questions || [],
-      duration_minutes: Number(exam.durationMinutes) || 30,
-      created_at: exam.createdAt || new Date().toISOString(),
-    }
-    const { error: quizErr } = await supabase.from('quizzes').upsert(quizPayload, { onConflict: 'id' })
-    if (!quizErr) {
-      console.log('[ExamStore:saveExam] Successfully saved exam directly into quizzes table:', exam.id)
-    } else {
-      console.warn('[ExamStore:saveExam] quizzes upsert warning, trying direct insert:', quizErr)
-      await supabase.from('quizzes').insert(quizPayload)
-    }
-  } catch (qErr) {
-    console.warn('[ExamStore:saveExam] Error saving to quizzes table:', qErr)
-  }
-
-  // 2. Direct Sync to Supabase Posts __SYSTEM_EXAMS__ row (Redundancy for class dashboard)
-  await syncExamsToSupabaseSystemRow(current, teacherPass)
-
-  // 3. Direct Sync to Supabase Individual Exam Post (Redundancy for class feed)
-  if (teacherPass) {
-    const examPostTitle = `📝 آزمون: ${exam.title} (${exam.subject})`
-    const examBodyJson = JSON.stringify(exam)
-    const calculatedDueAt =
-      exam.dueDate ||
-      new Date(
-        new Date(exam.scheduledStartTime || exam.createdAt || Date.now()).getTime() + (Number(exam.durationMinutes) || 30) * 60000
-      ).toISOString()
-
+  // Strict timeout promise wrapper (5000ms max) ensuring the save button NEVER hangs
+  const saveWork = async () => {
+    // 1. Primary Direct persistence to quizzes table in Supabase
     try {
-      let existingPostId: string | null = null
-      try {
-        const { data: posts } = await supabase.rpc('teacher_list_posts', {
-          p_password: teacherPass,
-        })
-        if (Array.isArray(posts)) {
-          const found = posts.find(
-            (p: any) =>
-              p.title === examPostTitle ||
-              (p.type === 'exam' && p.body && p.body.includes(`"id":"${exam.id}"`))
-          )
-          if (found?.id) existingPostId = found.id
-        }
-      } catch {}
-
-      if (existingPostId) {
-        await supabase.rpc('teacher_update_post', {
-          p_password: teacherPass,
-          p_post_id: existingPostId,
-          p_title: examPostTitle,
-          p_body: examBodyJson,
-          p_type: 'exam',
-          p_due_at: calculatedDueAt,
-          p_publish_at: new Date().toISOString(),
-          p_attachment_path: null,
-        })
-        console.log('[ExamStore:saveExam] Updated existing exam post in Supabase:', existingPostId)
-      } else {
-        await supabase.rpc('teacher_create_post', {
-          p_password: teacherPass,
-          p_type: 'exam',
-          p_title: examPostTitle,
-          p_body: examBodyJson,
-          p_due_at: calculatedDueAt,
-          p_publish_at: new Date().toISOString(),
-          p_attachment_path: null,
-        })
-        console.log('[ExamStore:saveExam] Created new exam post in Supabase')
+      const quizPayload = {
+        id: exam.id,
+        title: exam.title,
+        subject: exam.subject || 'عمومی',
+        questions: exam.questions || [],
+        duration_minutes: Number(exam.durationMinutes) || 30,
+        created_at: exam.createdAt || new Date().toISOString(),
       }
-    } catch (e) {
-      console.warn('[ExamStore:saveExam] Supabase individual post sync warning:', e)
+      const { error: quizErr } = await supabase.from('quizzes').upsert(quizPayload, { onConflict: 'id' })
+      if (!quizErr) {
+        console.log('[ExamStore:saveExam] Successfully saved exam directly into quizzes table:', exam.id)
+      } else {
+        console.warn('[ExamStore:saveExam] quizzes upsert warning, trying insert:', quizErr)
+        await supabase.from('quizzes').insert(quizPayload)
+      }
+    } catch (qErr) {
+      console.warn('[ExamStore:saveExam] Error saving to quizzes table:', qErr)
+    }
+
+    // 2. Call backend server /api/exams/save with teacher credentials
+    try {
+      const serverRes = await fetch('/api/exams/save', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(teacherPass ? { 'x-teacher-password': teacherPass, 'Authorization': `Bearer ${teacherPass}` } : {}),
+        },
+        body: JSON.stringify({ exam, teacherPassword: teacherPass }),
+      })
+      if (serverRes.ok) {
+        console.log('[ExamStore:saveExam] Successfully saved to backend server cache & disk backup.')
+      }
+    } catch (sErr) {
+      console.warn('[ExamStore:saveExam] Backend server save warning:', sErr)
+    }
+
+    // 3. Sync to Supabase Posts __SYSTEM_EXAMS__ row for static cross-device redundancy
+    try {
+      await syncExamsToSupabaseSystemRow(current, teacherPass)
+    } catch (sysErr) {
+      console.warn('[ExamStore:saveExam] syncExamsToSupabaseSystemRow warning:', sysErr)
     }
   }
+
+  // Timeout guard: 5000ms maximum wait so the UI responds promptly
+  await Promise.race([
+    saveWork(),
+    new Promise<void>((resolve) => setTimeout(resolve, 5000)),
+  ])
 }
 
 export async function deleteExam(examId: string, teacherPassword?: string): Promise<boolean> {
   const current = getLocalExams().filter((e) => e.id !== examId)
   saveLocalExams(current)
 
-  const teacherPass =
-    teacherPassword ||
-    (typeof window !== 'undefined' ? sessionStorage.getItem('teacherPassword') || '' : '')
+  const teacherPass = getStoredTeacherPassword(teacherPassword)
 
   // 1. Direct delete from quizzes table and quiz_submissions
   try {
@@ -552,34 +511,20 @@ export async function deleteExam(examId: string, teacherPassword?: string): Prom
     console.warn('[ExamStore:deleteExam] Error deleting from quizzes table:', err)
   }
 
-  // 2. Direct Sync updated exams array to Supabase __SYSTEM_EXAMS__
-  await syncExamsToSupabaseSystemRow(current, teacherPass)
+  // 2. Backend server delete call
+  try {
+    fetch('/api/exams/delete', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(teacherPass ? { 'x-teacher-password': teacherPass, 'Authorization': `Bearer ${teacherPass}` } : {}),
+      },
+      body: JSON.stringify({ examId, teacherPassword: teacherPass }),
+    }).catch(() => {})
+  } catch {}
 
-  // 3. Remove individual post in Supabase if teacher password is present
-  if (teacherPass) {
-    try {
-      const { data: posts } = await supabase.rpc('teacher_list_posts', {
-        p_password: teacherPass,
-      })
-      if (Array.isArray(posts)) {
-        const found = posts.find(
-          (p: any) =>
-            p.type === 'exam' &&
-            p.body &&
-            (p.body.includes(`"id":"${examId}"`) || p.body.includes(`"id": "${examId}"`))
-        )
-        if (found?.id) {
-          await supabase.rpc('teacher_delete_post', {
-            p_password: teacherPass,
-            p_post_id: found.id,
-          })
-          console.log('[ExamStore:deleteExam] Deleted individual post in Supabase:', found.id)
-        }
-      }
-    } catch (e) {
-      console.warn('[ExamStore:deleteExam] Error deleting individual post in Supabase:', e)
-    }
-  }
+  // 3. Direct Sync updated exams array to Supabase __SYSTEM_EXAMS__
+  await syncExamsToSupabaseSystemRow(current, teacherPass)
 
   return true
 }
@@ -871,6 +816,21 @@ export async function saveExamSubmissionDirectToSupabase(
   } catch (err) {
     console.warn('[ExamStore:saveExamSubmissionDirectToSupabase] quiz_submissions table error:', err)
   }
+
+  // 4. Also notify server endpoint to update memory cache and disk backup
+  try {
+    fetch('/api/exams/submit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        examId: exam.id,
+        studentId: submission.studentId,
+        studentName: submission.studentName,
+        answers: submission.answers,
+        clientExam: exam,
+      }),
+    }).catch(() => {})
+  } catch {}
 
   return success
 }

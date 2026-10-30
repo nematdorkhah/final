@@ -8,10 +8,8 @@ import { GoogleGenAI } from '@google/genai'
 import { createClient } from '@supabase/supabase-js'
 
 const CANDIDATE_MODELS = [
-  'gemini-1.5-flash',
-  'gemini-2.5-flash',
-  'gemini-flash-latest',
   'gemini-3.8-flash',
+  'gemini-flash-latest',
   'gemini-3.1-flash-lite',
 ]
 
@@ -380,12 +378,133 @@ async function startServer() {
       } catch (err) {
         console.warn(`Failed persisting independent exam submission ${recordTitle} to Supabase:`, err)
       }
+
+      // 3. Direct persistence to quiz_submissions table in Supabase
+      try {
+        let studentUUID: string | null = null
+        const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(studentId))
+        if (isUUID) {
+          studentUUID = String(studentId)
+        } else {
+          const { data: stRow } = await withSupabaseTimeout(
+            supabase.from('students').select('id').eq('access_code', String(studentId)).maybeSingle(),
+            SUPABASE_TIMEOUT_MS,
+            { data: null }
+          )
+          if (stRow?.id) studentUUID = stRow.id
+        }
+
+        if (studentUUID) {
+          const isExamUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(examId))
+          const earned = Number(
+            submission.teacherGrading?.scaledScore20 ??
+            submission.aiGrading?.scaledScore20 ??
+            submission.teacherGrading?.totalScore ??
+            0
+          )
+          const subPayload = {
+            student_id: studentUUID,
+            quiz_id: isExamUuid ? examId : null,
+            answers: {
+              ...submission.answers,
+              exam_id: examId,
+              quiz_id: examId,
+              student_name: submission.studentName,
+              student_national_code: studentId,
+              score: earned,
+              submitted_at: submission.submittedAt || new Date().toISOString(),
+            },
+            score: earned,
+            submitted_at: submission.submittedAt || new Date().toISOString(),
+          }
+          await withSupabaseTimeout(
+            supabase.from('quiz_submissions').upsert(subPayload),
+            SUPABASE_TIMEOUT_MS
+          )
+        }
+      } catch (qsErr) {
+        console.warn('Direct quiz_submissions upsert in server warning:', qsErr)
+      }
     })
   }
 
   async function initDataFromSupabase() {
     if (isInitializedFromSupabase) return
     try {
+      // 1. Quizzes table direct load
+      try {
+        const { data: dbQuizzes } = await withSupabaseTimeout(
+          supabase.from('quizzes').select('*').order('created_at', { ascending: false }),
+          SUPABASE_TIMEOUT_MS,
+          { data: [] }
+        )
+        if (Array.isArray(dbQuizzes) && dbQuizzes.length > 0) {
+          dbQuizzes.forEach((row: any) => {
+            if (!row?.id) return
+            const mappedExam = {
+              id: row.id,
+              title: row.title || 'آزمون کلاسی',
+              subject: row.subject || 'عمومی',
+              description: `آزمون درس ${row.subject || 'عمومی'}`,
+              questions: Array.isArray(row.questions) ? row.questions : [],
+              durationMinutes: Number(row.duration_minutes) || 30,
+              totalPoints: Array.isArray(row.questions)
+                ? row.questions.reduce((sum: number, q: any) => sum + (Number(q.points) || 1), 0)
+                : 20,
+              createdAt: row.created_at || new Date().toISOString(),
+              scheduledStartTime: row.created_at || new Date().toISOString(),
+              published: true,
+            }
+            const idx = cachedExams.findIndex((e) => e.id === row.id)
+            if (idx >= 0) cachedExams[idx] = { ...mappedExam, ...cachedExams[idx] }
+            else cachedExams.push(mappedExam)
+          })
+          saveExamsToDisk()
+        }
+      } catch (e) {
+        console.warn('Direct quizzes table init warning:', e)
+      }
+
+      // 2. Quiz Submissions table direct load
+      try {
+        const { data: dbSubs } = await withSupabaseTimeout(
+          supabase.from('quiz_submissions').select('*').order('submitted_at', { ascending: false }),
+          SUPABASE_TIMEOUT_MS,
+          { data: [] }
+        )
+        if (Array.isArray(dbSubs) && dbSubs.length > 0) {
+          dbSubs.forEach((qs: any) => {
+            const ans = qs.answers || {}
+            const targetExamId = qs.quiz_id || ans.quiz_id || ans.exam_id
+            const targetStudentId = ans.student_national_code || qs.student_id
+            if (targetExamId && targetStudentId) {
+              const key = `${targetExamId}:${targetStudentId}`
+              if (!cachedSubmissionsMap.has(key)) {
+                cachedSubmissionsMap.set(key, {
+                  id: `sub_${targetExamId}_${targetStudentId}`,
+                  examId: targetExamId,
+                  studentId: String(targetStudentId),
+                  studentName: ans.student_name || 'دانش‌آموز',
+                  submittedAt: qs.submitted_at,
+                  answers: ans,
+                  syncStatus: 'synced',
+                  status: 'pending_approval',
+                  teacherGrading: {
+                    totalScore: Number(qs.score) || 0,
+                    scaledScore20: Number(qs.score) || 0,
+                    approved: false,
+                  },
+                })
+              }
+            }
+          })
+          cachedSubmissions = Array.from(cachedSubmissionsMap.values())
+          saveSubmissionsToDisk()
+        }
+      } catch (e) {
+        console.warn('Direct quiz_submissions table init warning:', e)
+      }
+
       const { data: posts } = await withSupabaseTimeout(
         supabase.rpc('list_published_posts'),
         SUPABASE_TIMEOUT_MS,
@@ -766,25 +885,26 @@ async function startServer() {
       // Save instantly to disk backup to survive any Supabase or container restart
       saveExamsToDisk()
 
-      // Sync to Supabase system post AND exam post for full persistence
-      await syncSystemPost('__SYSTEM_EXAMS__', JSON.stringify(cachedExams), teacherPassword)
-
+      // 1. Direct persistence to quizzes table in Supabase
       try {
+        const quizPayload = {
+          id: exam.id,
+          title: exam.title,
+          subject: exam.subject || 'عمومی',
+          questions: exam.questions || [],
+          duration_minutes: Number(exam.durationMinutes) || 30,
+          created_at: exam.createdAt || new Date().toISOString(),
+        }
         await withSupabaseTimeout(
-          supabase.rpc('teacher_create_post', {
-            p_password: teacherPassword,
-            p_type: 'exam',
-            p_title: `📝 آزمون: ${exam.title} (${exam.subject})`,
-            p_body: JSON.stringify(exam),
-            p_due_at: new Date(new Date(exam.scheduledStartTime).getTime() + (exam.durationMinutes || 45) * 60000).toISOString(),
-            p_publish_at: new Date().toISOString(),
-            p_attachment_path: null,
-          }),
+          supabase.from('quizzes').upsert(quizPayload, { onConflict: 'id' }),
           SUPABASE_TIMEOUT_MS
         )
-      } catch (e) {
-        console.warn('Sync exam post to Supabase failed', e)
+      } catch (qErr) {
+        console.warn('Sync exam to quizzes table warning:', qErr)
       }
+
+      // 2. Sync to Supabase system post for full redundancy
+      await syncSystemPost('__SYSTEM_EXAMS__', JSON.stringify(cachedExams), teacherPassword)
 
       res.json({ success: true, exam })
     } catch (err: any) {
@@ -801,9 +921,21 @@ async function startServer() {
 
       if (!examId) return res.status(400).json({ success: false, error: 'examId is required' })
       cachedExams = cachedExams.filter((e) => e.id !== examId)
-      saveExamsToDisk()
+      // 1. Direct delete from quizzes and quiz_submissions tables in Supabase
+      try {
+        await withSupabaseTimeout(
+          supabase.from('quizzes').delete().eq('id', examId),
+          SUPABASE_TIMEOUT_MS
+        )
+        await withSupabaseTimeout(
+          supabase.from('quiz_submissions').delete().eq('quiz_id', examId),
+          SUPABASE_TIMEOUT_MS
+        )
+      } catch (delErr) {
+        console.warn('Direct delete from quizzes table error:', delErr)
+      }
 
-      // Sync updated exams list to Supabase
+      // 2. Sync updated exams list to Supabase system post
       await syncSystemPost('__SYSTEM_EXAMS__', JSON.stringify(cachedExams), teacherPassword)
 
       res.json({ success: true })
