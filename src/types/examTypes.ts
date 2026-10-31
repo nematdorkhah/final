@@ -42,6 +42,17 @@ export interface StudentExamAnswer {
   [key: string]: any
 }
 
+export interface RegradeAuditRecord {
+  regradedAt: string
+  oldScore: number
+  newScore: number
+  scoreDiff: number
+  oldScaledScore20?: number
+  newScaledScore20?: number
+  teacherOverrodeApproved?: boolean
+  reason?: string
+}
+
 export interface StudentExamSubmission {
   id: string
   examId: string
@@ -68,10 +79,45 @@ export interface StudentExamSubmission {
     teacherNotes?: string
     [key: string]: any
   }
+  regradeHistory?: RegradeAuditRecord[]
   isReleased?: boolean
   is_released?: boolean
   status?: 'pending_approval' | 'released' | 'graded'
   [key: string]: any
+}
+
+export interface RegradeQuestionDiff {
+  questionId: string
+  questionType: string
+  questionTitle: string
+  oldScore: number
+  newScore: number
+  maxPoints: number
+  oldFeedback?: string
+  newFeedback?: string
+}
+
+export interface RegradeDiffItem {
+  submissionId: string
+  studentId: string
+  studentName: string
+  examId: string
+  oldScore: number
+  newScore: number
+  scoreDiff: number
+  oldScaledScore20: number
+  newScaledScore20: number
+  isApproved: boolean
+  questionDiffs: RegradeQuestionDiff[]
+}
+
+export interface RegradePreviewResult {
+  examId: string
+  examTitle: string
+  totalSubmissions: number
+  submissionsWithChanges: number
+  approvedCount: number
+  items: RegradeDiffItem[]
 }
 
 export interface Exam {

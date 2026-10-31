@@ -1287,3 +1287,111 @@ export function evaluateEntireExamSubmission(
     hasPendingTeacherReview,
   }
 }
+
+// ----------------------------------------------------------------------
+// 11. EXAM & QUESTION VALIDATION ENGINE (PRE-PUBLISH INTEGRITY CHECKS)
+// ----------------------------------------------------------------------
+
+export interface QuestionValidationResult {
+  isValid: boolean
+  errors: string[]
+  warnings: string[]
+}
+
+export function validateExamQuestion(q: ExamQuestion): QuestionValidationResult {
+  const errors: string[] = []
+  const warnings: string[] = []
+
+  const qText = String(q.question || '').trim()
+  if (!qText) {
+    errors.push('صورت سوال نمی‌تواند خالی باشد.')
+  } else if (qText.length < 5) {
+    warnings.push('صورت سوال بسیار کوتاه است.')
+  }
+
+  const pts = safeScore(q.points, 20, 0)
+  if (pts <= 0) {
+    errors.push('بارم سوال باید بزرگتر از صفر باشد.')
+  }
+
+  if (q.type === 'multiple_choice') {
+    const opts = extractQuestionOptions(q)
+    if (opts.length < 2) {
+      errors.push('سوال چهارگزینه‌ای باید حداقل ۲ گزینه داشته باشد.')
+    } else {
+      const emptyOpts = opts.filter((o) => !String(o).trim())
+      if (emptyOpts.length > 0) {
+        errors.push('تمامی گزینه‌های سوال تستی باید دارای متن باشند.')
+      }
+
+      // Check duplicates
+      const cleanedOpts = opts.map(cleanOptionText)
+      const uniqueCleaned = new Set(cleanedOpts)
+      if (uniqueCleaned.size < cleanedOpts.length) {
+        warnings.push('برخی گزینه‌ها دارای متن یکسان یا تکراری هستند.')
+      }
+
+      // Validate correct option
+      const res = resolveCorrectOptionIndex(q)
+      if (!res.isValid || res.index < 0 || res.index >= opts.length) {
+        errors.push('پاسخ صحیح سوال با هیچ‌یک از گزینه‌های موجود مطابقت ندارد.')
+      }
+    }
+  } else if (q.type === 'fill_in_the_blank') {
+    const rawCorrect = String(q.correctAnswer || '').trim()
+    if (!rawCorrect) {
+      errors.push('پاسخ مورد انتظار برای جای‌خالی مشخص نشده است.')
+    }
+    if (!qText.includes('............') && !qText.includes('...') && !qText.includes(' جای خالی ') && !qText.includes('_')) {
+      warnings.push('صورت سوال جای‌خالی بهتر است دارای علامت جای خالی (............) باشد.')
+    }
+  } else if (q.type === 'descriptive') {
+    const rubric = String(q.rubricOrHint || q.correctAnswer || '').trim()
+    if (!rubric) {
+      warnings.push('راهنمای تصحیح یا معیار نمره‌دهی برای سوال تشریحی درج نشده است.')
+    }
+  }
+
+  return {
+    isValid: errors.length === 0,
+    errors,
+    warnings,
+  }
+}
+
+export function validateExam(exam: { questions: ExamQuestion[]; title?: string }): {
+  isValid: boolean
+  totalErrors: number
+  totalWarnings: number
+  questionResults: Record<string, QuestionValidationResult>
+  examErrors: string[]
+} {
+  const examErrors: string[] = []
+  if (!exam.title || !exam.title.trim()) {
+    examErrors.push('عنوان آزمون مشخص نشده است.')
+  }
+  const questions = Array.isArray(exam.questions) ? exam.questions : []
+  if (questions.length === 0) {
+    examErrors.push('آزمون باید حداقل یک سوال داشته باشد.')
+  }
+
+  const questionResults: Record<string, QuestionValidationResult> = {}
+  let totalErrors = examErrors.length
+  let totalWarnings = 0
+
+  for (const q of questions) {
+    const qRes = validateExamQuestion(q)
+    questionResults[q.id] = qRes
+    totalErrors += qRes.errors.length
+    totalWarnings += qRes.warnings.length
+  }
+
+  return {
+    isValid: totalErrors === 0,
+    totalErrors,
+    totalWarnings,
+    questionResults,
+    examErrors,
+  }
+}
+

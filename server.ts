@@ -1353,8 +1353,36 @@ ${JSON.stringify(questionsToAiGrade, null, 2)}
   })
 
   // --------------------------------------------------------------------------
-  // COMPLETE SYSTEM BACKUP RESTORE (All Sections: Exams, Progress, Submissions)
+  // SERVER TIME ENDPOINT (Tamper-proof time synchronization)
   // --------------------------------------------------------------------------
+  app.get('/api/time', (req, res) => {
+    const now = Date.now()
+    res.json({
+      success: true,
+      timestamp: now,
+      iso: new Date(now).toISOString(),
+    })
+  })
+
+  // --------------------------------------------------------------------------
+  // COMPLETE SYSTEM BACKUP EXPORT & RESTORE (Exams, Progress, Submissions)
+  // --------------------------------------------------------------------------
+  app.get('/api/backup/export', requireTeacherAuth, async (req, res) => {
+    try {
+      await ensureDataInitialized()
+      const backup = {
+        version: '2.0.0',
+        exportedAt: new Date().toISOString(),
+        exams: cachedExams,
+        examSubmissions: cachedSubmissions,
+        tizhooshanProgress: cachedTizhooshanProgress,
+      }
+      res.json({ success: true, backup })
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err?.message || 'خطا در صدور فایل پشتیبان' })
+    }
+  })
+
   app.post('/api/backup/restore', requireTeacherAuth, async (req, res) => {
     try {
       await ensureDataInitialized()

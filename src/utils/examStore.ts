@@ -1,4 +1,13 @@
-import { Exam, ExamQuestion, QuestionType, StudentExamSubmission } from '../types/examTypes'
+import {
+  Exam,
+  ExamQuestion,
+  QuestionType,
+  StudentExamSubmission,
+  RegradeAuditRecord,
+  RegradeDiffItem,
+  RegradePreviewResult,
+  RegradeQuestionDiff,
+} from '../types/examTypes'
 import { supabase } from '../supabaseClient'
 import { CLASS_STUDENTS_ROSTER, ClassStudentInfo } from '../classStudents'
 import {
@@ -908,10 +917,91 @@ export async function releaseExamResultsForAll(
   return { success: true, exam: updatedExam }
 }
 
+export function getSubmissionCanonicalKey(examId: string, studentId: string): string {
+  return `${examId}::${String(studentId).trim()}`
+}
+
+/**
+ * Deduplicates submissions by (examId, studentId) composite key.
+ * Preserves teacher approvals, merges answer sets, and retains audit history.
+ */
+export function mergeSubmissionsDeduplicated(
+  baseList: StudentExamSubmission[],
+  incomingList: StudentExamSubmission[]
+): StudentExamSubmission[] {
+  const map = new Map<string, StudentExamSubmission>()
+
+  const processSub = (sub: StudentExamSubmission) => {
+    if (!sub || !sub.examId || !sub.studentId) return
+    const key = getSubmissionCanonicalKey(sub.examId, sub.studentId)
+    const existing = map.get(key)
+    if (!existing) {
+      map.set(key, { ...sub })
+      return
+    }
+
+    const existingTime = existing.submittedAt ? new Date(existing.submittedAt).getTime() : 0
+    const incomingTime = sub.submittedAt ? new Date(sub.submittedAt).getTime() : 0
+    const isIncomingNewer = incomingTime >= existingTime
+
+    const isExistingApproved = Boolean(existing.teacherGrading?.approved)
+    const isIncomingApproved = Boolean(sub.teacherGrading?.approved)
+
+    const primary = isIncomingNewer ? sub : existing
+    const secondary = isIncomingNewer ? existing : sub
+
+    // Combine regrade history without duplicates
+    const combinedHistory = [
+      ...(existing.regradeHistory || []),
+      ...(sub.regradeHistory || []),
+    ].filter((v, i, a) => a.findIndex((t) => t.regradedAt === v.regradedAt) === i)
+
+    const merged: StudentExamSubmission = {
+      ...secondary,
+      ...primary,
+      id: primary.id || secondary.id || `sub_${primary.examId}_${primary.studentId}`,
+      examId: primary.examId,
+      studentId: String(primary.studentId).trim(),
+      studentName:
+        primary.studentName && primary.studentName !== 'دانش‌آموز'
+          ? primary.studentName
+          : secondary.studentName || primary.studentName,
+      submittedAt: primary.submittedAt || secondary.submittedAt,
+      answers: { ...(secondary.answers || {}), ...(primary.answers || {}) },
+      syncStatus:
+        primary.syncStatus === 'synced' || secondary.syncStatus === 'synced'
+          ? 'synced'
+          : primary.syncStatus,
+      isReleased: Boolean(primary.isReleased || secondary.isReleased),
+      is_released: Boolean(primary.is_released || secondary.is_released),
+      status: isExistingApproved || isIncomingApproved ? 'graded' : primary.status || secondary.status,
+      teacherGrading:
+        isExistingApproved || isIncomingApproved
+          ? {
+              ...(secondary.teacherGrading || {}),
+              ...(primary.teacherGrading || {}),
+              totalScore: primary.teacherGrading?.totalScore ?? secondary.teacherGrading?.totalScore ?? 0,
+              scaledScore20: primary.teacherGrading?.scaledScore20 ?? secondary.teacherGrading?.scaledScore20 ?? 0,
+              approved: true,
+            }
+          : primary.teacherGrading || secondary.teacherGrading,
+      aiGrading: primary.aiGrading || secondary.aiGrading,
+      instantStats: primary.instantStats || secondary.instantStats,
+      regradeHistory: combinedHistory.length > 0 ? combinedHistory : undefined,
+    }
+
+    map.set(key, merged)
+  }
+
+  baseList.forEach(processSub)
+  incomingList.forEach(processSub)
+
+  return Array.from(map.values())
+}
+
 export async function fetchExamSubmissions(examId?: string, studentId?: string): Promise<StudentExamSubmission[]> {
   const local = getLocalSubmissions()
-  const mergedMap = new Map<string, StudentExamSubmission>()
-  local.forEach((s) => mergedMap.set(s.id, s))
+  const fetchedList: StudentExamSubmission[] = []
 
   console.log('[ExamStore:fetchExamSubmissions] Fetching exam submissions from Supabase...', { examId, studentId })
 
@@ -929,7 +1019,7 @@ export async function fetchExamSubmissions(examId?: string, studentId?: string):
         const parsed = typeof sysRows[0].body === 'string' ? JSON.parse(sysRows[0].body) : sysRows[0].body
         if (Array.isArray(parsed)) {
           parsed.forEach((s: StudentExamSubmission) => {
-            if (s && s.id) mergedMap.set(s.id, { ...(mergedMap.get(s.id) || {}), ...s })
+            if (s && s.examId && s.studentId) fetchedList.push(s)
           })
           console.log(`[ExamStore:fetchExamSubmissions] Synced ${parsed.length} submissions from __SYSTEM_EXAM_SUBMISSIONS__`)
         }
@@ -956,8 +1046,8 @@ export async function fetchExamSubmissions(examId?: string, studentId?: string):
         if (row?.body) {
           try {
             const parsed = typeof row.body === 'string' ? JSON.parse(row.body) : row.body
-            if (parsed && parsed.id) {
-              mergedMap.set(parsed.id, { ...(mergedMap.get(parsed.id) || {}), ...parsed })
+            if (parsed && parsed.examId && parsed.studentId) {
+              fetchedList.push(parsed)
             }
           } catch {}
         }
@@ -1004,26 +1094,24 @@ export async function fetchExamSubmissions(examId?: string, studentId?: string):
             answersObj.is_released ||
             answersObj.isReleased
           )
-          if (!mergedMap.has(subId)) {
-            mergedMap.set(subId, {
-              id: subId,
-              examId: targetExamId,
-              studentId: String(targetStudentId),
-              studentName: targetStudentName,
-              submittedAt: qs.submitted_at,
-              answers: answersObj,
-              syncStatus: 'synced',
-              isReleased: isApproved,
-              is_released: isApproved,
-              status: isApproved ? 'graded' : 'pending_approval',
-              teacherGrading: {
-                totalScore: Number(qs.score) || 0,
-                scaledScore20: Number(qs.score) || 0,
-                approved: isApproved,
-                approvedAt: answersObj.approved_at,
-              },
-            })
-          }
+          fetchedList.push({
+            id: subId,
+            examId: targetExamId,
+            studentId: String(targetStudentId),
+            studentName: targetStudentName,
+            submittedAt: qs.submitted_at,
+            answers: answersObj,
+            syncStatus: 'synced',
+            isReleased: isApproved,
+            is_released: isApproved,
+            status: isApproved ? 'graded' : 'pending_approval',
+            teacherGrading: {
+              totalScore: Number(qs.score) || 0,
+              scaledScore20: Number(qs.score) || 0,
+              approved: isApproved,
+              approvedAt: answersObj.approved_at,
+            },
+          })
         }
       })
       console.log(`[ExamStore:fetchExamSubmissions] Synced ${qSubs.length} submissions from quiz_submissions table`)
@@ -1032,25 +1120,251 @@ export async function fetchExamSubmissions(examId?: string, studentId?: string):
     console.warn('[ExamStore:fetchExamSubmissions] Error querying quiz_submissions:', err)
   }
 
-  const merged = Array.from(mergedMap.values())
-  saveLocalSubmissions(merged)
+  // Deduplicate all collected submissions using canonical (examId, studentId) key
+  const deduplicated = mergeSubmissionsDeduplicated(local, fetchedList)
+  saveLocalSubmissions(deduplicated)
 
-  let filtered = merged
+  let filtered = deduplicated
   if (examId) filtered = filtered.filter((s) => s.examId === examId)
-  if (studentId) filtered = filtered.filter((s) => String(s.studentId) === String(studentId))
+  if (studentId) filtered = filtered.filter((s) => String(s.studentId).trim() === String(studentId).trim())
 
-  console.log(`[ExamStore:fetchExamSubmissions] Resolved ${filtered.length} submissions for exam ${examId || 'all'}`)
+  console.log(`[ExamStore:fetchExamSubmissions] Deduplicated into ${filtered.length} unique student submissions for exam ${examId || 'all'}`)
   return filtered
 }
 
 export function getExamSubmissions(examId: string): StudentExamSubmission[] {
   // Trigger background sync with Supabase and server
   fetchExamSubmissions(examId).catch(() => {})
-  return getLocalSubmissions().filter((s) => s.examId === examId)
+  const local = getLocalSubmissions().filter((s) => s.examId === examId)
+  return mergeSubmissionsDeduplicated([], local)
 }
 
 export function getStudentExamSubmission(examId: string, studentId: string): StudentExamSubmission | undefined {
-  return getLocalSubmissions().find((s) => s.examId === examId && String(s.studentId) === String(studentId))
+  const subs = getExamSubmissions(examId)
+  return subs.find((s) => String(s.studentId).trim() === String(studentId).trim())
+}
+
+/**
+ * Preview regrading previous exam submissions using the corrected semantic algorithm.
+ * Compares stored scores vs new calculated scores per student and question without mutating state.
+ */
+export async function previewRegradeExamSubmissions(examId: string): Promise<RegradePreviewResult> {
+  const exams = await fetchAllExams()
+  const exam = exams.find((e) => e.id === examId)
+  if (!exam) throw new Error(`آزمون با شناسه ${examId} یافت نشد.`)
+
+  const submissions = await fetchExamSubmissions(examId)
+  const items: RegradeDiffItem[] = []
+  let submissionsWithChanges = 0
+  let approvedCount = 0
+
+  for (const sub of submissions) {
+    const isApproved = Boolean(sub.teacherGrading?.approved)
+    if (isApproved) approvedCount++
+
+    // Determine current stored score
+    const currentScore = Number(
+      isApproved
+        ? (sub.teacherGrading?.totalScore ?? sub.aiGrading?.totalScore ?? sub.instantStats?.earnedPoints ?? 0)
+        : (sub.aiGrading?.totalScore ?? sub.instantStats?.earnedPoints ?? 0)
+    )
+    const currentScaled20 = Number(
+      isApproved
+        ? (sub.teacherGrading?.scaledScore20 ?? sub.aiGrading?.scaledScore20 ?? sub.instantStats?.scaledScore20 ?? 0)
+        : (sub.aiGrading?.scaledScore20 ?? sub.instantStats?.scaledScore20 ?? 0)
+    )
+
+    // Re-evaluate deterministically with updated semantic grader
+    const evalResult = evaluateEntireExamSubmission(exam, sub.answers || {})
+    const newScore = evalResult.earnedPoints
+    const newScaled20 = evalResult.scaledScore20
+    const scoreDiff = Math.round((newScore - currentScore) * 100) / 100
+
+    const questionDiffs: RegradeQuestionDiff[] = []
+    for (const q of exam.questions) {
+      const oldQScore = Number(
+        isApproved
+          ? (sub.teacherGrading?.questionScores?.[q.id] ?? sub.aiGrading?.questionScores?.[q.id] ?? 0)
+          : (sub.aiGrading?.questionScores?.[q.id] ?? 0)
+      )
+      const newQScore = evalResult.questionScores[q.id] ?? 0
+      const oldFb = sub.teacherGrading?.questionFeedbacks?.[q.id] || sub.aiGrading?.questionFeedbacks?.[q.id]
+      const newFb = evalResult.questionFeedbacks[q.id]
+
+      if (Math.abs(newQScore - oldQScore) > 0.01) {
+        questionDiffs.push({
+          questionId: q.id,
+          questionType: q.type,
+          questionTitle: q.question,
+          oldScore: oldQScore,
+          newScore: newQScore,
+          maxPoints: Number(q.points) || 2,
+          oldFeedback: oldFb,
+          newFeedback: newFb,
+        })
+      }
+    }
+
+    if (Math.abs(scoreDiff) > 0.01 || questionDiffs.length > 0) {
+      submissionsWithChanges++
+    }
+
+    items.push({
+      submissionId: sub.id,
+      studentId: sub.studentId,
+      studentName: sub.studentName || 'دانش‌آموز',
+      examId: sub.examId,
+      oldScore: currentScore,
+      newScore,
+      scoreDiff,
+      oldScaledScore20: currentScaled20,
+      newScaledScore20: newScaled20,
+      isApproved,
+      questionDiffs,
+    })
+  }
+
+  return {
+    examId,
+    examTitle: exam.title,
+    totalSubmissions: submissions.length,
+    submissionsWithChanges,
+    approvedCount,
+    items,
+  }
+}
+
+/**
+ * Applies regrading to previous submissions:
+ * - If teacher has approved score and overrideApproved is false: teacher manual grade is strictly preserved.
+ * - If overrideApproved is true or submission is pending: updates score with corrected calculation.
+ * - Appends audit record to regradeHistory to prevent duplicate or untracked changes.
+ * - Syncs to Supabase.
+ */
+export async function applyRegradeExamSubmissions(params: {
+  examId: string
+  overrideApproved?: boolean
+  teacherPassword?: string
+}): Promise<{ updatedCount: number; submissions: StudentExamSubmission[] }> {
+  const { examId, overrideApproved = false, teacherPassword } = params
+  const exams = await fetchAllExams(teacherPassword)
+  const exam = exams.find((e) => e.id === examId)
+  if (!exam) throw new Error(`آزمون با شناسه ${examId} یافت نشد.`)
+
+  const submissions = await fetchExamSubmissions(examId)
+  const allLocal = getLocalSubmissions()
+  let updatedCount = 0
+  const nowIso = new Date().toISOString()
+
+  for (let i = 0; i < allLocal.length; i++) {
+    const sub = allLocal[i]
+    if (sub.examId !== examId) continue
+
+    const isApproved = Boolean(sub.teacherGrading?.approved)
+    const oldScore = Number(
+      isApproved
+        ? (sub.teacherGrading?.totalScore ?? sub.aiGrading?.totalScore ?? 0)
+        : (sub.aiGrading?.totalScore ?? sub.instantStats?.earnedPoints ?? 0)
+    )
+    const oldScaled20 = Number(
+      isApproved
+        ? (sub.teacherGrading?.scaledScore20 ?? sub.aiGrading?.scaledScore20 ?? 0)
+        : (sub.aiGrading?.scaledScore20 ?? sub.instantStats?.scaledScore20 ?? 0)
+    )
+
+    // Re-evaluate deterministically
+    const evalResult = evaluateEntireExamSubmission(exam, sub.answers || {})
+    const newScore = evalResult.earnedPoints
+    const newScaled20 = evalResult.scaledScore20
+    const scoreDiff = Math.round((newScore - oldScore) * 100) / 100
+
+    const shouldUpdateOfficial = !isApproved || overrideApproved
+
+    const auditEntry: RegradeAuditRecord = {
+      regradedAt: nowIso,
+      oldScore,
+      newScore,
+      scoreDiff,
+      oldScaledScore20: oldScaled20,
+      newScaledScore20: newScaled20,
+      teacherOverrodeApproved: isApproved && overrideApproved,
+      reason:
+        isApproved && !overrideApproved
+          ? 'الگوریتم تصحیح هوشمند اصلاح شد اما نمره دستی آموزگار حفظ گردید.'
+          : 'بازتصحیح خودکار با الگوریتم اصلاح‌شده تصحیح مفهومی.',
+    }
+
+    sub.regradeHistory = [...(sub.regradeHistory || []), auditEntry]
+
+    sub.aiGrading = {
+      ...(sub.aiGrading || {}),
+      questionScores: evalResult.questionScores,
+      questionFeedbacks: evalResult.questionFeedbacks,
+      totalScore: newScore,
+      scaledScore20: newScaled20,
+      gradedAt: nowIso,
+      summary: sub.aiGrading?.summary || `بازتصحیح انجام شد. نمره: ${newScore} از ${exam.totalPoints || 20}`,
+    }
+
+    sub.instantStats = {
+      totalQuestions: evalResult.totalQuestions,
+      answeredCount: evalResult.answeredCount,
+      unansweredCount: evalResult.unansweredCount,
+      correctCount: evalResult.correctCount,
+      wrongCount: evalResult.wrongCount,
+      percentage: evalResult.percentage,
+      scaledScore20: newScaled20,
+      earnedPoints: newScore,
+      maxPoints: evalResult.maxPoints,
+      status: evalResult.status,
+    }
+
+    if (shouldUpdateOfficial) {
+      if (isApproved && overrideApproved) {
+        sub.teacherGrading = {
+          ...(sub.teacherGrading || {}),
+          questionScores: evalResult.questionScores,
+          questionFeedbacks: evalResult.questionFeedbacks,
+          totalScore: newScore,
+          scaledScore20: newScaled20,
+          approved: true,
+          approvedAt: nowIso,
+          teacherNotes: `${sub.teacherGrading?.teacherNotes || ''} (بازتصحیح هوشمند با اجازه آموزگار اعمال شد)`.trim(),
+        }
+      } else if (!isApproved) {
+        sub.teacherGrading = {
+          ...(sub.teacherGrading || {}),
+          questionScores: evalResult.questionScores,
+          questionFeedbacks: evalResult.questionFeedbacks,
+          totalScore: newScore,
+          scaledScore20: newScaled20,
+          approved: false,
+        }
+      }
+      updatedCount++
+    }
+
+    allLocal[i] = sub
+  }
+
+  // Deduplicate and save
+  const cleanSubs = mergeSubmissionsDeduplicated([], allLocal)
+  saveLocalSubmissions(cleanSubs)
+
+  // Direct sync to Supabase
+  await syncExamSubmissionsToSupabase(cleanSubs, teacherPassword).catch((e) =>
+    console.warn('[applyRegradeExamSubmissions] Supabase sync warning:', e)
+  )
+
+  const updatedForExam = cleanSubs.filter((s) => s.examId === examId)
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('exam_submission_updated', { detail: { examId } }))
+  }
+
+  return {
+    updatedCount,
+    submissions: updatedForExam,
+  }
 }
 
 // ----------------------------------------------------------------------
@@ -1496,13 +1810,19 @@ export function removeFromPendingExamSyncQueue(submissionId: string) {
 
 export function updateLocalSubmission(sub: StudentExamSubmission) {
   const all = getLocalSubmissions()
-  const idx = all.findIndex((s) => (s.examId === sub.examId && s.studentId === sub.studentId) || s.id === sub.id)
+  const subStId = String(sub.studentId).trim()
+  const idx = all.findIndex(
+    (s) =>
+      (s.examId === sub.examId && String(s.studentId).trim() === subStId) ||
+      s.id === sub.id
+  )
   if (idx >= 0) {
     all[idx] = { ...all[idx], ...sub }
   } else {
     all.push(sub)
   }
-  saveLocalSubmissions(all)
+  const clean = mergeSubmissionsDeduplicated([], all)
+  saveLocalSubmissions(clean)
 }
 
 export function notifySubmissionUpdated(sub: StudentExamSubmission) {

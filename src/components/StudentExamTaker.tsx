@@ -21,6 +21,7 @@ interface StudentExamDraft {
   startTime: number
   currentQIndex: number
   lastSavedAt: number
+  elapsedSeconds?: number
 }
 
 export default function StudentExamTaker({
@@ -50,6 +51,7 @@ export default function StudentExamTaker({
 
   // Real timestamp when student started this exam
   const startTimeRef = useRef<number>(Date.now())
+  const elapsedSecondsRef = useRef<number>(0)
 
   // Live ref for answers to prevent stale closures inside timer callback
   const answersRef = useRef<Record<string, StudentExamAnswer>>(answers)
@@ -73,7 +75,7 @@ export default function StudentExamTaker({
   const isAssignment = exam.mode === 'assignment' || Boolean(exam.isUntimed) || Number(exam.durationMinutes) <= 0
   const isPastDue = Boolean(exam.dueDate && new Date(exam.dueDate) < new Date())
 
-  // Helper to persist draft immediately to localStorage
+  // Helper to persist draft immediately to localStorage with monotonic elapsedSeconds
   function persistDraft(updatedAnswers: Record<string, StudentExamAnswer>, qIdx: number = currentQIndex) {
     try {
       const draftObj: StudentExamDraft = {
@@ -82,6 +84,7 @@ export default function StudentExamTaker({
         answers: updatedAnswers,
         startTime: startTimeRef.current,
         currentQIndex: qIdx,
+        elapsedSeconds: elapsedSecondsRef.current,
         lastSavedAt: Date.now(),
       }
       localStorage.setItem(studentDraftKey, JSON.stringify(draftObj))
@@ -91,7 +94,7 @@ export default function StudentExamTaker({
     }
   }
 
-  // 1. Restore previous submission or saved draft on component mount
+  // 1. Restore previous submission or saved draft on component mount with anti-tamper logic
   useEffect(() => {
     // Check if exam already submitted
     const prevSub = getStudentExamSubmission(exam.id, student.id)
@@ -113,6 +116,7 @@ export default function StudentExamTaker({
 
       let initialStartTime = Date.now()
       let initialQIndex = 0
+      let previousElapsed = 0
 
       if (rawDraft) {
         const parsed = JSON.parse(rawDraft)
@@ -139,16 +143,32 @@ export default function StudentExamTaker({
           if (typeof parsed.startTime === 'number' && parsed.startTime > 0) {
             initialStartTime = parsed.startTime
           }
+
+          if (typeof parsed.elapsedSeconds === 'number' && parsed.elapsedSeconds > 0) {
+            previousElapsed = parsed.elapsedSeconds
+          }
         }
       }
 
+      const now = Date.now()
+      let calculatedElapsed = Math.floor((now - initialStartTime) / 1000)
+
+      // Anti-tamper verification:
+      // If user sets device clock backwards (now < initialStartTime, or calculatedElapsed < previousElapsed),
+      // strictly enforce monotonic time so time cannot be regained.
+      if (calculatedElapsed < previousElapsed || calculatedElapsed < 0) {
+        console.warn('[Exam Timer] Device clock backward adjustment detected! Enforcing monotonic elapsed time.')
+        calculatedElapsed = previousElapsed + 1
+        initialStartTime = now - (calculatedElapsed * 1000)
+      }
+
       startTimeRef.current = initialStartTime
+      elapsedSecondsRef.current = calculatedElapsed
 
       // Manage timer based on real elapsed time from startTime
       if (!isAssignment) {
         const totalDurationSec = (Number(exam.durationMinutes) || 30) * 60
-        const elapsedSec = Math.floor((Date.now() - initialStartTime) / 1000)
-        const remainingSec = Math.max(0, totalDurationSec - elapsedSec)
+        const remainingSec = Math.max(0, totalDurationSec - calculatedElapsed)
         setTimeLeftSeconds(remainingSec)
 
         if (remainingSec <= 0) {
@@ -161,13 +181,14 @@ export default function StudentExamTaker({
         }
       }
 
-      // Persist draft immediately so startTime is firmly established
+      // Persist draft immediately so startTime and elapsedSeconds are firmly established
       const initialDraft: StudentExamDraft = {
         examId: exam.id,
         studentId: String(student.id),
         answers: answersRef.current || {},
         startTime: initialStartTime,
         currentQIndex: initialQIndex,
+        elapsedSeconds: calculatedElapsed,
         lastSavedAt: Date.now(),
       }
       localStorage.setItem(studentDraftKey, JSON.stringify(initialDraft))
@@ -177,10 +198,11 @@ export default function StudentExamTaker({
     }
   }, [exam.id, student.id])
 
-  // Timer countdown (only for timed exams, not open assignments)
+  // Timer countdown (only for timed exams, not open assignments) with monotonic tick
   useEffect(() => {
     if (isAssignment || existingSubmission || submittedResult) return
     const timer = setInterval(() => {
+      elapsedSecondsRef.current += 1
       setTimeLeftSeconds((prev) => {
         if (prev <= 1) {
           clearInterval(timer)

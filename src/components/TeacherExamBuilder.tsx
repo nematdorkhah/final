@@ -1,5 +1,12 @@
 import { useState, useEffect } from 'react'
-import { Exam, ExamQuestion, QuestionType, StudentExamSubmission } from '../types/examTypes'
+import {
+  Exam,
+  ExamQuestion,
+  QuestionType,
+  StudentExamSubmission,
+  RegradePreviewResult,
+  RegradeDiffItem,
+} from '../types/examTypes'
 import MathRenderer from './MathRenderer'
 import {
   fetchAllExams,
@@ -12,6 +19,8 @@ import {
   fetchExamSubmissions,
   approveExamSubmission,
   releaseExamResultsForAll,
+  previewRegradeExamSubmissions,
+  applyRegradeExamSubmissions,
   sanitizeExamTitle,
   isPromptLike,
   generateUuid,
@@ -26,6 +35,8 @@ import {
   cleanOptionText,
   safeNumber,
   safeScore,
+  validateExamQuestion,
+  validateExam,
 } from '../utils/persianSemanticGrader'
 
 
@@ -159,6 +170,14 @@ export default function TeacherExamBuilder({
   const [savingExam, setSavingExam] = useState(false)
   const [isEditingExisting, setIsEditingExisting] = useState(false)
   const [deleteConfirmExam, setDeleteConfirmExam] = useState<Exam | null>(null)
+  const [examEditWarningExam, setExamEditWarningExam] = useState<Exam | null>(null)
+
+  // Regrading states
+  const [regradePreview, setRegradePreview] = useState<RegradePreviewResult | null>(null)
+  const [isLoadingRegrade, setIsLoadingRegrade] = useState(false)
+  const [overrideApprovedRegrade, setOverrideApprovedRegrade] = useState(false)
+  const [isApplyingRegrade, setIsApplyingRegrade] = useState(false)
+  const [regradeResultSummary, setRegradeResultSummary] = useState<string | null>(null)
 
   useEffect(() => {
     loadExams()
@@ -170,6 +189,16 @@ export default function TeacherExamBuilder({
   }
 
   function handleStartEditExam(exam: Exam) {
+    const existingSubs = getExamSubmissions(exam.id)
+    if (existingSubs.length > 0) {
+      setExamEditWarningExam(exam)
+      return
+    }
+    proceedWithEditExam(exam)
+  }
+
+  function proceedWithEditExam(exam: Exam) {
+    setExamEditWarningExam(null)
     setIsEditingExisting(true)
     setDraftExam(exam)
     setExamTitle(exam.title || '')
@@ -623,6 +652,18 @@ export default function TeacherExamBuilder({
         totalPoints: draftExam.questions.reduce((sum, q) => sum + (Number(q.points) || 1), 0),
       }
 
+      // Strict validation before publication
+      const valRes = validateExam(readyExam)
+      if (!valRes.isValid) {
+        const errorList = [
+          ...valRes.examErrors,
+          ...Object.values(valRes.questionResults).flatMap((r) => r.errors),
+        ]
+        alert('⚠️ خطا در اعتبارسنجی سوالات:\n' + errorList.join('\n'))
+        setSavingExam(false)
+        return
+      }
+
       await saveExam(readyExam, teacherPassword)
       await loadExams()
       setDraftExam(null)
@@ -735,6 +776,42 @@ export default function TeacherExamBuilder({
       if (reloadedSub) setSelectedSubForGrading(reloadedSub)
     } catch (err: any) {
       alert('خطا در ثبت نمره: ' + err.message)
+    }
+  }
+
+  async function handleOpenRegradeModal(examId: string) {
+    setIsLoadingRegrade(true)
+    setRegradeResultSummary(null)
+    setOverrideApprovedRegrade(false)
+    try {
+      const preview = await previewRegradeExamSubmissions(examId)
+      setRegradePreview(preview)
+    } catch (err: any) {
+      alert('خطا در محاسبه پیش‌نمایش بازتصحیح: ' + (err?.message || 'خطای سرور'))
+    } finally {
+      setIsLoadingRegrade(false)
+    }
+  }
+
+  async function handleApplyRegrade() {
+    if (!regradePreview) return
+    setIsApplyingRegrade(true)
+    try {
+      const res = await applyRegradeExamSubmissions({
+        examId: regradePreview.examId,
+        overrideApproved: overrideApprovedRegrade,
+        teacherPassword,
+      })
+      setRegradeResultSummary(`✓ بازتصحیح هوشمند با موفقیت روی ${res.updatedCount} پاسخ‌نامه اعمال و ذخیره شد.`)
+      await fetchExamSubmissions(regradePreview.examId)
+      setTimeout(() => {
+        setRegradePreview(null)
+        setRegradeResultSummary(null)
+      }, 1500)
+    } catch (err: any) {
+      alert('خطا در اعمال بازتصحیح: ' + (err?.message || 'خطای پایگاه‌داده'))
+    } finally {
+      setIsApplyingRegrade(false)
     }
   }
 
@@ -2166,6 +2243,24 @@ export default function TeacherExamBuilder({
               <button
                 type="button"
                 className="btn secondary"
+                onClick={() => handleOpenRegradeModal(selectedExamForSubs.id)}
+                disabled={isLoadingRegrade}
+                style={{
+                  fontSize: 12,
+                  padding: '6px 12px',
+                  background: '#FEF3C7',
+                  color: '#92400E',
+                  borderColor: '#F59E0B',
+                  fontWeight: 800,
+                }}
+                title="بازمحاسبه نمرات دانش‌آموزان بر اساس الگوریتم تصحیح مفهومی و بدون نمره منفی ناعادلانه"
+              >
+                {isLoadingRegrade ? '⏳ در حال محاسبه پیش‌نمایش...' : '🔄 بازتصحیح هوشمند پاسخ‌ها'}
+              </button>
+
+              <button
+                type="button"
+                className="btn secondary"
                 onClick={handleRefreshSubmissions}
                 disabled={isRefreshingSubs}
                 style={{ fontSize: 12, padding: '6px 12px' }}
@@ -2714,7 +2809,150 @@ export default function TeacherExamBuilder({
       )}
 
       {/* Delete Exam Confirmation Modal */}
-      {deleteConfirmExam && (
+      {deleteConfirmExam && (() => {
+        const affectedSubs = getExamSubmissions(deleteConfirmExam.id)
+        return (
+          <div
+            style={{
+              position: 'fixed',
+              inset: 0,
+              backgroundColor: 'rgba(15, 23, 42, 0.65)',
+              backdropFilter: 'blur(4px)',
+              zIndex: 9999,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: 16,
+            }}
+          >
+            <div
+              className="mobile-card hard"
+              style={{
+                background: '#FFFFFF',
+                borderRadius: 20,
+                maxWidth: 440,
+                width: '100%',
+                padding: 24,
+                boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.2)',
+                border: '2px solid #0F172A',
+              }}
+            >
+              <div style={{ fontSize: 40, textAlign: 'center', marginBottom: 12 }}>⚠️</div>
+              <h3 style={{ fontSize: 18, fontWeight: 900, textAlign: 'center', margin: '0 0 10px 0', color: '#0F172A' }}>
+                حذف آزمون
+              </h3>
+              <p style={{ fontSize: 13.5, color: '#475569', lineHeight: 1.6, textAlign: 'center', margin: '0 0 16px 0' }}>
+                آیا از حذف کامل آزمون «<strong>{sanitizeExamTitle(deleteConfirmExam.title, deleteConfirmExam.subject)}</strong>» اطمینان دارید؟
+                این عملیات غیرقابل بازگشت است.
+              </p>
+
+              {affectedSubs.length > 0 && (
+                <div style={{ background: '#FEF2F2', border: '1.5px solid #FCA5A5', borderRadius: 10, padding: '10px 12px', marginBottom: 16, textAlign: 'right' }}>
+                  <strong style={{ color: '#991B1B', fontSize: 13 }}>⚠️ توجه:</strong>
+                  <p style={{ margin: '4px 0 0 0', color: '#B91C1C', fontSize: 12.5, lineHeight: 1.5 }}>
+                    این آزمون دارای <strong>{affectedSubs.length}</strong> پاسخ ثبت‌شده از دانش‌آموزان است که همگی همراه با این آزمون حذف خواهند شد.
+                  </p>
+                </div>
+              )}
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <button
+                  type="button"
+                  className="btn secondary"
+                  onClick={() => setDeleteConfirmExam(null)}
+                  style={{ fontWeight: 800 }}
+                >
+                  انصراف
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={async () => {
+                    const target = deleteConfirmExam
+                    setDeleteConfirmExam(null)
+                    await deleteExam(target.id, teacherPassword)
+                    await loadExams()
+                  }}
+                  style={{
+                    background: '#DC2626',
+                    color: '#FFFFFF',
+                    borderColor: '#991B1B',
+                    fontWeight: 800,
+                  }}
+                >
+                  بله، حذف شود
+                </button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* Edit Active Exam Warning Modal */}
+      {examEditWarningExam && (() => {
+        const subsCount = getExamSubmissions(examEditWarningExam.id).length
+        return (
+          <div
+            style={{
+              position: 'fixed',
+              inset: 0,
+              backgroundColor: 'rgba(15, 23, 42, 0.65)',
+              backdropFilter: 'blur(4px)',
+              zIndex: 9999,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: 16,
+            }}
+          >
+            <div
+              className="mobile-card hard"
+              style={{
+                background: '#FFFFFF',
+                borderRadius: 20,
+                maxWidth: 460,
+                width: '100%',
+                padding: 24,
+                boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.2)',
+                border: '2px solid #0F172A',
+              }}
+            >
+              <div style={{ fontSize: 40, textAlign: 'center', marginBottom: 12 }}>⚠️</div>
+              <h3 style={{ fontSize: 18, fontWeight: 900, textAlign: 'center', margin: '0 0 10px 0', color: '#0F172A' }}>
+                هشدار ویرایش آزمون دارای شرکت‌کننده
+              </h3>
+              <p style={{ fontSize: 13.5, color: '#475569', lineHeight: 1.6, textAlign: 'center', margin: '0 0 14px 0' }}>
+                آزمون «<strong>{sanitizeExamTitle(examEditWarningExam.title, examEditWarningExam.subject)}</strong>» دارای{' '}
+                <strong style={{ color: '#DC2626' }}>{subsCount}</strong> پاسخ ثبت‌شده از دانش‌آموزان است.
+              </p>
+              <div style={{ background: '#FFFBEB', border: '1.5px solid #FCD34D', borderRadius: 10, padding: 12, marginBottom: 20, fontSize: 12.5, color: '#92400E', lineHeight: 1.6 }}>
+                تغییر در تعداد سؤال‌ها، گزینه‌ها یا بارم‌بندی ممکن است نتایج و کارنامه‌های دانش‌آموزان را تحت تأثیر قرار دهد.
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <button
+                  type="button"
+                  className="btn secondary"
+                  onClick={() => setExamEditWarningExam(null)}
+                  style={{ fontWeight: 800 }}
+                >
+                  انصراف
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => proceedWithEditExam(examEditWarningExam)}
+                  style={{ background: '#2563EB', color: '#FFFFFF', borderColor: '#1D4ED8', fontWeight: 800 }}
+                >
+                  ادامه ویرایش
+                </button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* Regrade Preview & Apply Modal */}
+      {regradePreview && (
         <div
           style={{
             position: 'fixed',
@@ -2733,47 +2971,131 @@ export default function TeacherExamBuilder({
             style={{
               background: '#FFFFFF',
               borderRadius: 20,
-              maxWidth: 440,
+              maxWidth: 720,
               width: '100%',
+              maxHeight: '90vh',
+              overflowY: 'auto',
               padding: 24,
               boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.2)',
               border: '2px solid #0F172A',
             }}
           >
-            <div style={{ fontSize: 40, textAlign: 'center', marginBottom: 12 }}>⚠️</div>
-            <h3 style={{ fontSize: 18, fontWeight: 900, textAlign: 'center', margin: '0 0 10px 0', color: '#0F172A' }}>
-              حذف آزمون
-            </h3>
-            <p style={{ fontSize: 13.5, color: '#475569', lineHeight: 1.6, textAlign: 'center', margin: '0 0 20px 0' }}>
-              آیا از حذف کامل آزمون «<strong>{sanitizeExamTitle(deleteConfirmExam.title, deleteConfirmExam.subject)}</strong>» و تمامی پاسخ‌های ثبت‌شده آن اطمینان دارید؟
-              این عملیات غیرقابل بازگشت است.
-            </p>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+              <div>
+                <h3 style={{ fontSize: 18, fontWeight: 900, margin: 0, color: '#0F172A' }}>
+                  🔄 پیش‌نمایش بازتصحیح هوشمند پاسخ‌ها
+                </h3>
+                <p style={{ fontSize: 13, color: '#64748B', margin: '4px 0 0 0' }}>
+                  آزمون: {regradePreview.examTitle} • کل پاسخ‌ها: {regradePreview.totalSubmissions} • تغییرات: {regradePreview.submissionsWithChanges} دانش‌آموز
+                </p>
+              </div>
               <button
                 type="button"
                 className="btn secondary"
-                onClick={() => setDeleteConfirmExam(null)}
-                style={{ fontWeight: 800 }}
+                onClick={() => setRegradePreview(null)}
+                style={{ padding: '4px 10px', fontSize: 13 }}
+              >
+                ✕ بستن
+              </button>
+            </div>
+
+            <div style={{ background: '#F8FAFC', borderRadius: 12, padding: 12, marginBottom: 16, border: '1px solid #E2E8F0', fontSize: 12.5, lineHeight: 1.6, color: '#334155' }}>
+              💡 <strong>نحوه عملکرد:</strong> نمرات مجدداً با الگوریتم اصلاح‌شده (بدون وابستگی به جابجایی گزینه‌ها، پذیرش مترادف‌ها و بارم‌بندی دقیق) ارزیابی شده‌اند.
+              پیش از کلیک بر روی دکمه تأیید، هیچ داده‌ای در سرور یا پایگاه داده تغییر نکرده است.
+            </div>
+
+            {regradePreview.items.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: 24, color: '#64748B' }}>
+                پاسخی برای این آزمون ثبت نشده است.
+              </div>
+            ) : (
+              <div style={{ overflowX: 'auto', marginBottom: 16 }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                  <thead>
+                    <tr style={{ background: '#F1F5F9', borderBottom: '2px solid #CBD5E1', textAlign: 'right' }}>
+                      <th style={{ padding: '8px 10px' }}>دانش‌آموز</th>
+                      <th style={{ padding: '8px 10px' }}>نمره فعلی</th>
+                      <th style={{ padding: '8px 10px' }}>نمره جدید</th>
+                      <th style={{ padding: '8px 10px' }}>اختلاف</th>
+                      <th style={{ padding: '8px 10px' }}>وضعیت</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {regradePreview.items.map((item) => (
+                      <tr key={item.submissionId} style={{ borderBottom: '1px solid #E2E8F0' }}>
+                        <td style={{ padding: '8px 10px', fontWeight: 800 }}>{item.studentName}</td>
+                        <td style={{ padding: '8px 10px' }}>{item.oldScore}</td>
+                        <td style={{ padding: '8px 10px', fontWeight: 800, color: item.scoreDiff > 0 ? '#15803D' : item.scoreDiff < 0 ? '#DC2626' : '#334155' }}>
+                          {item.newScore}
+                        </td>
+                        <td style={{ padding: '8px 10px' }}>
+                          {item.scoreDiff > 0 ? (
+                            <span style={{ color: '#15803D', fontWeight: 800 }}>+{item.scoreDiff}</span>
+                          ) : item.scoreDiff < 0 ? (
+                            <span style={{ color: '#DC2626', fontWeight: 800 }}>{item.scoreDiff}</span>
+                          ) : (
+                            <span style={{ color: '#64748B' }}>بدون تغییر</span>
+                          )}
+                        </td>
+                        <td style={{ padding: '8px 10px' }}>
+                          {item.isApproved ? (
+                            <span style={{ fontSize: 11, background: '#DCFCE7', color: '#166534', padding: '2px 8px', borderRadius: 999, fontWeight: 700 }}>
+                              تایید معلم
+                            </span>
+                          ) : (
+                            <span style={{ fontSize: 11, background: '#FEF3C7', color: '#92400E', padding: '2px 8px', borderRadius: 999, fontWeight: 700 }}>
+                              در انتظار تایید
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* Override Teacher Approved Checkbox */}
+            {regradePreview.approvedCount > 0 && (
+              <div style={{ background: '#FFFBEB', border: '1.5px solid #FCD34D', borderRadius: 10, padding: 12, marginBottom: 16 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13, fontWeight: 700, color: '#92400E' }}>
+                  <input
+                    type="checkbox"
+                    checked={overrideApprovedRegrade}
+                    onChange={(e) => setOverrideApprovedRegrade(e.target.checked)}
+                    style={{ width: 16, height: 16, cursor: 'pointer' }}
+                  />
+                  <span>بازنویسی نمره‌های دستی تأییدشده معلم ({regradePreview.approvedCount} نمره) با محاسبات جدید</span>
+                </label>
+                <p style={{ margin: '4px 24px 0 0', fontSize: 11.5, color: '#78350F' }}>
+                  در صورت عدم انتخاب این گزینه، نمرات دستی شما برای دانش‌آموزان تاییدشده بدون تغییر باقی می‌مانند.
+                </p>
+              </div>
+            )}
+
+            {regradeResultSummary && (
+              <div style={{ background: '#DCFCE7', color: '#15803D', padding: 10, borderRadius: 8, fontWeight: 800, fontSize: 13, marginBottom: 14 }}>
+                {regradeResultSummary}
+              </div>
+            )}
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                className="btn secondary"
+                onClick={() => setRegradePreview(null)}
+                disabled={isApplyingRegrade}
               >
                 انصراف
               </button>
               <button
                 type="button"
                 className="btn"
-                onClick={async () => {
-                  const target = deleteConfirmExam
-                  setDeleteConfirmExam(null)
-                  await deleteExam(target.id, teacherPassword)
-                  await loadExams()
-                }}
-                style={{
-                  background: '#DC2626',
-                  color: '#FFFFFF',
-                  borderColor: '#991B1B',
-                  fontWeight: 800,
-                }}
+                onClick={handleApplyRegrade}
+                disabled={isApplyingRegrade}
+                style={{ background: '#16A34A', color: '#FFFFFF', borderColor: '#15803D', fontWeight: 800 }}
               >
-                بله، حذف شود
+                {isApplyingRegrade ? 'در حال اعمال بازتصحیح...' : '✅ تایید و اعمال نمرات در سیستم'}
               </button>
             </div>
           </div>
