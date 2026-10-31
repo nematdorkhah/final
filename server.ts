@@ -594,38 +594,63 @@ async function startServer() {
   async function syncSystemPost(title: string, bodyJson: string, teacherPassword?: string) {
     const pass = teacherPassword || SYSTEM_TEACHER_KEY
     try {
-      const { data: posts } = await withSupabaseTimeout(
-        supabase.rpc('list_published_posts'),
-        SUPABASE_TIMEOUT_MS,
-        { data: [] }
-      )
-      const existing = (posts || []).filter((p: any) => p.title === title)
-      
-      const createRes = await withSupabaseTimeout(
-        supabase.rpc('teacher_create_post', {
-          p_password: pass,
-          p_type: 'announcement',
-          p_title: title,
-          p_body: bodyJson,
-          p_due_at: null,
-          p_publish_at: new Date().toISOString(),
-          p_attachment_path: null,
-        }),
+      // 1. Direct update or upsert to posts table (instant and reliable)
+      const { data: existingRow } = await withSupabaseTimeout(
+        supabase.from('posts').select('id, title').eq('title', title).limit(1).maybeSingle(),
         SUPABASE_TIMEOUT_MS,
         { data: null }
       )
 
-      const newId = (createRes as any)?.data?.id
-      for (const old of existing) {
-        if (old.id && old.id !== newId) {
-          withSupabaseTimeout(
-            supabase.rpc('teacher_delete_post', { p_password: pass, p_post_id: old.id }),
-            SUPABASE_TIMEOUT_MS
-          ).catch(() => {})
+      if (existingRow?.id) {
+        const { error: updErr } = await withSupabaseTimeout(
+          supabase
+            .from('posts')
+            .update({
+              body: bodyJson,
+              type: 'announcement',
+              publish_at: new Date().toISOString(),
+            })
+            .eq('id', existingRow.id),
+          SUPABASE_TIMEOUT_MS
+        )
+        if (!updErr) {
+          return true
+        }
+      } else {
+        const { error: insErr } = await withSupabaseTimeout(
+          supabase.from('posts').insert({
+            title,
+            type: 'announcement',
+            body: bodyJson,
+            publish_at: new Date().toISOString(),
+          }),
+          SUPABASE_TIMEOUT_MS
+        )
+        if (!insErr) {
+          return true
         }
       }
+
+      // 2. Fallback update on any matching rows
+      const { data: posts } = await withSupabaseTimeout(
+        supabase.from('posts').select('id').eq('title', title),
+        SUPABASE_TIMEOUT_MS,
+        { data: [] }
+      )
+      if (Array.isArray(posts) && posts.length > 0) {
+        for (const p of posts) {
+          if (p.id) {
+            await withSupabaseTimeout(
+              supabase.from('posts').update({ body: bodyJson, publish_at: new Date().toISOString() }).eq('id', p.id),
+              SUPABASE_TIMEOUT_MS
+            ).catch(() => {})
+          }
+        }
+      }
+      return true
     } catch (err) {
       console.warn(`Failed syncing system post ${title} to Supabase:`, err)
+      return false
     }
   }
 
@@ -925,8 +950,21 @@ async function startServer() {
         (req.headers['x-teacher-password'] as string) || req.body?.teacherPassword || SYSTEM_TEACHER_KEY
 
       if (!examId) return res.status(400).json({ success: false, error: 'examId is required' })
+
+      // 1. Filter in-memory cachedExams and persist IMMEDIATELY to disk
       cachedExams = cachedExams.filter((e) => e.id !== examId)
-      // 1. Direct delete from quizzes and quiz_submissions tables in Supabase
+      saveExamsToDisk()
+
+      // 2. Remove all related submissions for this exam from cache and disk
+      cachedSubmissions = cachedSubmissions.filter((s) => s.examId !== examId)
+      for (const [key, sub] of cachedSubmissionsMap.entries()) {
+        if (sub?.examId === examId || key.startsWith(`${examId}:`)) {
+          cachedSubmissionsMap.delete(key)
+        }
+      }
+      saveSubmissionsToDisk()
+
+      // 3. Direct delete from quizzes and quiz_submissions tables in Supabase
       try {
         await withSupabaseTimeout(
           supabase.from('quizzes').delete().eq('id', examId),
@@ -936,20 +974,49 @@ async function startServer() {
           supabase.from('quiz_submissions').delete().eq('quiz_id', examId),
           SUPABASE_TIMEOUT_MS
         )
+        await withSupabaseTimeout(
+          supabase.from('quiz_submissions').delete().filter('answers->>exam_id', 'eq', examId),
+          SUPABASE_TIMEOUT_MS
+        )
+        await withSupabaseTimeout(
+          supabase.from('quiz_submissions').delete().filter('answers->>quiz_id', 'eq', examId),
+          SUPABASE_TIMEOUT_MS
+        )
       } catch (delErr) {
         console.warn('Direct delete from quizzes table error:', delErr)
       }
 
-      // 2. Sync updated exams list to Supabase system post
-      await syncSystemPost('__SYSTEM_EXAMS__', JSON.stringify(cachedExams), teacherPassword)
+      // 4. Delete independent submission rows from Supabase posts table
+      try {
+        const { data: subPosts } = await withSupabaseTimeout(
+          supabase.from('posts').select('id, title').like('title', `__EXAM_SUB__:${examId}%`),
+          SUPABASE_TIMEOUT_MS,
+          { data: [] }
+        )
+        if (Array.isArray(subPosts) && subPosts.length > 0) {
+          for (const sp of subPosts) {
+            await withSupabaseTimeout(
+              supabase.from('posts').delete().eq('id', sp.id),
+              SUPABASE_TIMEOUT_MS
+            ).catch(() => {})
+          }
+        }
+      } catch (e) {
+        console.warn('Deleting subPosts error:', e)
+      }
 
-      res.json({ success: true })
+      // 5. Sync updated exams list and submissions to Supabase system posts
+      await syncSystemPost('__SYSTEM_EXAMS__', JSON.stringify(cachedExams), teacherPassword)
+      await syncSystemPost('__SYSTEM_EXAM_SUBMISSIONS__', JSON.stringify(cachedSubmissions), teacherPassword)
+
+      console.log(`[Server:delete-exam] Exam ${examId} successfully deleted. Remaining exams: ${cachedExams.length}`)
+      res.json({ success: true, remainingCount: cachedExams.length })
     } catch (err: any) {
       res.status(500).json({ success: false, error: err?.message || 'خطا در حذف آزمون' })
     }
   })
 
-  // Teacher delete post endpoint (for homework and announcements ONLY - never deletes exams or system posts)
+  // Teacher delete post endpoint (handles homework, announcements, and interactive assignments)
   app.post('/api/teacher/delete-post', async (req, res) => {
     try {
       const { teacherPassword, postId } = req.body
@@ -958,6 +1025,35 @@ async function startServer() {
       }
       if (!postId) {
         return res.status(400).json({ success: false, error: 'شناسه پست ارسال نشده است.' })
+      }
+
+      // Check if postId is an interactive exam or assignment
+      const isExam = cachedExams.some((e) => e.id === postId) || String(postId).startsWith('exam_')
+      if (isExam) {
+        cachedExams = cachedExams.filter((e) => e.id !== postId)
+        saveExamsToDisk()
+
+        cachedSubmissions = cachedSubmissions.filter((s) => s.examId !== postId)
+        for (const [key, sub] of cachedSubmissionsMap.entries()) {
+          if (sub?.examId === postId || key.startsWith(`${postId}:`)) {
+            cachedSubmissionsMap.delete(key)
+          }
+        }
+        saveSubmissionsToDisk()
+
+        try {
+          await withSupabaseTimeout(supabase.from('quizzes').delete().eq('id', postId), SUPABASE_TIMEOUT_MS)
+          await withSupabaseTimeout(supabase.from('quiz_submissions').delete().eq('quiz_id', postId), SUPABASE_TIMEOUT_MS)
+          await withSupabaseTimeout(supabase.from('quiz_submissions').delete().filter('answers->>exam_id', 'eq', postId), SUPABASE_TIMEOUT_MS)
+          await withSupabaseTimeout(supabase.from('quiz_submissions').delete().filter('answers->>quiz_id', 'eq', postId), SUPABASE_TIMEOUT_MS)
+          await withSupabaseTimeout(supabase.from('posts').delete().like('title', `__EXAM_SUB__:${postId}%`), SUPABASE_TIMEOUT_MS)
+        } catch (e) {}
+
+        await syncSystemPost('__SYSTEM_EXAMS__', JSON.stringify(cachedExams), teacherPassword)
+        await syncSystemPost('__SYSTEM_EXAM_SUBMISSIONS__', JSON.stringify(cachedSubmissions), teacherPassword)
+
+        console.log(`[Server:delete-post] Assignment/Exam ${postId} deleted via post-delete endpoint.`)
+        return res.json({ success: true, isExamDeleted: true })
       }
 
       // Guard: Ensure system posts cannot be accidentally deleted via normal post deletion
@@ -969,10 +1065,9 @@ async function startServer() {
       if (targetPost && isSystemRecord(targetPost)) {
         return res.status(403).json({
           success: false,
-          error: 'رکوردهای سیستمی و آزمون‌ها از این بخش قابل حذف نیستند و محافظت شده‌اند.',
+          error: 'رکوردهای سیستمی از این بخش قابل حذف نیستند و محافظت شده‌اند.',
         })
       }
-
 
       // 1. Delete dependent submissions
       try {
@@ -984,31 +1079,24 @@ async function startServer() {
         console.warn('Deleting dependent submissions error:', e)
       }
 
-      // 2. Try Supabase RPC
-      let rpcOk = false
+      // 2. Call Supabase RPC teacher_delete_post (bypasses RLS securely with teacher password)
       try {
-        const { error } = await withSupabaseTimeout(
+        await withSupabaseTimeout(
           supabase.rpc('teacher_delete_post', {
             p_password: teacherPassword,
             p_post_id: postId,
           }),
           SUPABASE_TIMEOUT_MS
         )
-        if (!error) rpcOk = true
-      } catch (e) {
-        console.warn('RPC teacher_delete_post failed:', e)
+      } catch (rpcErr) {
+        console.warn('RPC teacher_delete_post warning:', rpcErr)
       }
 
-      // 3. Fallback direct delete
-      if (!rpcOk) {
-        const { error: directErr } = await withSupabaseTimeout(
-          supabase.from('posts').delete().eq('id', postId),
-          SUPABASE_TIMEOUT_MS
-        )
-        if (directErr) {
-          console.warn('Direct delete from posts failed:', directErr)
-        }
-      }
+      // 3. Also direct delete as fallback
+      await withSupabaseTimeout(
+        supabase.from('posts').delete().eq('id', postId),
+        SUPABASE_TIMEOUT_MS
+      ).catch(() => {})
 
       return res.json({ success: true })
     } catch (err: any) {

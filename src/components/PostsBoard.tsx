@@ -6,6 +6,7 @@ import MathRenderer from './MathRenderer'
 import AttachmentViewerModal from './AttachmentViewerModal'
 import WhatsappPosterModal from './WhatsappPosterModal'
 import { WhatsappPosterData } from '../types/whatsappPoster'
+import { deleteExam, getLocalExams } from '../utils/examStore'
 
 export default function PostsBoard({
   posts,
@@ -127,6 +128,16 @@ export default function PostsBoard({
   async function executeDelete(postId: string) {
     setDeletingId(postId)
     try {
+      const isExam = getLocalExams().some((e) => e.id === postId) || postId.startsWith('exam_')
+      if (isExam) {
+        await deleteExam(postId, teacherPassword)
+        setDeleteConfirmTarget(null)
+        if (expandedPostId === postId) setExpandedPostId(null)
+        if (editingId === postId) setEditingId(null)
+        if (onChanged) onChanged()
+        return
+      }
+
       let deleted = false
 
       // 1. First call server-side delete endpoint

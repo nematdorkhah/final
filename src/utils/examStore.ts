@@ -359,7 +359,6 @@ export async function syncExamsToSupabaseSystemRow(
   exams: Exam[],
   teacherPassword?: string
 ): Promise<boolean> {
-  const teacherPass = getStoredTeacherPassword(teacherPassword)
   const examsBody = JSON.stringify(exams)
   let directSuccess = false
 
@@ -381,62 +380,23 @@ export async function syncExamsToSupabaseSystemRow(
           type: 'announcement',
           publish_at: new Date().toISOString(),
         })
-        .eq('title', '__SYSTEM_EXAMS__')
+        .eq('id', existingRow.id)
 
       if (!updateErr) directSuccess = true
     } else {
       const { error: insertErr } = await supabase
         .from('posts')
-        .upsert(
-          {
-            title: '__SYSTEM_EXAMS__',
-            type: 'announcement',
-            body: examsBody,
-            publish_at: new Date().toISOString(),
-          },
-          { onConflict: 'title' }
-        )
+        .insert({
+          title: '__SYSTEM_EXAMS__',
+          type: 'announcement',
+          body: examsBody,
+          publish_at: new Date().toISOString(),
+        })
 
       if (!insertErr) directSuccess = true
     }
   } catch (err) {
     console.warn('[ExamStore:syncExamsToSupabaseSystemRow] Direct supabase.from("posts") failed:', err)
-  }
-
-  // 2. Teacher RPC if available
-  if (teacherPass) {
-    try {
-      const { data: posts } = await supabase.rpc('teacher_list_posts', {
-        p_password: teacherPass,
-      })
-      const existing = Array.isArray(posts) ? posts.find((p: any) => p.title === '__SYSTEM_EXAMS__') : null
-
-      if (existing?.id) {
-        await supabase.rpc('teacher_update_post', {
-          p_password: teacherPass,
-          p_post_id: existing.id,
-          p_title: '__SYSTEM_EXAMS__',
-          p_body: examsBody,
-          p_type: 'announcement',
-          p_due_at: null,
-          p_publish_at: new Date().toISOString(),
-          p_attachment_path: null,
-        })
-      } else {
-        await supabase.rpc('teacher_create_post', {
-          p_password: teacherPass,
-          p_type: 'announcement',
-          p_title: '__SYSTEM_EXAMS__',
-          p_body: examsBody,
-          p_due_at: null,
-          p_publish_at: new Date().toISOString(),
-          p_attachment_path: null,
-        })
-      }
-      directSuccess = true
-    } catch (rpcErr) {
-      console.warn('[ExamStore:syncExamsToSupabaseSystemRow] Teacher RPC backup sync warning:', rpcErr)
-    }
   }
 
   return directSuccess
@@ -517,34 +477,57 @@ export async function saveExam(exam: Exam, teacherPassword?: string): Promise<vo
 }
 
 export async function deleteExam(examId: string, teacherPassword?: string): Promise<boolean> {
+  console.log('[ExamStore:deleteExam] Initiating complete deletion of exam/assignment:', examId)
+  
+  // 1. Immediately remove from local memory & localStorage
   const current = getLocalExams().filter((e) => e.id !== examId)
   saveLocalExams(current)
 
+  // 2. Clean associated student submissions from local storage
+  try {
+    const currentSubs = getLocalSubmissions().filter((s) => s.examId !== examId)
+    saveLocalSubmissions(currentSubs)
+  } catch (err) {
+    console.warn('[ExamStore:deleteExam] Error cleaning local submissions:', err)
+  }
+
   const teacherPass = getStoredTeacherPassword(teacherPassword)
 
-  // 1. Direct delete from quizzes table and quiz_submissions
+  // 3. Direct delete from quizzes table, quiz_submissions, and independent posts in Supabase
   try {
     await supabase.from('quizzes').delete().eq('id', examId)
     await supabase.from('quiz_submissions').delete().eq('quiz_id', examId)
-    console.log('[ExamStore:deleteExam] Deleted exam from quizzes and quiz_submissions:', examId)
+    await supabase.from('quiz_submissions').delete().filter('answers->>exam_id', 'eq', examId)
+    await supabase.from('quiz_submissions').delete().filter('answers->>quiz_id', 'eq', examId)
+    await supabase.from('posts').delete().like('title', `__EXAM_SUB__:${examId}%`)
+    console.log('[ExamStore:deleteExam] Deleted from Supabase tables for exam:', examId)
   } catch (err) {
-    console.warn('[ExamStore:deleteExam] Error deleting from quizzes table:', err)
+    console.warn('[ExamStore:deleteExam] Error deleting from Supabase:', err)
   }
 
-  // 2. Backend server delete call
+  // 4. Direct Sync updated exams array to Supabase __SYSTEM_EXAMS__ row
+  await syncExamsToSupabaseSystemRow(current, teacherPass)
+
+  // 5. Backend server delete call (persists disk backup and in-memory caches)
   try {
-    fetch('/api/exams/delete', {
+    const res = await fetch('/api/exams/delete', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         ...(teacherPass ? { 'x-teacher-password': teacherPass, 'Authorization': `Bearer ${teacherPass}` } : {}),
       },
       body: JSON.stringify({ examId, teacherPassword: teacherPass }),
-    }).catch(() => {})
-  } catch {}
+    })
+    const data = await res.json()
+    console.log('[ExamStore:deleteExam] Server delete response:', data)
+  } catch (err) {
+    console.warn('[ExamStore:deleteExam] Server delete call error:', err)
+  }
 
-  // 3. Direct Sync updated exams array to Supabase __SYSTEM_EXAMS__
-  await syncExamsToSupabaseSystemRow(current, teacherPass)
+  // 6. Broadcast event across client components
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('exams-updated', { detail: { examId, deleted: true } }))
+  }
 
   return true
 }

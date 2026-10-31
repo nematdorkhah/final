@@ -2870,6 +2870,7 @@ export default function TeacherExamBuilder({
                   onClick={async () => {
                     const target = deleteConfirmExam
                     setDeleteConfirmExam(null)
+                    setExams((prev) => prev.filter((e) => e.id !== target.id))
                     await deleteExam(target.id, teacherPassword)
                     await loadExams()
                   }}

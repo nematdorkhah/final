@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useCallback } from 'react'
 import { toPersianDigits } from '../utils/persianNumbers'
-import { getLocalExams, getLocalSubmissions, fetchExamSubmissions } from '../utils/examStore'
+import { getLocalExams, getLocalSubmissions, fetchExamSubmissions, deleteExam } from '../utils/examStore'
 import { sortByLastName } from '../utils/persianSort'
 import { supabase } from '../supabaseClient'
 import AttachmentViewerModal from './AttachmentViewerModal'
@@ -11,11 +11,13 @@ export default function HomeworkStatusList({
   homeworkPosts,
   submissions,
   students,
+  teacherPassword,
   onRefresh,
 }: {
   homeworkPosts: any[]
   submissions: any[]
   students: any[]
+  teacherPassword?: string
   onRefresh?: () => void
 }) {
   const [expandedAssignmentId, setExpandedAssignmentId] = useState<string | null>(null)
@@ -24,6 +26,13 @@ export default function HomeworkStatusList({
   const [refreshing, setRefreshing] = useState(false)
   const [viewingAttachment, setViewingAttachment] = useState<{ url: string; title: string } | null>(null)
   const [whatsappModalData, setWhatsappModalData] = useState<WhatsappPosterData | null>(null)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [deleteConfirmTarget, setDeleteConfirmTarget] = useState<{
+    id: string
+    title: string
+    isOnlineExam: boolean
+    count: number
+  } | null>(null)
 
   function handleExportWhatsapp(assignment: any) {
     if (assignment.isOnlineExam && assignment.raw) {
@@ -75,6 +84,15 @@ export default function HomeworkStatusList({
     fetchServerExamSubs()
   }, [fetchServerExamSubs])
 
+  useEffect(() => {
+    const handleExamsUpdated = () => {
+      fetchServerExamSubs()
+      if (onRefresh) onRefresh()
+    }
+    window.addEventListener('exams-updated', handleExamsUpdated)
+    return () => window.removeEventListener('exams-updated', handleExamsUpdated)
+  }, [fetchServerExamSubs, onRefresh])
+
   const handleRefresh = async (e?: React.MouseEvent) => {
     if (e) e.stopPropagation()
     setRefreshing(true)
@@ -85,6 +103,41 @@ export default function HomeworkStatusList({
       }
     } finally {
       setTimeout(() => setRefreshing(false), 500)
+    }
+  }
+
+  async function executeDeleteAssignment(target: { id: string; isOnlineExam: boolean }) {
+    setDeletingId(target.id)
+    try {
+      if (target.isOnlineExam) {
+        await deleteExam(target.id, teacherPassword)
+      } else {
+        // Standard post delete
+        try {
+          await fetch('/api/teacher/delete-post', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ teacherPassword, postId: target.id }),
+          })
+        } catch (e) {}
+
+        await supabase.from('submissions').delete().eq('post_id', target.id)
+        await supabase.from('posts').delete().eq('id', target.id)
+      }
+
+      setDeleteConfirmTarget(null)
+      if (expandedAssignmentId === target.id) {
+        setExpandedAssignmentId(null)
+      }
+      if (onRefresh) {
+        onRefresh()
+      }
+      await fetchServerExamSubs()
+    } catch (err: any) {
+      console.error('Delete assignment failed:', err)
+      alert('خطا در حذف تکلیف: ' + (err?.message || 'مشکل در برقراری ارتباط'))
+    } finally {
+      setDeletingId(null)
     }
   }
 
@@ -346,8 +399,41 @@ export default function HomeworkStatusList({
                 </div>
               </div>
 
-              {/* Left Side: WhatsApp button & Chevron Button */}
+              {/* Left Side: WhatsApp button, Delete button & Chevron Button */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                {teacherPassword && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setDeleteConfirmTarget({
+                        id: assignment.id,
+                        title: assignment.title,
+                        isOnlineExam: Boolean(assignment.isOnlineExam),
+                        count: submittedCount,
+                      })
+                    }}
+                    disabled={deletingId === assignment.id}
+                    style={{
+                      fontSize: 12,
+                      fontWeight: 800,
+                      color: '#DC2626',
+                      background: '#FEF2F2',
+                      border: '1.5px solid #FECACA',
+                      padding: '5px 10px',
+                      borderRadius: 8,
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 4,
+                      cursor: deletingId === assignment.id ? 'not-allowed' : 'pointer',
+                      boxShadow: '0 1px 2px rgba(220,38,38,0.06)',
+                    }}
+                    title="حذف این تکلیف و اطلاعات آن"
+                  >
+                    <span>{deletingId === assignment.id ? '⏳' : '🗑️'}</span>
+                    <span>حذف</span>
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={(e) => {
@@ -623,6 +709,110 @@ export default function HomeworkStatusList({
         onClose={() => setWhatsappModalData(null)}
         data={whatsappModalData}
       />
+
+      {/* Delete Confirmation Modal */}
+      {deleteConfirmTarget && (
+        <div
+          dir="rtl"
+          style={{
+            position: 'fixed',
+            inset: 0,
+            backgroundColor: 'rgba(15, 23, 42, 0.65)',
+            backdropFilter: 'blur(4px)',
+            zIndex: 9999,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 16,
+          }}
+          onClick={() => {
+            if (!deletingId) setDeleteConfirmTarget(null)
+          }}
+        >
+          <div
+            className="mobile-card hard"
+            style={{
+              background: '#FFFFFF',
+              borderRadius: 20,
+              maxWidth: 440,
+              width: '100%',
+              padding: 24,
+              boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.2)',
+              border: '2px solid #0F172A',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ fontSize: 40, textAlign: 'center', marginBottom: 12 }}>🗑️</div>
+            <h3
+              style={{
+                fontSize: 18,
+                fontWeight: 900,
+                textAlign: 'center',
+                margin: '0 0 10px 0',
+                color: '#0F172A',
+              }}
+            >
+              حذف تکلیف
+            </h3>
+            <p
+              style={{
+                fontSize: 13.5,
+                color: '#475569',
+                lineHeight: 1.6,
+                textAlign: 'center',
+                margin: '0 0 16px 0',
+              }}
+            >
+              آیا از حذف کامل تکلیف «<strong>{deleteConfirmTarget.title}</strong>» اطمینان دارید؟
+            </p>
+
+            {deleteConfirmTarget.count > 0 && (
+              <div
+                style={{
+                  background: '#FEF2F2',
+                  border: '1.5px solid #FCA5A5',
+                  borderRadius: 10,
+                  padding: '10px 12px',
+                  marginBottom: 16,
+                  textAlign: 'right',
+                }}
+              >
+                <strong style={{ color: '#991B1B', fontSize: 13 }}>⚠️ هشدار پاسخ‌های ثبت‌شده:</strong>
+                <p style={{ margin: '4px 0 0 0', color: '#B91C1C', fontSize: 12.5, lineHeight: 1.5 }}>
+                  این تکلیف دارای <strong>{toPersianDigits(deleteConfirmTarget.count)}</strong> پاسخ ارسال‌شده از دانش‌آموزان است که همگی همراه با این تکلیف برای همیشه پاک خواهند شد.
+                </p>
+              </div>
+            )}
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+              <button
+                type="button"
+                className="btn secondary"
+                disabled={Boolean(deletingId)}
+                onClick={() => setDeleteConfirmTarget(null)}
+                style={{ fontWeight: 800, cursor: 'pointer' }}
+              >
+                انصراف
+              </button>
+              <button
+                type="button"
+                className="btn"
+                disabled={Boolean(deletingId)}
+                onClick={() => executeDeleteAssignment(deleteConfirmTarget)}
+                style={{
+                  background: '#DC2626',
+                  color: '#FFFFFF',
+                  borderColor: '#991B1B',
+                  fontWeight: 800,
+                  cursor: deletingId ? 'not-allowed' : 'pointer',
+                }}
+              >
+                {deletingId ? 'در حال حذف...' : 'بله، حذف شود'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

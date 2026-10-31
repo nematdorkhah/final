@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useState, useEffect } from 'react'
 import { toPersianDigits } from '../utils/persianNumbers'
 import { useClassroomData } from '../hooks/useClassroomData'
 import { getJalaliDateLabel } from '../useJalaliDate'
@@ -48,6 +48,14 @@ export default function TeacherDashboard({
     error,
     reload,
   } = useClassroomData(teacherPassword)
+
+  useEffect(() => {
+    const handleExamsUpdated = () => {
+      reload()
+    }
+    window.addEventListener('exams-updated', handleExamsUpdated)
+    return () => window.removeEventListener('exams-updated', handleExamsUpdated)
+  }, [reload])
 
   const sortedStudents = useMemo(() => sortByLastName(students), [students])
 
@@ -396,6 +404,7 @@ export default function TeacherDashboard({
                 homeworkPosts={homeworkPosts}
                 submissions={submissions}
                 students={sortedStudents}
+                teacherPassword={teacherPassword}
                 onRefresh={reload}
               />
             </div>
