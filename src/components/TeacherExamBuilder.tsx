@@ -22,6 +22,8 @@ import WhatsappPosterModal from './WhatsappPosterModal'
 import { WhatsappPosterData } from '../types/whatsappPoster'
 import {
   resolveCorrectOptionIndex,
+  resolveStudentSelectedOption,
+  cleanOptionText,
   safeNumber,
   safeScore,
 } from '../utils/persianSemanticGrader'
@@ -519,13 +521,23 @@ export default function TeacherExamBuilder({
 
   function handleSaveQuestionModal(savedQ: ExamQuestion) {
     if (!draftExam) return
+    let resolvedCorrectIndex = 0
+    let resolvedCorrectText = ''
+    if (savedQ.type === 'multiple_choice') {
+      const res = resolveCorrectOptionIndex(savedQ)
+      resolvedCorrectIndex = res.isValid && res.index >= 0 ? res.index : 0
+      resolvedCorrectText = res.cleanText || cleanOptionText(savedQ.options?.[resolvedCorrectIndex] || '')
+    }
+
     const sanitizedQ: ExamQuestion = {
       ...savedQ,
       points: safeScore(savedQ.points, 10, 2),
       correctAnswer:
         savedQ.type === 'multiple_choice'
-          ? resolveCorrectOptionIndex(savedQ).index
+          ? resolvedCorrectIndex
           : savedQ.correctAnswer,
+      correctOptionIndex: savedQ.type === 'multiple_choice' ? resolvedCorrectIndex : undefined,
+      correctOptionText: savedQ.type === 'multiple_choice' ? resolvedCorrectText : undefined,
     }
     let updatedList: ExamQuestion[] = []
     if (isNewQuestionModal) {
@@ -2354,12 +2366,26 @@ export default function TeacherExamBuilder({
                       <div style={{ background: '#F1F5F9', padding: '10px 12px', borderRadius: 8, margin: '8px 0', fontSize: 13 }}>
                         <strong>پاسخ دانش‌آموز:</strong>{' '}
                         {q.type === 'multiple_choice' ? (
-                          <span>
-                            گزینه {Number(sAnswer?.selectedOption ?? -1) + 1}
-                            {q.options && sAnswer?.selectedOption !== undefined
-                              ? ` (${q.options[sAnswer.selectedOption]})`
-                              : ''}
-                          </span>
+                          (() => {
+                            const resStudent = resolveStudentSelectedOption(sAnswer, q.options)
+                            const resCorrect = resolveCorrectOptionIndex(q)
+                            return (
+                              <span>
+                                {resStudent.isValid ? (
+                                  <span style={{ fontWeight: 800, color: '#1E293B' }}>
+                                    {resStudent.label}{resStudent.text ? `: ${resStudent.text}` : ''}
+                                  </span>
+                                ) : (
+                                  <span style={{ color: '#64748B' }}>بدون پاسخ</span>
+                                )}
+                                {resCorrect.isValid && (
+                                  <span style={{ marginRight: 12, fontSize: 12, color: '#15803D', background: '#DCFCE7', padding: '2px 8px', borderRadius: 6, fontWeight: 700 }}>
+                                    کلید صحیح: {resCorrect.label}{resCorrect.text ? `: ${resCorrect.text}` : ''}
+                                  </span>
+                                )}
+                              </span>
+                            )
+                          })()
                         ) : (
                           <span>{sAnswer?.textAnswer || 'بدون پاسخ متنی'}</span>
                         )}
@@ -2591,7 +2617,14 @@ export default function TeacherExamBuilder({
                         type="radio"
                         name="correctOption"
                         checked={resolvedIndex === i}
-                        onChange={() => setEditingQ({ ...editingQ, correctAnswer: i })}
+                        onChange={() =>
+                          setEditingQ({
+                            ...editingQ,
+                            correctAnswer: i,
+                            correctOptionIndex: i,
+                            correctOptionText: cleanOptionText(opt || ''),
+                          })
+                        }
                         title="انتخاب به عنوان گزینه درست"
                       />
                       <input
@@ -2600,7 +2633,12 @@ export default function TeacherExamBuilder({
                         onChange={(e) => {
                           const newOpts = [...(editingQ.options || [])]
                           newOpts[i] = e.target.value
-                          setEditingQ({ ...editingQ, options: newOpts })
+                          const isCur = resolveCorrectOptionIndex(editingQ).index === i
+                          setEditingQ({
+                            ...editingQ,
+                            options: newOpts,
+                            correctOptionText: isCur ? cleanOptionText(e.target.value) : editingQ.correctOptionText,
+                          })
                         }}
                         placeholder={`گزینه ${i + 1}`}
                         style={{ flex: 1, padding: 6, borderRadius: 6, border: '1.5px solid #CBD5E1', fontSize: 13 }}

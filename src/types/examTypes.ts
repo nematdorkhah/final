@@ -5,12 +5,24 @@ export type QuestionType =
   | 'true_false'
   | 'image'
 
+export interface ExamOptionObject {
+  id: string
+  text: string
+  [key: string]: any
+}
+
+export type ExamOptionItem = string | ExamOptionObject
+
 export interface ExamQuestion {
   id: string
   type: QuestionType
   question: string
   options?: string[]
+  optionObjects?: ExamOptionObject[]
   correctAnswer?: number | string
+  correctOptionIndex?: number
+  correctOptionText?: string
+  correctOptionId?: string
   acceptableAnswers?: string[]
   points?: number
   rubricOrHint?: string
@@ -21,7 +33,11 @@ export interface ExamQuestion {
 
 export interface StudentExamAnswer {
   selectedOption?: number
+  selectedOptionIndex?: number
+  selectedOptionText?: string
+  selectedOptionId?: string
   textAnswer?: string
+  imageAttachment?: string
   answeredAt?: string | number
   [key: string]: any
 }

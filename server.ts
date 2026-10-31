@@ -6,6 +6,11 @@ dotenv.config()
 
 import { GoogleGenAI } from '@google/genai'
 import { createClient } from '@supabase/supabase-js'
+import {
+  cleanOptionText,
+  resolveCorrectOptionIndex,
+  evaluateEntireExamSubmission,
+} from './src/utils/persianSemanticGrader'
 
 const CANDIDATE_MODELS = [
   'gemini-3.8-flash',
@@ -1532,10 +1537,10 @@ ${extraInstructions ? `🎯 توضیحات و دستورات معلم: «${extra
 ۱. سوالات باید زنده، ملموس و دارای سناریو یا داده‌های واقعی باشند (مثل مسائل زندگی روزمره، خرید، تقسیم خوراکی، پارچه، شکل‌های دقیق هندسی، ابیات و اشعار اصیل فارسی، آزمایش‌های علمی ملموس).
 ۲. از هرگونه عبارت کلیشه‌ای، فرمول خشک، یا سوالات ماشینی بدون روح پرهیز کنید.
 ۳. سوالات را دقیقاً متناسب با درک و سن دانش‌آموزان ۱۲ ساله پایه ششم بنویسید.
-۴. در سوالات چهارگزینه‌ای: ۴ گزینه ملموس، متمایز و حساب‌شده طراحی کنید (گزینه‌های گمراه‌کننده هوشمندانه باشند).
+۴. در سوالات چهارگزینه‌ای: حتماً ۴ گزینه ملموس، متمایز و حساب‌شده بنویسید. ایندکس گزینه صحیح را به صورت عدد ۰ تا ۳ در correctAnswer قرار دهید و متن دقیق همان گزینه درست را نیز در correctOptionText بنویسید. بسیار مهم: موقعیت گزینه صحیح را بین گزینه‌ها متغیر قرار دهید (گاهی گزینه ۰، گاهی ۱، گاهی ۲، گاهی ۳). هرگز پاسخ همه سوالات را گزینه ۰ قرار ندهید!
 ۵. در سوالات جای خالی: صورت سوال روان باشد و جای خالی با ............ مشخص شده باشد.
 ۶. در سوالات تشریحی یا حل مسئله: مسئله‌ای هدفمند که دانش‌آموز با نوشتن مراحل به پاسخ برسد.
-۷. در پاسخنامه و راهنمای تصحیح (rubricOrHint): دقیقاً مانند پاسخنامه کاربرگ تمرینی، توضیح کامل، آموزنده و گام‌به‌گام راه‌حل را بنویسید تا معلم و دانش‌آموز از آن بیاموزند.
+۷. در پاسخنامه و راهنمای تصحیح (rubricOrHint): توضیح کامل و مشخص کردن صریح دلیل درستی گزینه یا پاسخ را بنویسید.
 
 خروجی باید صرفاً یک آرایه JSON معتبر طبق این الگو باشد:
 [
@@ -1544,8 +1549,9 @@ ${extraInstructions ? `🎯 توضیحات و دستورات معلم: «${extra
     "type": "multiple_choice",
     "question": "متن روان، ملموس و دقیق صورت سوال درباره موضوع",
     "options": ["گزینه ۱", "گزینه ۲", "گزینه ۳", "گزینه ۴"],
-    "correctAnswer": 0,
-    "rubricOrHint": "توضیح کامل، گام‌به‌گام و آموزنده پاسخنامه",
+    "correctAnswer": 2,
+    "correctOptionText": "گزینه ۳",
+    "rubricOrHint": "توضیح کامل: گزینه ۳ پاسخ صحیح است زیرا...",
     "points": 2
   },
   {
@@ -1581,10 +1587,29 @@ ${extraInstructions ? `🎯 توضیحات و دستورات معلم: «${extra
         throw new Error('قالب بازگشتی هوش مصنوعی معتبر نبود.')
       }
 
+      const processedQuestions = parsed.map((q: any, qIdx: number) => {
+        if (!q || typeof q !== 'object') return q
+        const baseId = q.id || `q_${Date.now()}_${qIdx}`
+        if (q.type === 'multiple_choice' && Array.isArray(q.options) && q.options.length > 0) {
+          const res = resolveCorrectOptionIndex(q)
+          let finalIdx = res.isValid && res.index >= 0 ? res.index : (typeof q.correctAnswer === 'number' ? q.correctAnswer : 0)
+          if (finalIdx < 0 || finalIdx >= q.options.length) finalIdx = 0
+          const finalCleanText = cleanOptionText(q.options[finalIdx] || '')
+          return {
+            ...q,
+            id: baseId,
+            correctAnswer: finalIdx,
+            correctOptionIndex: finalIdx,
+            correctOptionText: q.correctOptionText ? cleanOptionText(q.correctOptionText) : finalCleanText,
+          }
+        }
+        return { ...q, id: baseId }
+      })
+
       res.json({
         success: true,
         detectedSubject: effectiveSubject,
-        questions: parsed,
+        questions: processedQuestions,
       })
     } catch (err: any) {
       console.error('Error in generate-exam:', err)
@@ -1643,9 +1668,9 @@ ${extraInstructions ? `۵. دستور ویژه آموزگار: ${extraInstructio
   "id": "q_${Date.now()}",
   "type": "${type}",
   "question": "متن روان، رسا و بدون ابهام سوال جدید",
-  ${type === 'multiple_choice' ? `"options": ["گزینه ۱", "گزینه ۲", "گزینه ۳", "گزینه ۴"],\n  "correctAnswer": 0,` : ''}
+  ${type === 'multiple_choice' ? `"options": ["گزینه ۱", "گزینه ۲", "گزینه ۳", "گزینه ۴"],\n  "correctAnswer": 1,\n  "correctOptionText": "متن گزینه صحیح بدون پیشوند",` : ''}
   ${type === 'fill_in_the_blank' ? `"correctAnswer": "پاسخ دقیق جای خالی",` : ''}
-  "rubricOrHint": "راهنما و کلید دقیق حل سوال برای معلم",
+  "rubricOrHint": "راهنما و کلید دقیق حل سوال برای معلم با ذکر صریح دلیل درستی گزینه یا پاسخ",
   "points": ${Number(points) || 2}
 }`
 
@@ -1669,8 +1694,13 @@ ${extraInstructions ? `۵. دستور ویژه آموزگار: ${extraInstructio
       if (parsed.type === 'multiple_choice' && (!Array.isArray(parsed.options) || parsed.options.length < 2)) {
         parsed.options = ['الف', 'ب', 'ج', 'د']
       }
-      if (parsed.type === 'multiple_choice' && parsed.correctAnswer === undefined) {
-        parsed.correctAnswer = 0
+      if (parsed.type === 'multiple_choice' && Array.isArray(parsed.options) && parsed.options.length > 0) {
+        const res = resolveCorrectOptionIndex(parsed)
+        let finalIdx = res.isValid && res.index >= 0 ? res.index : (typeof parsed.correctAnswer === 'number' ? parsed.correctAnswer : 0)
+        if (finalIdx < 0 || finalIdx >= parsed.options.length) finalIdx = 0
+        parsed.correctAnswer = finalIdx
+        parsed.correctOptionIndex = finalIdx
+        parsed.correctOptionText = parsed.correctOptionText ? cleanOptionText(parsed.correctOptionText) : cleanOptionText(parsed.options[finalIdx] || '')
       }
 
       res.json({
@@ -1694,7 +1724,7 @@ ${extraInstructions ? `۵. دستور ویژه آموزگار: ${extraInstructio
       }
 
       const prompt = `شما دستیار هوشمند آموزگار پایه ششم هستید. متن کاربرگ تمرینی یا تکلیف زیر را تجزیه کرده و آن را به سوالات آزمون آنلاین استاندارد (آرایه JSON) تبدیل کنید.
-اگر سوال چهارگزینه‌ای است به multiple_choice با ۴ گزینه و correctAnswer (شاخص عددی 0 تا 3) تبدیل کنید.
+اگر سوال چهارگزینه‌ای است به multiple_choice با ۴ گزینه، correctAnswer (شاخص عددی ۰ تا ۳)، و correctOptionText (متن همان گزینه صحیح) تبدیل کنید.
 اگر جای خالی است به fill_in_the_blank با علامت ............ و correctAnswer مشخص تبدیل کنید.
 اگر تشریحی، حل مسئله یا نیاز به توضیح است به descriptive تبدیل کنید.
 اگر پاسخنامه در انتهای متن وجود دارد، پاسخ و استدلال هر سوال را در rubricOrHint قرار دهید.
@@ -1709,7 +1739,8 @@ ${text}
     "type": "multiple_choice",
     "question": "صورت سوال",
     "options": ["گزینه ۱", "گزینه ۲", "گزینه ۳", "گزینه ۴"],
-    "correctAnswer": 0,
+    "correctAnswer": 1,
+    "correctOptionText": "گزینه ۲",
     "rubricOrHint": "استدلال یا پاسخنامه",
     "points": 2
   }
@@ -1727,9 +1758,27 @@ ${text}
       }
 
       const parsed = JSON.parse(cleaned)
+      const processedQuestions = (Array.isArray(parsed) ? parsed : []).map((q: any, qIdx: number) => {
+        if (!q || typeof q !== 'object') return q
+        const baseId = q.id || `q_conv_${Date.now()}_${qIdx}`
+        if (q.type === 'multiple_choice' && Array.isArray(q.options) && q.options.length > 0) {
+          const res = resolveCorrectOptionIndex(q)
+          let finalIdx = res.isValid && res.index >= 0 ? res.index : (typeof q.correctAnswer === 'number' ? q.correctAnswer : 0)
+          if (finalIdx < 0 || finalIdx >= q.options.length) finalIdx = 0
+          return {
+            ...q,
+            id: baseId,
+            correctAnswer: finalIdx,
+            correctOptionIndex: finalIdx,
+            correctOptionText: q.correctOptionText ? cleanOptionText(q.correctOptionText) : cleanOptionText(q.options[finalIdx] || ''),
+          }
+        }
+        return { ...q, id: baseId }
+      })
+
       res.json({
         success: true,
-        questions: parsed,
+        questions: processedQuestions,
       })
     } catch (err: any) {
       console.error('Error in convert-practice-to-exam:', err)

@@ -219,6 +219,25 @@ export default function StudentExamTaker({
     })
   }
 
+  function handleSelectOption(optIdx: number, optText: string) {
+    if (!currentQ) return
+    setSaveIndicator('saving')
+    setAnswers((prev) => {
+      const updated = {
+        ...prev,
+        [currentQ.id]: {
+          ...(prev[currentQ.id] || {}),
+          selectedOption: optIdx,
+          selectedOptionIndex: optIdx,
+          selectedOptionText: optText,
+        },
+      }
+      answersRef.current = updated
+      persistDraft(updated, currentQIndex)
+      return updated
+    })
+  }
+
   function handleQuestionChange(newIdx: number) {
     setCurrentQIndex(newIdx)
     persistDraft(answersRef.current, newIdx)
@@ -853,7 +872,7 @@ export default function StudentExamTaker({
                   <button
                     key={optIdx}
                     type="button"
-                    onClick={() => setAnswerForCurrent('selectedOption', optIdx)}
+                    onClick={() => handleSelectOption(optIdx, opt)}
                     style={{
                       display: 'flex',
                       alignItems: 'center',

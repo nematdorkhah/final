@@ -5,6 +5,7 @@ import { isExamResultsReleased } from '../utils/examStore'
 import {
   resolveCorrectOptionIndex,
   resolveStudentSelectedOption,
+  evaluateMultipleChoice,
   evaluateFillInTheBlank,
   safeNumber,
   safeScore,
@@ -300,7 +301,8 @@ export default function ExamReviewModal({
               const studentImage = typeof rawAns === 'object' && rawAns !== null ? rawAns.imageAttachment : undefined
 
               // Evaluate correctness
-              const isCorrectMC = isMultiChoice && studentOptIndex !== undefined && studentOptIndex === correctOptIndex
+              const mcEval = isMultiChoice ? evaluateMultipleChoice(q, rawAns) : null
+              const isCorrectMC = mcEval?.status === 'correct'
               const blankEval = !isMultiChoice ? evaluateFillInTheBlank(q, rawAns) : null
               const isCorrectBlank = blankEval?.status === 'correct'
 
@@ -308,14 +310,14 @@ export default function ExamReviewModal({
               const earned = safeScore(
                 submission.teacherGrading?.questionScores?.[q.id] ??
                 submission.aiGrading?.questionScores?.[q.id] ??
-                (isCorrectMC || isCorrectBlank ? qPoints : (blankEval?.score ?? 0)),
+                (isMultiChoice ? (mcEval?.score ?? 0) : (blankEval?.score ?? 0)),
                 qPoints
               )
 
               const feedback =
                 submission.teacherGrading?.questionFeedbacks?.[q.id] ||
                 submission.aiGrading?.questionFeedbacks?.[q.id] ||
-                blankEval?.feedback
+                (isMultiChoice ? mcEval?.feedback : blankEval?.feedback)
 
               const isPassed = earned >= qPoints * 0.75
               const isPartial = earned > 0 && earned < qPoints * 0.75

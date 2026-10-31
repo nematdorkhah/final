@@ -343,102 +343,236 @@ export function isMinorTypoMatch(student: string, expected: string): boolean {
 }
 
 // ----------------------------------------------------------------------
-// 5. MULTIPLE CHOICE RESOLVER (ELIMINATES `NaN` COMPLETELY)
+// 5. MULTIPLE CHOICE RESOLVER & CANONICAL OPTION UTILITIES
 // ----------------------------------------------------------------------
 
 export interface ResolvedOption {
   index: number // 0-based valid index (0..3) or -1 if unresolved
   label: string // e.g. "گزینه ۱ (الف)"
   text: string  // Text of option from options array
+  cleanText: string // Option text stripped of labels/prefixes
   isValid: boolean
 }
 
-const PERSIAN_OPTION_LETTERS = ['الف', 'ب', 'ج', 'د', 'هـ', 'و']
+export const PERSIAN_OPTION_LETTERS = ['الف', 'ب', 'ج', 'د', 'هـ', 'و']
+
+/**
+ * Strips option prefixes and labels to compare option concepts cleanly:
+ * Handles:
+ * - "الف: خبری" -> "خبری"
+ * - "ج) عاطفی" -> "عاطفی"
+ * - "۳- به سخنان آموزگار..." -> "به سخنان آموزگار..."
+ * - "گزینه ۲: آیا سهراب..." -> "آیا سهراب..."
+ * - "(ب) سهراب..." -> "سهراب..."
+ */
+export function cleanOptionText(text: string): string {
+  if (!text) return ''
+  let cleaned = String(text).trim()
+
+  // Remove surrounding quotes
+  cleaned = cleaned.replace(/^["'«]+|["'»]+$/g, '').trim()
+
+  // Remove leading labels like "گزینه ۱:", "گزینه ج -"
+  cleaned = cleaned.replace(/^گزینه\s*([0-9۰-۹۱۲۳۴۵۶۷۸۹]|الف|ب|ج|د|هـ|و|[A-Da-d])\s*[:\)\-\.]*\s*/u, '')
+
+  // Remove leading Persian option letters: الف:, ب), ج-, د. etc.
+  cleaned = cleaned.replace(/^(الف|ب|ج|د|هـ|و|[A-Da-d])\s*[:\)\-\.]\s*/u, '')
+
+  // Remove leading digits with delimiters: 1:, ۱), 2-, ۳. etc.
+  cleaned = cleaned.replace(/^[0-9۰-۹۱۲۳۴۵۶۷۸۹]+\s*[:\)\-\.]\s*/u, '')
+
+  // Remove leading parentheses: (الف), (۱), (ب)
+  cleaned = cleaned.replace(/^\((الف|ب|ج|د|هـ|و|[0-9۰-۹۱۲۳۴۵۶۷۸۹]|[A-Da-d])\)\s*/u, '')
+
+  // Final trim and normalize
+  return normalizePersianText(cleaned).trim()
+}
+
+/**
+ * Extract raw options array from ExamQuestion, handling both string[] and object[]
+ */
+export function extractQuestionOptions(q: ExamQuestion): string[] {
+  if (Array.isArray(q.options) && q.options.length > 0) {
+    return q.options.map((opt) => (typeof opt === 'string' ? opt : (opt as any)?.text || String(opt)))
+  }
+  if (Array.isArray(q.optionObjects) && q.optionObjects.length > 0) {
+    return q.optionObjects.map((opt) => opt?.text || '')
+  }
+  return []
+}
 
 /**
  * Resolves the correct option index for a multiple choice question with 100% certainty:
  * Handles:
+ * - Direct correctOptionText match against option text or cleanOptionText
  * - 0-based number: 0, 1, 2, 3
- * - 1-based number or string: 1, 2, 3, 4
- * - Persian letters: الف -> 0, ب -> 1, ج -> 2, د -> 3
+ * - 1-based number: 1, 2, 3, 4
+ * - Persian letters: الف -> 0, ب -> 1, ج -> 2, د -> 3 (strictly anchored, NO false-positive endsWith)
  * - Persian labels: "گزینه ۱", "گزینه ب"
- * - Option text matching: e.g. correctAnswer is "۷۸/۵" or "خمیرکره", matching options[1]
+ * - Clean option text matching: e.g. "عاطفی" matches "ج: عاطفی"
+ * - Returns isValid: false and index: -1 if unresolvable (NEVER default to 0 silently!)
  */
 export function resolveCorrectOptionIndex(q: ExamQuestion): ResolvedOption {
-  const options: string[] = Array.isArray(q.options) && q.options.length > 0 ? q.options : []
+  const options = extractQuestionOptions(q)
   const maxIdx = Math.max(0, options.length - 1)
 
-  // 1. Explicit correctOptionIndex or correctIndex
+  if (options.length === 0) {
+    return {
+      index: -1,
+      label: 'تعیین‌نشده',
+      text: '',
+      cleanText: '',
+      isValid: false,
+    }
+  }
+
+  // 1. Explicit stable text match via correctOptionText
+  if (q.correctOptionText) {
+    const targetClean = cleanOptionText(q.correctOptionText)
+    // Pass 1: Exact match
+    for (let i = 0; i < options.length; i++) {
+      const optClean = cleanOptionText(options[i])
+      if (optClean === targetClean) {
+        return {
+          index: i,
+          label: `گزینه ${i + 1} (${PERSIAN_OPTION_LETTERS[i] || i + 1})`,
+          text: options[i],
+          cleanText: optClean,
+          isValid: true,
+        }
+      }
+    }
+    // Pass 2: Substring containment
+    for (let i = 0; i < options.length; i++) {
+      const optClean = cleanOptionText(options[i])
+      if (targetClean.length >= 4 && (optClean.includes(targetClean) || targetClean.includes(optClean))) {
+        return {
+          index: i,
+          label: `گزینه ${i + 1} (${PERSIAN_OPTION_LETTERS[i] || i + 1})`,
+          text: options[i],
+          cleanText: optClean,
+          isValid: true,
+        }
+      }
+    }
+  }
+
+  // 2. Explicit correctOptionIndex or correctIndex
   const directIdx = q.correctOptionIndex ?? q.correctIndex
   if (typeof directIdx === 'number' && directIdx >= 0 && directIdx <= maxIdx) {
     return {
       index: directIdx,
       label: `گزینه ${directIdx + 1} (${PERSIAN_OPTION_LETTERS[directIdx] || directIdx + 1})`,
       text: options[directIdx] || '',
+      cleanText: cleanOptionText(options[directIdx] || ''),
       isValid: true,
     }
   }
 
-  // 2. Inspect correctAnswer
+  // 3. Inspect correctAnswer
   const raw = q.correctAnswer
   if (raw === undefined || raw === null || raw === '') {
     return {
-      index: 0,
-      label: options.length > 0 ? 'گزینه ۱ (الف)' : 'تعیین‌نشده',
-      text: options[0] || '',
+      index: -1,
+      label: 'تعیین‌نشده',
+      text: '',
+      cleanText: '',
       isValid: false,
     }
   }
 
-  // Numeric correctAnswer
-  if (typeof raw === 'number') {
-    if (!isNaN(raw) && isFinite(raw)) {
-      if (raw >= 0 && raw <= maxIdx) {
-        return {
-          index: raw,
-          label: `گزینه ${raw + 1} (${PERSIAN_OPTION_LETTERS[raw] || raw + 1})`,
-          text: options[raw] || '',
-          isValid: true,
-        }
+  const strRaw = String(raw).trim()
+  const cleanRaw = cleanOptionText(strRaw)
+  const normStr = normalizePersianText(strRaw)
+  const compactStr = compactPersianText(strRaw)
+
+  // 4. Primary: Match against option text
+  // Pass 1: EXACT MATCH across all options (prevents 'معلمان' shadowing 'علما')
+  for (let i = 0; i < options.length; i++) {
+    const opt = options[i]
+    const optClean = cleanOptionText(opt)
+    const optNorm = normalizePersianText(opt)
+    const optCompact = compactPersianText(opt)
+
+    // A. Clean text exact equality
+    if (cleanRaw && optClean && cleanRaw === optClean) {
+      return {
+        index: i,
+        label: `گزینه ${i + 1} (${PERSIAN_OPTION_LETTERS[i] || i + 1})`,
+        text: options[i],
+        cleanText: optClean,
+        isValid: true,
       }
-      // If 1-based (e.g. 1..4 when maxIdx is 3)
-      if (raw >= 1 && raw <= options.length) {
-        const zeroBased = raw - 1
-        return {
-          index: zeroBased,
-          label: `گزینه ${raw} (${PERSIAN_OPTION_LETTERS[zeroBased] || raw})`,
-          text: options[zeroBased] || '',
-          isValid: true,
-        }
+    }
+
+    // B. Direct string or compact equality
+    if (opt === strRaw || optNorm === normStr || optCompact === compactStr) {
+      return {
+        index: i,
+        label: `گزینه ${i + 1} (${PERSIAN_OPTION_LETTERS[i] || i + 1})`,
+        text: options[i],
+        cleanText: optClean,
+        isValid: true,
       }
     }
   }
 
-  // String correctAnswer
-  const strRaw = String(raw).trim()
-  const normStr = normalizePersianText(strRaw)
-  const compactStr = compactPersianText(strRaw)
+  // Pass 2: Substring containment (only if NO option matched exactly)
+  for (let i = 0; i < options.length; i++) {
+    const optClean = cleanOptionText(options[i])
+    if (cleanRaw.length >= 4 && (optClean.includes(cleanRaw) || cleanRaw.includes(optClean))) {
+      return {
+        index: i,
+        label: `گزینه ${i + 1} (${PERSIAN_OPTION_LETTERS[i] || i + 1})`,
+        text: options[i],
+        cleanText: optClean,
+        isValid: true,
+      }
+    }
+  }
 
-  // A. Check Persian option letters: الف, ب, ج, د
+  // 5. Persian letter matching: strictly anchored to avoid false positives (e.g. "خواند" ending with "د")
   const letterMap: Record<string, number> = {
-    'الف': 0, 'الف)': 0, 'ب': 1, 'ب)': 1, 'ج': 2, 'ج)': 2, 'د': 3, 'د)': 3,
+    'الف': 0, 'ب': 1, 'ج': 2, 'د': 3, 'هـ': 4, 'و': 5,
     'a': 0, 'b': 1, 'c': 2, 'd': 3,
   }
+
+  // Exact letter match: "الف", "ب", "ج", "د"
+  if (letterMap[normStr] !== undefined && letterMap[normStr] <= maxIdx) {
+    const idx = letterMap[normStr]
+    return {
+      index: idx,
+      label: `گزینه ${idx + 1} (${PERSIAN_OPTION_LETTERS[idx] || idx + 1})`,
+      text: options[idx] || '',
+      cleanText: cleanOptionText(options[idx] || ''),
+      isValid: true,
+    }
+  }
+
+  // Anchored prefix match: "الف)", "الف:", "(الف)"
   for (const [letter, idx] of Object.entries(letterMap)) {
-    if (normStr === letter || compactStr === letter || normStr.endsWith(letter)) {
+    if (
+      normStr === letter ||
+      compactStr === letter ||
+      normStr.startsWith(`${letter})`) ||
+      normStr.startsWith(`${letter}:`) ||
+      normStr.startsWith(`${letter}-`) ||
+      normStr === `(${letter})`
+    ) {
       if (idx <= maxIdx) {
         return {
           index: idx,
           label: `گزینه ${idx + 1} (${PERSIAN_OPTION_LETTERS[idx] || idx + 1})`,
           text: options[idx] || '',
+          cleanText: cleanOptionText(options[idx] || ''),
           isValid: true,
         }
       }
     }
   }
 
-  // B. Check if string matches "گزینه 1" or "گزینه ۱"
-  const optionMatch = normStr.match(/گزینه\s*([0-9]|الف|ب|ج|د)/)
+  // 6. Check explicit "گزینه ۱" or "گزینه 2" or "گزینه ج" pattern
+  const optionMatch = normStr.match(/^گزینه\s*([0-9۰-۹۱۲۳۴۵۶۷۸۹]|الف|ب|ج|د)/u)
   if (optionMatch && optionMatch[1]) {
     const val = optionMatch[1]
     if (letterMap[val] !== undefined && letterMap[val] <= maxIdx) {
@@ -447,105 +581,168 @@ export function resolveCorrectOptionIndex(q: ExamQuestion): ResolvedOption {
         index: idx,
         label: `گزینه ${idx + 1} (${PERSIAN_OPTION_LETTERS[idx] || idx + 1})`,
         text: options[idx] || '',
+        cleanText: cleanOptionText(options[idx] || ''),
         isValid: true,
       }
     }
-    const num = parseInt(val, 10)
+    const num = parseInt(convertDigitsToEnglish(val), 10)
     if (!isNaN(num)) {
-      // If 1-based (1..4)
       if (num >= 1 && num <= options.length) {
         const zeroBased = num - 1
         return {
           index: zeroBased,
           label: `گزینه ${num} (${PERSIAN_OPTION_LETTERS[zeroBased] || num})`,
           text: options[zeroBased] || '',
-          isValid: true,
-        }
-      }
-      if (num >= 0 && num <= maxIdx) {
-        return {
-          index: num,
-          label: `گزینه ${num + 1} (${PERSIAN_OPTION_LETTERS[num] || num + 1})`,
-          text: options[num] || '',
+          cleanText: cleanOptionText(options[zeroBased] || ''),
           isValid: true,
         }
       }
     }
   }
 
-  // C. Match directly against option text in options array!
-  if (options.length > 0) {
-    for (let i = 0; i < options.length; i++) {
-      const opt = options[i]
-      if (opt === strRaw || compactPersianText(opt) === compactStr || normalizePersianText(opt) === normStr) {
-        return {
-          index: i,
-          label: `گزینه ${i + 1} (${PERSIAN_OPTION_LETTERS[i] || i + 1})`,
-          text: options[i],
-          isValid: true,
-        }
-      }
-    }
-  }
-
-  // D. Plain string integer (e.g. "0", "1", "2", "3", "4")
-  const parsedInt = parseInt(convertDigitsToEnglish(strRaw), 10)
-  if (!isNaN(parsedInt)) {
-    if (parsedInt >= 0 && parsedInt <= maxIdx) {
+  // 7. Numeric correctAnswer
+  if (typeof raw === 'number' && !isNaN(raw) && isFinite(raw)) {
+    // 0 is unambiguous: index 0
+    if (raw === 0) {
       return {
-        index: parsedInt,
-        label: `گزینه ${parsedInt + 1} (${PERSIAN_OPTION_LETTERS[parsedInt] || parsedInt + 1})`,
-        text: options[parsedInt] || '',
+        index: 0,
+        label: `گزینه ۱ (${PERSIAN_OPTION_LETTERS[0]})`,
+        text: options[0] || '',
+        cleanText: cleanOptionText(options[0] || ''),
         isValid: true,
       }
     }
-    if (parsedInt >= 1 && parsedInt <= options.length) {
+    // If raw is equal to options.length, it is 1-based (e.g. 4 in a 4-option question)
+    if (raw === options.length) {
+      const zeroBased = raw - 1
+      return {
+        index: zeroBased,
+        label: `گزینه ${raw} (${PERSIAN_OPTION_LETTERS[zeroBased] || raw})`,
+        text: options[zeroBased] || '',
+        cleanText: cleanOptionText(options[zeroBased] || ''),
+        isValid: true,
+      }
+    }
+    // Standard 0-based index 0..maxIdx
+    if (raw >= 0 && raw <= maxIdx) {
+      return {
+        index: raw,
+        label: `گزینه ${raw + 1} (${PERSIAN_OPTION_LETTERS[raw] || raw + 1})`,
+        text: options[raw] || '',
+        cleanText: cleanOptionText(options[raw] || ''),
+        isValid: true,
+      }
+    }
+  }
+
+  // 8. Plain numeric string (e.g. "0", "1", "2", "3")
+  const parsedInt = parseInt(convertDigitsToEnglish(strRaw), 10)
+  if (!isNaN(parsedInt) && String(parsedInt) === convertDigitsToEnglish(strRaw)) {
+    if (parsedInt === 0) {
+      return {
+        index: 0,
+        label: `گزینه ۱ (${PERSIAN_OPTION_LETTERS[0]})`,
+        text: options[0] || '',
+        cleanText: cleanOptionText(options[0] || ''),
+        isValid: true,
+      }
+    }
+    if (parsedInt === options.length) {
       const zeroBased = parsedInt - 1
       return {
         index: zeroBased,
         label: `گزینه ${parsedInt} (${PERSIAN_OPTION_LETTERS[zeroBased] || parsedInt})`,
         text: options[zeroBased] || '',
+        cleanText: cleanOptionText(options[zeroBased] || ''),
+        isValid: true,
+      }
+    }
+    if (parsedInt >= 0 && parsedInt <= maxIdx) {
+      return {
+        index: parsedInt,
+        label: `گزینه ${parsedInt + 1} (${PERSIAN_OPTION_LETTERS[parsedInt] || parsedInt + 1})`,
+        text: options[parsedInt] || '',
+        cleanText: cleanOptionText(options[parsedInt] || ''),
         isValid: true,
       }
     }
   }
 
-  // Fallback: Safe first option, never NaN
+  // 9. Inspect rubricOrHint if available to rescue misformatted answer keys
+  if (q.rubricOrHint) {
+    const rubricNorm = normalizePersianText(q.rubricOrHint)
+    for (let i = 0; i < options.length; i++) {
+      const optClean = cleanOptionText(options[i])
+      if (optClean.length >= 4 && rubricNorm.includes(optClean)) {
+        return {
+          index: i,
+          label: `گزینه ${i + 1} (${PERSIAN_OPTION_LETTERS[i] || i + 1})`,
+          text: options[i],
+          cleanText: optClean,
+          isValid: true,
+        }
+      }
+    }
+  }
+
+  // Fallback: Return unresolved state (NEVER silently pretend option 0 is correct!)
   return {
-    index: 0,
-    label: options.length > 0 ? `گزینه ۱ (${PERSIAN_OPTION_LETTERS[0]})` : 'تعیین‌نشده',
-    text: options[0] || strRaw,
+    index: -1,
+    label: 'تعیین‌نشده',
+    text: '',
+    cleanText: '',
     isValid: false,
   }
 }
 
 /**
  * Resolves the student's selected option from their answer record
+ * Position-independent: Matches selectedOptionText against options first!
  */
 export function resolveStudentSelectedOption(answer: any, options?: string[]): ResolvedOption {
   if (!answer) {
-    return { index: -1, label: 'بدون پاسخ', text: '', isValid: false }
-  }
-
-  const raw =
-    typeof answer === 'object' && answer !== null
-      ? answer.selectedOption ?? answer.optionIndex ?? answer.selectedAnswer
-      : answer
-
-  if (raw === undefined || raw === null || raw === '') {
-    return { index: -1, label: 'بدون پاسخ', text: '', isValid: false }
+    return { index: -1, label: 'بدون پاسخ', text: '', cleanText: '', isValid: false }
   }
 
   const optionsArr = Array.isArray(options) ? options : []
   const maxIdx = Math.max(0, optionsArr.length - 1)
 
-  // Direct number
+  // 1. Text-based match: If student answer has selectedOptionText or text
+  const ansText = typeof answer === 'object' && answer !== null ? answer.selectedOptionText || answer.text : null
+  if (ansText && optionsArr.length > 0) {
+    const targetClean = cleanOptionText(ansText)
+    for (let i = 0; i < optionsArr.length; i++) {
+      const optClean = cleanOptionText(optionsArr[i])
+      if (optClean === targetClean || optionsArr[i] === ansText || compactPersianText(optionsArr[i]) === compactPersianText(ansText)) {
+        return {
+          index: i,
+          label: `گزینه ${i + 1} (${PERSIAN_OPTION_LETTERS[i] || i + 1})`,
+          text: optionsArr[i],
+          cleanText: optClean,
+          isValid: true,
+        }
+      }
+    }
+  }
+
+  // 2. Numeric / index extraction
+  const raw =
+    typeof answer === 'object' && answer !== null
+      ? answer.selectedOption ?? answer.selectedOptionIndex ?? answer.optionIndex ?? answer.selectedAnswer
+      : answer
+
+  if (raw === undefined || raw === null || raw === '') {
+    return { index: -1, label: 'بدون پاسخ', text: '', cleanText: '', isValid: false }
+  }
+
+  // Direct number index (0-based)
   if (typeof raw === 'number' && !isNaN(raw) && isFinite(raw)) {
     if (raw >= 0 && raw <= maxIdx) {
       return {
         index: raw,
         label: `گزینه ${raw + 1} (${PERSIAN_OPTION_LETTERS[raw] || raw + 1})`,
         text: optionsArr[raw] || '',
+        cleanText: cleanOptionText(optionsArr[raw] || ''),
         isValid: true,
       }
     }
@@ -553,31 +750,34 @@ export function resolveStudentSelectedOption(answer: any, options?: string[]): R
 
   const strRaw = String(raw).trim()
   const num = parseInt(convertDigitsToEnglish(strRaw), 10)
-  if (!isNaN(num) && num >= 0 && num <= maxIdx) {
+  if (!isNaN(num) && num >= 0 && num <= maxIdx && String(num) === convertDigitsToEnglish(strRaw)) {
     return {
       index: num,
       label: `گزینه ${num + 1} (${PERSIAN_OPTION_LETTERS[num] || num + 1})`,
       text: optionsArr[num] || '',
+      cleanText: cleanOptionText(optionsArr[num] || ''),
       isValid: true,
     }
   }
 
-  // Option text match
+  // 3. Option text match on strRaw
   if (optionsArr.length > 0) {
-    const compact = compactPersianText(strRaw)
+    const cleanRaw = cleanOptionText(strRaw)
     for (let i = 0; i < optionsArr.length; i++) {
-      if (compactPersianText(optionsArr[i]) === compact) {
+      const optClean = cleanOptionText(optionsArr[i])
+      if (optClean === cleanRaw || compactPersianText(optionsArr[i]) === compactPersianText(strRaw)) {
         return {
           index: i,
           label: `گزینه ${i + 1} (${PERSIAN_OPTION_LETTERS[i] || i + 1})`,
           text: optionsArr[i],
+          cleanText: optClean,
           isValid: true,
         }
       }
     }
   }
 
-  return { index: -1, label: 'بدون پاسخ', text: '', isValid: false }
+  return { index: -1, label: 'بدون پاسخ', text: '', cleanText: '', isValid: false }
 }
 
 // ----------------------------------------------------------------------
@@ -599,7 +799,7 @@ export interface QuestionGradingOutput {
 }
 
 // ----------------------------------------------------------------------
-// 7. MULTIPLE CHOICE EVALUATION
+// 7. MULTIPLE CHOICE EVALUATION (DETERMINISTIC & POSITION INDEPENDENT)
 // ----------------------------------------------------------------------
 
 export function evaluateMultipleChoice(q: ExamQuestion, studentAns: any): QuestionGradingOutput {
@@ -607,8 +807,11 @@ export function evaluateMultipleChoice(q: ExamQuestion, studentAns: any): Questi
   const resolvedCorrect = resolveCorrectOptionIndex(q)
   const resolvedStudent = resolveStudentSelectedOption(studentAns, q.options)
 
-  const correctKeyDisplay = `${resolvedCorrect.label}${resolvedCorrect.text ? `: ${resolvedCorrect.text}` : ''}`
+  const correctKeyDisplay = resolvedCorrect.isValid
+    ? `${resolvedCorrect.label}${resolvedCorrect.text ? `: ${resolvedCorrect.text}` : ''}`
+    : 'در انتظار تایید کلید توسط آموزگار'
 
+  // If student did not answer
   if (!resolvedStudent.isValid || resolvedStudent.index === -1) {
     return {
       questionId: q.id,
@@ -622,7 +825,28 @@ export function evaluateMultipleChoice(q: ExamQuestion, studentAns: any): Questi
   }
 
   const studentAnswerDisplay = `${resolvedStudent.label}${resolvedStudent.text ? `: ${resolvedStudent.text}` : ''}`
-  const isCorrect = resolvedStudent.index === resolvedCorrect.index
+
+  // If answer key is not valid on question, do NOT grade against option 0!
+  if (!resolvedCorrect.isValid || resolvedCorrect.index === -1) {
+    return {
+      questionId: q.id,
+      score: 0,
+      maxScore,
+      status: 'needs_teacher_review',
+      feedback: `⚠️ کلید صحیح این سوال هنوز توسط آموزگار تعیین نشده است. پاسخ شما (${studentAnswerDisplay}) ثبت شد و نمره پس از بررسی آموزگار اعمال خواهد شد.`,
+      correctKeyDisplay: 'در انتظار تعیین کلید توسط آموزگار',
+      studentAnswerDisplay,
+    }
+  }
+
+  // Match by BOTH index AND clean option text for position-independence
+  const cleanStudent = resolvedStudent.cleanText || cleanOptionText(resolvedStudent.text)
+  const cleanCorrect = resolvedCorrect.cleanText || cleanOptionText(resolvedCorrect.text)
+
+  const isIndexMatch = resolvedStudent.index === resolvedCorrect.index
+  const isTextMatch = cleanStudent.length > 0 && cleanCorrect.length > 0 && cleanStudent === cleanCorrect
+
+  const isCorrect = isIndexMatch || isTextMatch
 
   return {
     questionId: q.id,
@@ -631,7 +855,7 @@ export function evaluateMultipleChoice(q: ExamQuestion, studentAns: any): Questi
     status: isCorrect ? 'correct' : 'incorrect',
     feedback: isCorrect
       ? `✅ پاسخ کاملاً درست است (+${maxScore} نمره)`
-      : `❌ پاسخ نادرست است. گزینه انتخابی: ${resolvedStudent.label} - کلید صحیح: ${correctKeyDisplay}`,
+      : `❌ پاسخ نادرست است. گزینه انتخابی: ${studentAnswerDisplay} - کلید صحیح: ${correctKeyDisplay}`,
     correctKeyDisplay,
     studentAnswerDisplay,
   }
