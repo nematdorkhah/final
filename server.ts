@@ -2124,8 +2124,27 @@ ${JSON.stringify(questions, null, 2)}
     app.use(vite.middlewares)
   } else {
     const distPath = path.join(process.cwd(), 'dist')
-    app.use(express.static(distPath))
+    // Serve immutable hashed assets with 1-year cache
+    app.use(
+      '/assets',
+      express.static(path.join(distPath, 'assets'), {
+        maxAge: '1y',
+        immutable: true,
+      })
+    )
+    // Serve other static files with safe fallback
+    app.use(
+      express.static(distPath, {
+        maxAge: '1h',
+        setHeaders: (res, filePath) => {
+          if (filePath.endsWith('.html')) {
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate')
+          }
+        },
+      })
+    )
     app.get('*', (req, res) => {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate')
       res.sendFile(path.join(distPath, 'index.html'))
     })
   }

@@ -1,13 +1,16 @@
-import { useEffect, useState, useMemo, useRef } from 'react'
+import { useEffect, useState, useMemo, useRef, Suspense } from 'react'
 import { supabase } from './supabaseClient'
-import TeacherDashboard from './pages/TeacherDashboard'
-import StudentDashboard from './pages/StudentDashboard'
-import PrincipalDashboard from './pages/PrincipalDashboard'
 import SchoolLogo from './components/SchoolLogo'
 import LoadingScreen from './components/LoadingScreen'
+import ErrorBoundary from './components/ErrorBoundary'
+import { lazyWithRetry } from './utils/lazyWithRetry'
 import { toPersianDigits } from './utils/persianNumbers'
 import { sortByLastName } from './utils/persianSort'
 import { CLASS_STUDENTS_ROSTER } from './classStudents'
+
+const TeacherDashboard = lazyWithRetry(() => import('./pages/TeacherDashboard'))
+const StudentDashboard = lazyWithRetry(() => import('./pages/StudentDashboard'))
+const PrincipalDashboard = lazyWithRetry(() => import('./pages/PrincipalDashboard'))
 
 const initialIsTeacher = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).has('teacher') : false
 
@@ -117,7 +120,7 @@ export default function App() {
   const [student, setStudent] = useState<any>(() => {
     return initialSession?.role === 'student' ? initialSession.student : null
   })
-  const [isLoading, setIsLoading] = useState(!student && !teacherAuthed && !principalAuthed)
+  const [isLoading, setIsLoading] = useState(false)
   const [students, setStudents] = useState<any[]>(() =>
     sortByLastName(
       CLASS_STUDENTS_ROSTER.map((cs) => ({
@@ -154,12 +157,10 @@ export default function App() {
         if (stored.role === 'principal') {
           setPrincipalAuthed(true)
           setRoleMode('teacher')
-          setIsLoading(false)
         } else if (stored.role === 'teacher' && stored.teacherPassword) {
           setTeacherPassword(stored.teacherPassword)
           setTeacherAuthed(true)
           setRoleMode('teacher')
-          setIsLoading(false)
           try {
             sessionStorage.setItem('teacherAuthed', '1')
             sessionStorage.setItem('teacherPassword', stored.teacherPassword)
@@ -168,16 +169,10 @@ export default function App() {
         } else if (stored.role === 'student' && stored.student) {
           setStudent(stored.student)
           setRoleMode('student')
-          setIsLoading(false)
-        } else {
-          setIsLoading(false)
         }
-      } else {
-        setIsLoading(false)
       }
     } catch (err) {
       console.warn('Error reading stored session on root mount:', err)
-      setIsLoading(false)
     }
   }, [])
 
@@ -192,53 +187,25 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    // 3-second safety guard timeout: under any circumstance, remove loading screen and show login
-    const safetyTimeout = setTimeout(() => {
-      setIsLoading(false)
-    }, 3000)
-
+    let isMounted = true
     async function loadRoster() {
       try {
         if (roleMode === 'teacher' || student) {
-          setIsLoading(false)
           return
         }
         const { data, error } = await supabase.rpc('list_students_public')
-        if (!error && Array.isArray(data) && data.length > 0) {
+        if (!error && Array.isArray(data) && data.length > 0 && isMounted) {
           setStudents(sortByLastName(data))
-        } else {
-          setStudents(
-            sortByLastName(
-              CLASS_STUDENTS_ROSTER.map((cs) => ({
-                id: cs.nationalCode,
-                full_name: cs.fullName,
-                father_name: cs.fatherName,
-                access_code: cs.nationalCode,
-              }))
-            )
-          )
         }
       } catch (err) {
-        console.warn('Failed to fetch public students roster:', err)
-        setStudents(
-          sortByLastName(
-            CLASS_STUDENTS_ROSTER.map((cs) => ({
-              id: cs.nationalCode,
-              full_name: cs.fullName,
-              father_name: cs.fatherName,
-              access_code: cs.nationalCode,
-            }))
-          )
-        )
-      } finally {
-        setIsLoading(false)
-        clearTimeout(safetyTimeout)
+        console.warn('Background roster sync failed (using local roster):', err)
       }
     }
 
     loadRoster()
-
-    return () => clearTimeout(safetyTimeout)
+    return () => {
+      isMounted = false
+    }
   }, [student, roleMode])
 
   const sortedAllStudents = useMemo(() => {
@@ -447,7 +414,7 @@ export default function App() {
     }
   }
 
-  // Loading state with safety guard timeout
+  // Loading state
   if (isLoading) {
     return (
       <LoadingScreen
@@ -461,10 +428,14 @@ export default function App() {
   // Principal dashboard
   if (principalAuthed) {
     return (
-      <PrincipalDashboard
-        principalPassword="khalili100"
-        onLogout={logoutPrincipal}
-      />
+      <ErrorBoundary fallbackTitle="خطا در باز کردن بخش مدیریت">
+        <Suspense fallback={<LoadingScreen message="در حال بارگذاری بخش مدیریت مدرسه..." onLogout={logoutPrincipal} />}>
+          <PrincipalDashboard
+            principalPassword="khalili100"
+            onLogout={logoutPrincipal}
+          />
+        </Suspense>
+      </ErrorBoundary>
     )
   }
 
@@ -472,31 +443,43 @@ export default function App() {
   if (roleMode === 'teacher' && teacherAuthed) {
     if (teacherPreviewStudent) {
       return (
-        <StudentDashboard
-          student={teacherPreviewStudent}
-          onLogout={() => setTeacherPreviewStudent(null)}
-          isTeacherPreview={true}
-          onExitPreview={() => setTeacherPreviewStudent(null)}
-        />
+        <ErrorBoundary fallbackTitle="خطا در نمایش پیش‌نمایش دانش‌آموز">
+          <Suspense fallback={<LoadingScreen message="در حال باز کردن میز کار دانش‌آموز..." onLogout={() => setTeacherPreviewStudent(null)} />}>
+            <StudentDashboard
+              student={teacherPreviewStudent}
+              onLogout={() => setTeacherPreviewStudent(null)}
+              isTeacherPreview={true}
+              onExitPreview={() => setTeacherPreviewStudent(null)}
+            />
+          </Suspense>
+        </ErrorBoundary>
       )
     }
     return (
-      <TeacherDashboard
-        teacherPassword={teacherPassword}
-        onLogout={logoutTeacher}
-        onPreviewAsStudent={(s) => setTeacherPreviewStudent(s)}
-      />
+      <ErrorBoundary fallbackTitle="خطا در باز کردن میز کار آموزگار">
+        <Suspense fallback={<LoadingScreen message="در حال باز کردن میز کار آموزگار..." onLogout={logoutTeacher} />}>
+          <TeacherDashboard
+            teacherPassword={teacherPassword}
+            onLogout={logoutTeacher}
+            onPreviewAsStudent={(s) => setTeacherPreviewStudent(s)}
+          />
+        </Suspense>
+      </ErrorBoundary>
     )
   }
 
   // Student dashboard
   if (student) {
     return (
-      <StudentDashboard
-        student={student}
-        onLogout={logoutStudent}
-        onStudentUpdate={persistStudent}
-      />
+      <ErrorBoundary fallbackTitle="خطا در باز کردن میز کار دانش‌آموز">
+        <Suspense fallback={<LoadingScreen message="در حال ورود به میز کار دانش‌آموز..." onLogout={logoutStudent} />}>
+          <StudentDashboard
+            student={student}
+            onLogout={logoutStudent}
+            onStudentUpdate={persistStudent}
+          />
+        </Suspense>
+      </ErrorBoundary>
     )
   }
 
