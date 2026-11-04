@@ -615,7 +615,7 @@ runTest('30. Grade Privacy: Unapproved & unreleased submission is NOT released',
   assert.strictEqual(isExamResultsReleased(exam, sub), false, 'Must be false when unapproved & unreleased')
 })
 
-runTest('31. Real-Data Benchmark: Mohi-eddin Danaifar submission scores 8.5/9.5 with Q7=1.5 and Q9=1.0', () => {
+runTest('31. Real-Data Benchmark: Mohi-eddin Danaifar submission scores 9.5/9.5 with Q6=1.0, Q7=1.5, Q8=1.0, Q9=1.0', () => {
   const exams = JSON.parse(fs.readFileSync('./data/exams_backup.json', 'utf8'))
   const subs = JSON.parse(fs.readFileSync('./data/submissions_backup.json', 'utf8'))
   const exam = exams.find((e: any) => e.id === 'a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2')
@@ -624,14 +624,135 @@ runTest('31. Real-Data Benchmark: Mohi-eddin Danaifar submission scores 8.5/9.5 
   assert.ok(mohiSub, 'Mohi submission must exist in backup')
 
   const res = evaluateEntireExamSubmission(exam, mohiSub.answers)
+  assert.strictEqual(res.questionGrading['q12']?.score, 1.0, 'Q6 ("ه" completing "نهراسیم") must receive 1.0/1.0 full credit')
+  assert.strictEqual(res.questionGrading['q12']?.status, 'correct')
   assert.strictEqual(res.questionGrading['q14']?.score, 1.5, 'Q7 (3 spelling errors) must receive 1.5/1.5')
-  assert.strictEqual(res.questionGrading['q19']?.score, 1.0, 'Q9 (4 word completions) must receive 1.0/1.0')
   assert.strictEqual(res.questionGrading['q18']?.score, 1.0, 'Q8 (intentional poem errors) must receive 1.0/1.0')
-  assert.strictEqual(res.questionGrading['q12']?.score, 0, 'Q6 ("ه" instead of "نهراسیم") must receive 0/1')
-  assert.strictEqual(res.earnedPoints, 8.5, 'Earned points must be exactly 8.5 out of 9.5')
+  assert.strictEqual(res.questionGrading['q19']?.score, 1.0, 'Q9 (4 word completions) must receive 1.0/1.0')
+  assert.strictEqual(res.earnedPoints, 9.5, 'Earned points must be exactly 9.5 out of 9.5')
 
   const sumScores = Object.values(res.questionGrading).reduce((acc: number, item: any) => acc + (item.score || 0), 0)
   assert.strictEqual(res.earnedPoints, Math.round(sumScores * 100) / 100, 'Earned points must mathematically equal sum of questions')
+})
+
+runTest('32. Real-Data Benchmark: Amir Akbari Q6 ("ه") and Q3 bonus earn 1.0 each, total score reaches 9.0/9.5', () => {
+  const exams = JSON.parse(fs.readFileSync('./data/exams_backup.json', 'utf8'))
+  const subs = JSON.parse(fs.readFileSync('./data/submissions_backup.json', 'utf8'))
+  const exam = exams.find((e: any) => e.id === 'a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2')
+  const amirSub = subs.find((s: any) => s.id === 'sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_406aa45a-4aab-4965-bbac-7b2adde82cc4_1793650343553')
+  assert.ok(exam, 'Exam must exist')
+  assert.ok(amirSub, 'Amir Akbari submission must exist')
+
+  const res = evaluateEntireExamSubmission(exam, amirSub.answers)
+  assert.strictEqual(res.questionGrading['q12']?.score, 1.0, 'Amir Akbari Q6 ("ه") must receive 1.0/1.0')
+  assert.strictEqual(res.questionGrading['q12']?.status, 'correct')
+  assert.strictEqual(res.questionGrading['q4']?.score, 1.0, 'Amir Akbari Q3 (q4) bonus must receive 1.0/1.0')
+  assert.strictEqual(res.questionGrading['q4']?.status, 'correct')
+  assert.strictEqual(res.earnedPoints, 9.0, 'Amir Akbari total score must be exactly 9.0 out of 9.5')
+
+  const sumScores = Object.values(res.questionGrading).reduce((acc: number, item: any) => acc + (item.score || 0), 0)
+  assert.strictEqual(res.earnedPoints, Math.round(sumScores * 100) / 100, 'Exact sum equality')
+})
+
+runTest('33. Intra-word blank Question 6: Positive acceptance of letter forms and full words', () => {
+  const q: ExamQuestion = {
+    id: 'q12',
+    type: 'fill_in_the_blank',
+    question: 'ما باید بسیار بخوانیم و درباره‌ی دیده‌ها، شنیده‌ها و خوانده‌ها بپرسیم و از پرسیدن نـ............ـراسیم. (هـ / ح)',
+    points: 1,
+    correctAnswer: 'نهراسیم',
+    rubricOrHint: 'پاسخ صحیح: نهراسیم (با حرف هـ)',
+  }
+
+  const positiveAnswers = ['ه', 'هـ', 'ه‍', 'ـهـ', 'نهراسیم', 'نهراسيم', '  ه  ', 'نهراسیم‌']
+  for (const ans of positiveAnswers) {
+    const res = evaluateFillInTheBlank(q, { textAnswer: ans })
+    assert.strictEqual(res.score, 1.0, `Answer "${ans}" must receive 1.0 full score`)
+    assert.strictEqual(res.status, 'correct', `Answer "${ans}" must have status correct`)
+  }
+})
+
+runTest('34. Intra-word blank Question 6: Strict rejection of wrong letter choices and unrelated words', () => {
+  const q: ExamQuestion = {
+    id: 'q12',
+    type: 'fill_in_the_blank',
+    question: 'ما باید بسیار بخوانیم و درباره‌ی دیده‌ها، شنیده‌ها و خوانده‌ها بپرسیم و از پرسیدن نـ............ـراسیم. (هـ / ح)',
+    points: 1,
+    correctAnswer: 'نهراسیم',
+    rubricOrHint: 'پاسخ صحیح: نهراسیم (با حرف هـ)',
+  }
+
+  const negativeAnswers = ['ح', 'ـحـ', 'نحراسیم', 'بلبل', 'ص', 'ت']
+  for (const ans of negativeAnswers) {
+    const res = evaluateFillInTheBlank(q, { textAnswer: ans })
+    assert.strictEqual(res.score, 0, `Answer "${ans}" must receive 0 score`)
+    assert.strictEqual(res.status, 'incorrect', `Answer "${ans}" must have status incorrect`)
+  }
+})
+
+runTest('35. Standard whole-word fill-in-the-blank does NOT accept single letters', () => {
+  const q: ExamQuestion = {
+    id: 'q_std',
+    type: 'fill_in_the_blank',
+    question: 'سعدی در گلستان می‌گوید: تن آدمی شریف است به جان آدمیت نه همین لباس زیباست نشان .........',
+    points: 1,
+    correctAnswer: 'آدمیت',
+  }
+
+  const resLetter = evaluateFillInTheBlank(q, { textAnswer: 'ه' })
+  assert.strictEqual(resLetter.score, 0, 'Single letter on regular fill-in-the-blank must receive 0')
+  assert.strictEqual(resLetter.status, 'incorrect')
+
+  const resWord = evaluateFillInTheBlank(q, { textAnswer: 'آدمیت' })
+  assert.strictEqual(resWord.score, 1.0, 'Full word must receive full score')
+  assert.strictEqual(resWord.status, 'correct')
+})
+
+runTest('36. Mathematical Unity check: 100% of all 38 submissions in backup have discrepancy = 0.00', () => {
+  const exams = JSON.parse(fs.readFileSync('./data/exams_backup.json', 'utf8'))
+  const subs = JSON.parse(fs.readFileSync('./data/submissions_backup.json', 'utf8'))
+
+  for (const sub of subs) {
+    const exam = exams.find((e: any) => e.id === sub.examId)
+    if (!exam) continue
+    const eff = getSubmissionEffectiveScore(exam, sub)
+    const sum = Object.values(eff.questionScores).reduce((acc: number, val: any) => acc + (Number(val) || 0), 0)
+    const roundedSum = Math.round(sum * 100) / 100
+    const diff = Math.abs(eff.totalScore - roundedSum)
+    assert.ok(diff < 0.001, `Submission ${sub.id} must have 0.00 discrepancy, got ${diff}`)
+  }
+})
+
+runTest('37. Question 3 (q4) universal credit: Any option (0, 1, 2, 3) receives 1.0 full point', () => {
+  const exams = JSON.parse(fs.readFileSync('./data/exams_backup.json', 'utf8'))
+  const exam = exams.find((e: any) => e.id === 'a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2')
+  const q4 = exam.questions.find((q: any) => q.id === 'q4')
+  assert.ok(q4, 'Question 3 (q4) must exist')
+  assert.strictEqual(q4.awardFullScoreToAll, true, 'awardFullScoreToAll must be true')
+
+  // Test every option selection receives 1.0 point
+  for (let opt = 0; opt <= 3; opt++) {
+    const res = evaluateMultipleChoice(q4, { selectedOption: opt })
+    assert.strictEqual(res.score, 1.0, `Option ${opt} must receive 1.0 point`)
+    assert.strictEqual(res.status, 'correct')
+    assert.ok(res.feedback.includes('تصمیم آموزگار'), 'Feedback mentions teacher decision')
+  }
+})
+
+runTest('38. Universal Q3 check: All 36 students in spelling exam receive 1.0 on Question 3', () => {
+  const exams = JSON.parse(fs.readFileSync('./data/exams_backup.json', 'utf8'))
+  const subs = JSON.parse(fs.readFileSync('./data/submissions_backup.json', 'utf8'))
+  const exam = exams.find((e: any) => e.id === 'a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2')
+  const spellingSubs = subs.filter((s: any) => s.examId === 'a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2')
+
+  assert.strictEqual(spellingSubs.length, 36, 'Must evaluate all 36 students')
+  for (const sub of spellingSubs) {
+    const res = evaluateEntireExamSubmission(exam, sub.answers)
+    assert.strictEqual(res.questionScores['q4'], 1.0, `${sub.studentName} must receive 1.0 on Q3`)
+    const sum = Object.values(res.questionScores).reduce((a: number, b: any) => a + (Number(b) || 0), 0)
+    const diff = Math.abs(res.earnedPoints - Math.round(sum * 100) / 100)
+    assert.ok(diff < 0.001, `Discrepancy for ${sub.studentName} must be 0.00`)
+  }
 })
 
 console.log('=====================================================')
@@ -641,8 +762,9 @@ console.log('=====================================================')
 if (failedTests > 0) {
   process.exit(1)
 } else {
-  console.log('🎉 ALL 31 VERIFICATION SCENARIOS PASSED WITH 100% ACCURACY!')
+  console.log('🎉 ALL 38 VERIFICATION SCENARIOS PASSED WITH 100% ACCURACY!')
   process.exit(0)
 }
+
 
 

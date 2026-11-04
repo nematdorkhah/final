@@ -1874,6 +1874,12 @@ export default function TeacherExamBuilder({
                           <MathRenderer text={q.question} />
                         </div>
 
+                        {(q.awardFullScoreToAll || q.allOptionsCorrect) && (
+                          <div style={{ fontSize: 12, color: '#047857', background: '#D1FAE5', border: '1px solid #6EE7B7', padding: '6px 12px', borderRadius: 8, margin: '6px 0 10px 0', fontWeight: 800 }}>
+                            🎁 نمره کامل این سوال با تصمیم آموزگار به تمامی دانش‌آموزان تعلق می‌گیرد (نمره آزاد / اصلاح کلید).
+                          </div>
+                        )}
+
                         {/* Options preview for multiple choice */}
                         {q.type === 'multiple_choice' && q.options && (
                           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 6, margin: '8px 0' }}>
@@ -2965,6 +2971,29 @@ export default function TeacherExamBuilder({
                   onChange={(e) => setEditingQ({ ...editingQ, points: parseFloat(e.target.value) || 2 })}
                   style={{ width: '100%', padding: 8, borderRadius: 8, border: '2px solid var(--black)', fontSize: 13 }}
                 />
+              </div>
+            </div>
+
+            {/* Award full score to all students toggle */}
+            <div style={{ marginBottom: 14, background: '#F0FDF4', padding: '10px 12px', borderRadius: 8, border: '1.5px solid #86EFAC' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer', color: '#14532D' }}>
+                <input
+                  type="checkbox"
+                  checked={Boolean(editingQ.awardFullScoreToAll || editingQ.allOptionsCorrect)}
+                  onChange={(e) => {
+                    const checked = e.target.checked
+                    setEditingQ({
+                      ...editingQ,
+                      awardFullScoreToAll: checked,
+                      allOptionsCorrect: checked,
+                    })
+                  }}
+                  style={{ width: 18, height: 18, cursor: 'pointer' }}
+                />
+                🎁 اعطای نمره کامل این سوال به تمامی دانش‌آموزان (نمره آزاد / سوال دارای ابهام یا تصمیم آموزگار)
+              </label>
+              <div style={{ fontSize: 11, color: '#166534', marginTop: 4, marginRight: 26 }}>
+                در صورت انتخاب، تمام دانش‌آموزان در پاسخ به این سوال نمره کامل بارم را دریافت خواهند کرد.
               </div>
             </div>
 

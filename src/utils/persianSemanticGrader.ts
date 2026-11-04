@@ -941,6 +941,23 @@ export function evaluateMultipleChoice(q: ExamQuestion, studentAns: any): Questi
     ? `${resolvedCorrect.label}${resolvedCorrect.text ? `: ${resolvedCorrect.text}` : ''}`
     : 'در انتظار تایید کلید توسط آموزگار'
 
+  // 0. Universal full credit if teacher awarded full score to all students
+  if (q.awardFullScoreToAll || q.allOptionsCorrect || q.allAnswersCorrect || q.isBonusToAll) {
+    const studentAnswerDisplay = resolvedStudent.isValid
+      ? `${resolvedStudent.label}${resolvedStudent.text ? `: ${resolvedStudent.text}` : ''}`
+      : 'پاسخ ثبت شد'
+    return {
+      questionId: q.id,
+      score: maxScore,
+      maxScore,
+      status: 'correct',
+      feedback: `✅ با تصمیم آموزگار، نمره کامل این سوال به تمامی دانش‌آموزان اختصاص داده شد (+${maxScore} نمره)`,
+      correctKeyDisplay: 'نمره کامل برای تمامی گزینه‌ها (تصمیم آموزگار)',
+      studentAnswerDisplay,
+      conceptMatched: true,
+    }
+  }
+
   // If student did not answer
   if (!resolvedStudent.isValid || resolvedStudent.index === -1) {
     return {
@@ -955,6 +972,30 @@ export function evaluateMultipleChoice(q: ExamQuestion, studentAns: any): Questi
   }
 
   const studentAnswerDisplay = `${resolvedStudent.label}${resolvedStudent.text ? `: ${resolvedStudent.text}` : ''}`
+
+  // Check acceptableAnswers if multiple options are accepted
+  if (Array.isArray(q.acceptableAnswers) && q.acceptableAnswers.length > 0) {
+    const cleanStudent = resolvedStudent.cleanText || cleanOptionText(resolvedStudent.text)
+    const isAccepted = q.acceptableAnswers.some((acc: any) => {
+      if (typeof acc === 'number' && resolvedStudent.index === acc) return true
+      const strAcc = String(acc).trim()
+      if (strAcc === String(resolvedStudent.index) || strAcc === String(resolvedStudent.index + 1)) return true
+      const cleanAcc = cleanOptionText(strAcc)
+      return cleanAcc && (cleanAcc === cleanStudent || cleanStudent.includes(cleanAcc))
+    })
+    if (isAccepted) {
+      return {
+        questionId: q.id,
+        score: maxScore,
+        maxScore,
+        status: 'correct',
+        feedback: `✅ گزینه انتخابی جزء گزینه‌های مورد قبول آموزگار است (+${maxScore} نمره)`,
+        correctKeyDisplay: `${correctKeyDisplay} (و گزینه‌های مجاز دیگر)`,
+        studentAnswerDisplay,
+        conceptMatched: true,
+      }
+    }
+  }
 
   // If answer key is not valid on question, do NOT grade against option 0!
   if (!resolvedCorrect.isValid || resolvedCorrect.index === -1) {
@@ -996,6 +1037,148 @@ export function evaluateMultipleChoice(q: ExamQuestion, studentAns: any): Questi
 // ----------------------------------------------------------------------
 
 /**
+ * Handles questions where a blank is inside or at the edge of a word and requires a specific letter choice
+ * e.g. «... نـ............ـراسیم. (هـ / ح)» where the student may answer just the letter "ه" / "هـ" OR the full word "نهراسیم".
+ */
+export function checkIntraWordLetterCompletion(
+  q: ExamQuestion,
+  studentText: string,
+  rawCorrect: string,
+  maxScore: number,
+  correctKeyDisplay: string
+): QuestionGradingOutput | null {
+  const qText = String(q.question || '').trim()
+  const rubric = String(q.rubricOrHint || '').trim()
+
+  // 1. Look for letter choices in parentheses: e.g. (هـ / ح) or (ت / ط) or (س / ص) or (ز / ض)
+  const parenMatch = qText.match(/\(\s*([^\s\/\(\)]{1,3})\s*(?:\/|یا)\s*([^\s\/\(\)]{1,3})\s*\)/)
+  if (!parenMatch) return null
+
+  const opt1 = parenMatch[1].trim()
+  const opt2 = parenMatch[2].trim()
+
+  // Normalize single letters by stripping tatweel, ZWNJ, ZWJ, diacritics, and spaces
+  const cleanChar = (s: string) =>
+    s
+      .replace(/[\u0640\u200c\u200d\u064b-\u065f\s\.\-]/g, '')
+      .replace(/[ي]/g, 'ی')
+      .replace(/[ك]/g, 'ک')
+      .replace(/[ة]/g, 'ه')
+      .trim()
+
+  const c1 = cleanChar(opt1)
+  const c2 = cleanChar(opt2)
+
+  // Must be letter choices (length 1 after cleaning)
+  if (c1.length !== 1 || c2.length !== 1) return null
+
+  // Determine which choice is correct and which is wrong
+  const normCorrect = cleanChar(rawCorrect)
+  const normRubric = cleanChar(rubric)
+
+  let correctLetter = ''
+  let wrongLetter = ''
+  let correctLabel = ''
+  let wrongLabel = ''
+
+  if (normCorrect.includes(c1) && !normCorrect.includes(c2)) {
+    correctLetter = c1
+    wrongLetter = c2
+    correctLabel = opt1
+    wrongLabel = opt2
+  } else if (normCorrect.includes(c2) && !normCorrect.includes(c1)) {
+    correctLetter = c2
+    wrongLetter = c1
+    correctLabel = opt2
+    wrongLabel = opt1
+  } else if (normRubric.includes(c1) && !normRubric.includes(c2)) {
+    correctLetter = c1
+    wrongLetter = c2
+    correctLabel = opt1
+    wrongLabel = opt2
+  } else if (normRubric.includes(c2) && !normRubric.includes(c1)) {
+    correctLetter = c2
+    wrongLetter = c1
+    correctLabel = opt2
+    wrongLabel = opt1
+  }
+
+  if (!correctLetter) return null
+
+  const studentClean = cleanChar(studentText)
+  const studentCompact = compactPersianText(studentText)
+  const expectedCompact = compactPersianText(rawCorrect)
+
+  // Case A: Student entered only the required letter (e.g. "ه", "هـ", "ه‍", "ـهـ")
+  if (studentClean === correctLetter) {
+    return {
+      questionId: q.id,
+      score: maxScore,
+      maxScore,
+      status: 'correct',
+      feedback: `✅ حرف صحیح «${correctLabel}» برای تکمیل کلمه به‌درستی انتخاب شد (+${maxScore} نمره)`,
+      correctKeyDisplay: `${correctLabel} (${rawCorrect})`,
+      studentAnswerDisplay: studentText,
+      conceptMatched: true,
+    }
+  }
+
+  // Case B: Student entered the wrong choice letter (e.g. "ح" or "ـحـ")
+  if (studentClean === wrongLetter) {
+    return {
+      questionId: q.id,
+      score: 0,
+      maxScore,
+      status: 'incorrect',
+      feedback: `❌ حرف نادرست «${wrongLabel}» انتخاب شده است. حرف صحیح: «${correctLabel}» (کلمه کامل: «${rawCorrect}»)`,
+      correctKeyDisplay: `${correctLabel} (${rawCorrect})`,
+      studentAnswerDisplay: studentText,
+    }
+  }
+
+  // Case C: Student entered the full reconstructed word with the correct letter (e.g. "نهراسیم" or "نهراسيم")
+  if (
+    studentCompact === expectedCompact ||
+    (studentCompact.includes(correctLetter) && !studentCompact.includes(wrongLetter) && isMinorTypoMatch(studentCompact, expectedCompact))
+  ) {
+    return {
+      questionId: q.id,
+      score: maxScore,
+      maxScore,
+      status: 'correct',
+      feedback: `✅ کلمه «${rawCorrect}» با حرف صحیح «${correctLabel}» به‌درستی کامل و نوشته شد (+${maxScore} نمره)`,
+      correctKeyDisplay: `${correctLabel} (${rawCorrect})`,
+      studentAnswerDisplay: studentText,
+      conceptMatched: true,
+    }
+  }
+
+  // Case D: Student wrote the full word with the wrong letter (e.g. "نحراسیم")
+  if (studentCompact.includes(wrongLetter) && !studentCompact.includes(correctLetter)) {
+    return {
+      questionId: q.id,
+      score: 0,
+      maxScore,
+      status: 'incorrect',
+      feedback: `❌ کلمه با حرف نادرست «${wrongLabel}» نوشته شده است. شکل صحیح: «${rawCorrect}» (با حرف «${correctLabel}»)`,
+      correctKeyDisplay: `${correctLabel} (${rawCorrect})`,
+      studentAnswerDisplay: studentText,
+    }
+  }
+
+  // Case E: Any other answer for intra-word letter question is incorrect (do not award false partial credit)
+  return {
+    questionId: q.id,
+    score: 0,
+    maxScore,
+    status: 'incorrect',
+    feedback: `❌ پاسخ واردشده نادرست است. حرف موردنیاز: «${correctLabel}» (کلمه کامل: «${rawCorrect}»)`,
+    correctKeyDisplay: `${correctLabel} (${rawCorrect})`,
+    studentAnswerDisplay: studentText,
+  }
+}
+
+/**
  * Checks if a student's answer conceptually matches the expected answer for fill-in-the-blank:
  * 1. Exact match after Persian normalization
  * 2. Alternative acceptable answers defined on question
@@ -1012,6 +1195,20 @@ export function evaluateFillInTheBlank(q: ExamQuestion, studentAns: any): Questi
   const rawCorrect = String(q.correctAnswer || '').trim()
   const correctKeyDisplay = rawCorrect || String(q.rubricOrHint || 'تعیین‌نشده')
 
+  // 0. Universal credit if teacher awarded full score to all
+  if (q.awardFullScoreToAll || q.allAnswersCorrect || q.isBonusToAll) {
+    return {
+      questionId: q.id,
+      score: maxScore,
+      maxScore,
+      status: 'correct',
+      feedback: `✅ با تصمیم آموزگار، نمره کامل این سوال به تمامی دانش‌آموزان اختصاص داده شد (+${maxScore} نمره)`,
+      correctKeyDisplay: 'نمره کامل برای تمامی دانش‌آموزان (تصمیم آموزگار)',
+      studentAnswerDisplay: studentText || 'پاسخ ثبت شد',
+      conceptMatched: true,
+    }
+  }
+
   if (!studentText) {
     return {
       questionId: q.id,
@@ -1022,6 +1219,12 @@ export function evaluateFillInTheBlank(q: ExamQuestion, studentAns: any): Questi
       correctKeyDisplay,
       studentAnswerDisplay: 'بدون پاسخ',
     }
+  }
+
+  // 0. High-Precision Intra-Word Letter Completion Check (e.g. نـ............ـراسیم (هـ / ح))
+  const letterCompRes = checkIntraWordLetterCompletion(q, studentText, rawCorrect, maxScore, correctKeyDisplay)
+  if (letterCompRes) {
+    return letterCompRes
   }
 
   const studentNorm = normalizePersianText(studentText)
@@ -1590,6 +1793,20 @@ export function evaluateDescriptiveQuestion(
 
   const rubric = String(q.correctAnswer || q.rubricOrHint || 'پاسخ تشریحی بر اساس مفاهیم کتاب درسی').trim()
   const correctKeyDisplay = rubric
+
+  // 0. Universal credit if teacher awarded full score to all
+  if (q.awardFullScoreToAll || q.allAnswersCorrect || q.isBonusToAll) {
+    return {
+      questionId: q.id,
+      score: maxScore,
+      maxScore,
+      status: 'correct',
+      feedback: `✅ با تصمیم آموزگار، نمره کامل این سوال به تمامی دانش‌آموزان اختصاص داده شد (+${maxScore} نمره)`,
+      correctKeyDisplay: 'نمره کامل برای تمامی دانش‌آموزان (تصمیم آموزگار)',
+      studentAnswerDisplay: studentText || 'پاسخ دانش‌آموز ثبت شد',
+      conceptMatched: true,
+    }
+  }
 
   if (!studentText && !hasAttachment) {
     return {
