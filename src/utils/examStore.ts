@@ -566,6 +566,9 @@ export function isExamResultsReleased(exam: Exam, submission?: StudentExamSubmis
 
   // 1. Explicit release flags set by teacher on the exam or submission:
   if (exam.resultsPublished || exam.results_published || exam.isResultsReleased) {
+    if (submission) {
+      return submission.teacherGrading?.approved === true || submission.isReleased === true
+    }
     return true
   }
   if (submission?.isReleased || submission?.is_released) {
@@ -580,21 +583,22 @@ export function isExamResultsReleased(exam: Exam, submission?: StudentExamSubmis
   }
 
   // 3. Timed exams with deadline / schedule:
-  // "برای آزمون‌های دارای بازه زمانی: کلید و کارنامه تنها پس از اتمام کامل مهلت کلی آزمون (یعنی وقتی دیگر هیچ دانش‌آموزی اجازه ورود ندارد) یا پس از تایید معلم فعال شود."
-  if (exam.dueDate) {
-    const dueTime = new Date(exam.dueDate).getTime()
-    if (!isNaN(dueTime) && Date.now() > dueTime) {
-      return true
+  // Only release automatically if submission is approved by teacher AND exam deadline has passed
+  if (submission && submission.teacherGrading?.approved) {
+    if (exam.dueDate) {
+      const dueTime = new Date(exam.dueDate).getTime()
+      if (!isNaN(dueTime) && Date.now() > dueTime) {
+        return true
+      }
     }
-  }
 
-  if (exam.scheduledStartTime) {
-    const startMs = new Date(exam.scheduledStartTime).getTime()
-    const durationMs = (Number(exam.durationMinutes) || 30) * 60 * 1000
-    // Total window: after scheduled start + duration (plus 5 min buffer)
-    const windowEnd = startMs + durationMs + 5 * 60 * 1000
-    if (!isNaN(windowEnd) && Date.now() > windowEnd) {
-      return true
+    if (exam.scheduledStartTime) {
+      const startMs = new Date(exam.scheduledStartTime).getTime()
+      const durationMs = (Number(exam.durationMinutes) || 30) * 60 * 1000
+      const windowEnd = startMs + durationMs + 5 * 60 * 1000
+      if (!isNaN(windowEnd) && Date.now() > windowEnd) {
+        return true
+      }
     }
   }
 
@@ -1866,7 +1870,25 @@ export function submitStudentExamOptimistic(params: {
   const { exam, studentId, studentName, answers } = params
 
   // 1. Instant client-side deterministic evaluation (< 5ms)
-  const instant = computeInstantExamResult(exam, answers)
+  // Check if exam questions have correct answers available (e.g. offline/teacher mode).
+  // If keys were stripped for student exam security, do NOT calculate instant 0 scores!
+  const hasKeys = Array.isArray(exam.questions) && exam.questions.some((q) => q.correctAnswer !== undefined)
+  const instant = hasKeys
+    ? computeInstantExamResult(exam, answers)
+    : {
+        totalQuestions: exam.questions.length,
+        answeredCount: Object.keys(answers).length,
+        unansweredCount: Math.max(0, exam.questions.length - Object.keys(answers).length),
+        correctCount: 0,
+        wrongCount: 0,
+        earnedPoints: 0,
+        maxPoints: Number(exam.totalPoints) || 20,
+        percentage: 0,
+        scaledScore20: 0,
+        questionScores: {} as Record<string, number>,
+        questionFeedbacks: {} as Record<string, string>,
+        status: 'good' as const,
+      }
 
   const submissionId = `sub_${exam.id}_${studentId}_${Date.now()}`
   const optimisticSubmission: StudentExamSubmission = {
@@ -1899,12 +1921,13 @@ export function submitStudentExamOptimistic(params: {
       totalScore: instant.earnedPoints,
       scaledScore20: instant.scaledScore20,
       gradedAt: new Date().toISOString(),
-      summary:
-        instant.status === 'excellent'
+      summary: hasKeys
+        ? instant.status === 'excellent'
           ? `آفرین ${studentName} عزیزم! عملکردت در این آزمون بسیار عالی بود (${instant.percentage}٪ پاسخ درست). پاسخ‌نامه شما با موفقیت ثبت شد.`
           : instant.status === 'good'
           ? `خسته نباشی ${studentName} جان؛ تلاش خوبی در آزمون داشتی (${instant.percentage}٪ پاسخ درست). پاسخ‌نامه شما با موفقیت ثبت شد.`
-          : `${studentName} عزیز، پاسخ‌های شما دریافت شد. با مرور مباحث نتایج بهتری کسب خواهی کرد.`,
+          : `${studentName} عزیز، پاسخ‌های شما دریافت شد. با مرور مباحث نتایج بهتری کسب خواهی کرد.`
+        : `پاسخ‌های شما با موفقیت دریافت شد و پس از بررسی و تایید آموزگار در کارنامه درج خواهد شد.`,
     },
     teacherGrading: {
       approved: false,

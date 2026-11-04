@@ -880,16 +880,24 @@ async function startServer() {
     }
 
     if (!isTeacherAuthed) {
-      // SECURITY FIX: Strip correctAnswer and rubricOrHint so student inspect element cannot leak answers!
+      // SECURITY FIX: Strip correctAnswer and rubricOrHint unless teacher has explicitly released results!
       const sanitized = cachedExams
         .filter((e) => e.published)
-        .map((exam) => ({
-          ...exam,
-          questions: (exam.questions || []).map((q: any) => {
-            const { correctAnswer, rubricOrHint, ...safeQuestion } = q
-            return safeQuestion
-          }),
-        }))
+        .map((exam) => {
+          const isResultsReleased = Boolean(
+            exam.resultsPublished || exam.results_published || exam.isResultsReleased
+          )
+          if (!isResultsReleased) {
+            return {
+              ...exam,
+              questions: (exam.questions || []).map((q: any) => {
+                const { correctAnswer, rubricOrHint, correctOptionIndex, correctOptionText, ...safeQuestion } = q
+                return safeQuestion
+              }),
+            }
+          }
+          return exam
+        })
       return res.json({ success: true, exams: sanitized })
     }
 
@@ -906,6 +914,20 @@ async function startServer() {
       if (!exam || !exam.id) {
         return res.status(400).json({ success: false, error: 'اطلاعات آزمون ناقص است.' })
       }
+
+      // STRICT QUESTION APPROVAL ENFORCEMENT:
+      // Filter out any unapproved, rejected, or draft questions before saving
+      const rawQuestions = Array.isArray(exam.questions) ? exam.questions : []
+      const approvedOnlyQuestions = rawQuestions.filter((q: any) => {
+        if (!q || !q.id) return false
+        if (q.status === 'rejected' || q.isRejected === true) return false
+        if (q.status === 'unconfirmed' || q.status === 'pending_approval' || q.isConfirmed === false) return false
+        return true
+      })
+
+      exam.questions = approvedOnlyQuestions
+      exam.totalPoints = approvedOnlyQuestions.reduce((sum: number, q: any) => sum + (Number(q.points) || 1), 0)
+
       const idx = cachedExams.findIndex((e) => e.id === exam.id)
       if (idx >= 0) {
         cachedExams[idx] = exam
@@ -1135,6 +1157,39 @@ async function startServer() {
     if (studentId) {
       subs = subs.filter((s) => s.studentId === studentId)
     }
+
+    // Security & Privacy Guard (Priority 3): If not authenticated teacher, strip unapproved / unpublished scores
+    if (!isTeacherAuthed) {
+      subs = subs.map((s) => {
+        const matchingExam = cachedExams.find((e) => e.id === s.examId)
+        const isExamReleased = Boolean(
+          matchingExam?.resultsPublished ||
+          matchingExam?.results_published ||
+          matchingExam?.isResultsReleased ||
+          s.isReleased
+        )
+        const isApproved = Boolean(s.teacherGrading?.approved)
+
+        if (isExamReleased && isApproved) {
+          return s
+        }
+
+        // Return privacy-safe submission record without provisional scores or key leaks
+        return {
+          id: s.id,
+          examId: s.examId,
+          studentId: s.studentId,
+          studentName: s.studentName,
+          submittedAt: s.submittedAt,
+          answers: s.answers,
+          status: 'pending_approval',
+          isReleased: false,
+          syncStatus: 'synced',
+          message: 'پاسخ شما با موفقیت ثبت شد و در انتظار تایید آموزگار قرار دارد.',
+        } as any
+      })
+    }
+
     res.json({ success: true, submissions: subs })
   })
 
@@ -1158,52 +1213,11 @@ async function startServer() {
         return res.status(404).json({ success: false, error: 'آزمون یافت نشد.' })
       }
 
-      const questionScores: Record<string, number> = {}
-      const questionFeedbacks: Record<string, string> = {}
-      let totalScore = 0
+      // 1. Identify descriptive questions that benefit from AI evaluation
       const questionsToAiGrade: any[] = []
-
       for (const q of masterExam.questions) {
         const studentAns = answers?.[q.id] || {}
-        if (q.type === 'multiple_choice') {
-          const selected = studentAns.selectedOption
-          const correct = q.correctAnswer
-          if (selected !== undefined && Number(selected) === Number(correct)) {
-            const pts = Number(q.points) || 2
-            questionScores[q.id] = pts
-            questionFeedbacks[q.id] = '✅ پاسخ کاملاً درست است.'
-            totalScore += pts
-          } else {
-            questionScores[q.id] = 0
-            questionFeedbacks[q.id] = `❌ پاسخ نادرست است. گزینه صحیح: گزینه ${Number(correct ?? 0) + 1}`
-          }
-        } else if (q.type === 'fill_in_the_blank') {
-          const rawText = String(studentAns.textAnswer || '').trim()
-          const rawCorrect = String(q.correctAnswer || '').trim()
-          const normText = normalizePersianForComparison(rawText)
-          const normCorrect = normalizePersianForComparison(rawCorrect)
-
-          if (normText && (normText === normCorrect || normText.includes(normCorrect) || normCorrect.includes(normText))) {
-            const pts = Number(q.points) || 2
-            questionScores[q.id] = pts
-            questionFeedbacks[q.id] = '✅ پاسخ جای خالی کاملاً درست است.'
-            totalScore += pts
-          } else if (rawText) {
-            // Forward to AI for conceptual / synonym verification
-            questionsToAiGrade.push({
-              id: q.id,
-              type: 'fill_in_the_blank',
-              question: q.question,
-              rubricOrHint: `کلید مورد نظر: «${q.correctAnswer}». نکته مهم: اگر مفهوم درست است یا واژه مترادف یا هم‌معنی (مانند بزرگتر/بیشتر) به کار رفته یا فاصله و نیم‌فاصله متفاوت است، نمره کامل داده شود.`,
-              points: Number(q.points) || 2,
-              studentAnswer: rawText,
-            })
-          } else {
-            questionScores[q.id] = 0
-            questionFeedbacks[q.id] = `❌ پاسخ خالی است. پاسخ صحیح: «${q.correctAnswer}»`
-          }
-        } else {
-          // Descriptive or image questions: prepare for AI grading
+        if (q.type === 'descriptive' || q.type === 'image') {
           questionsToAiGrade.push({
             id: q.id,
             type: q.type,
@@ -1215,7 +1229,9 @@ async function startServer() {
         }
       }
 
+      const aiScoresMap: Record<string, { score?: number; feedback?: string }> = {}
       let serverTeacherNote = ''
+
       if (questionsToAiGrade.length > 0 && process.env.GEMINI_API_KEY) {
         try {
           const aiPrompt = `شما آموزگار مهربان، دلسوز، بسیار منعطف، صبور و باتجربه پایه ششم ابتدایی هستید. دانش‌آموز «${studentName || 'دانش‌آموز'}» به سوالات آزمون پاسخ داده است.
@@ -1226,15 +1242,20 @@ ${JSON.stringify(questionsToAiGrade, null, 2)}
 ۱. **نمره کامل در صورت درک مفهوم (Concept-First)**:
    اگر مفهوم، جان‌کلام، ایده اصلی یا پیام پاسخ دانش‌آموز درست است، حتماً نمره کامل را بدهید. از هرگونه سخت‌گیری وسواس‌گونه یا نیاز به تطابق کلمه به کلمه با کتاب درسی پرهیز کنید.
 ۲. **نیم‌فاصله و فاصله‌ها**:
-   نیم‌فاصله و فاصله‌ها (مانند «شهاب سنگ» در برابر «شهاب‌سنگ» یا «شهابسنگ»، «دست خوش» در برابر «دستخوش»، «دانش آموز» در برابر «دانش‌آموز»، «گیاه خوار» در برابر «گیاهخوار») به هیچ وجه نباید نمره صفر بگیرند یا کسر نمره شوند، بلکه کاملاً صحیح تلقی شده و نمره کامل داده شود.
+   نیم‌فاصله و فاصله‌ها به هیچ وجه نباید نمره صفر بگیرند، بلکه کاملاً صحیح تلقی شده و نمره کامل داده شود.
 ۳. **واژگان هم‌معنی و مترادف**:
-   کلمات هم‌معنی و معادل‌های مفهومی (مانند «بزرگتر» به جای «بیشتر»، «افزایش» به جای «زیاد شدن»، «کاهش» به جای «کم شدن»، «سریعتر» به جای «تندتر») به هیچ وجه نباید نمره صفر بگیرند و کاملاً درست بوده و نمره کامل دریافت می‌کنند.
+   کلمات هم‌معنی و معادل‌های مفهومی به هیچ وجه نباید نمره صفر بگیرند و کاملاً درست بوده و نمره کامل دریافت می‌کنند.
 ۴. **نادیده گرفتن خطاهای املایی جزئی دانش‌آموز ششم**:
-   خطاهای املایی و نگارشی جزئی دانش‌آموز ششم ابتدایی (مانند جابجایی حروف هم‌صدا مثل ص/س/ث، ت/ط، ذ/ز/ض/ظ، غ/ق، ه/ح، تشدید نگذاشتن یا جا افتادن یک حرف در تایپ) کاملاً نادیده گرفته شوند و اگر کلمه قابل تشخیص است نمره کامل داده شود.
+   خطاهای املایی و نگارشی جزئی دانش‌آموز ششم ابتدایی کاملاً نادیده گرفته شوند.
 ۵. **پاسخ‌های تشریحی و جای‌خالی**:
    حتی اگر دانش‌آموز با زبان کودکانه خود پاسخ داده باشد نمره کامل داده شود. نمره صفر فقط در صورت کاملاً بی‌ربط بودن یا سفید گذاشتن داده شود.
 ۶. **یادداشت معلمانه (teacherSummaryNote)**:
    باید پرمهر، تشویقی، دلگرم‌کننده و بدون هرگونه اشاره به هوش مصنوعی باشد.
+۷. **سوالات چندبخشی، اصلاح غلط‌های املایی و تکمیل کلمات**:
+   در سوالاتی که چند غلط املایی یا چند کلمه برای تکمیل وجود دارد (مانند پیدا کردن ۳ غلط املایی یا تکمیل ۴ کلمه):
+   - به ازای هر واژه درست که دانش‌آموز نوشته است، نمره کامل آن بخش را منظور کنید.
+   - ترتیب نوشتن کلمات، استفاده از ایموجی‌های تیک و ضربدر (✅ و ❌)، علامت فلش یا دو نقطه هیچ اثر منفی در نمره ندارد.
+   - اگر دانش‌آموز تمام موارد خواسته شده را نوشته است، باید دقیقاً نمره کامل سوال را دریافت کند (مثلاً ۱.۵ از ۱.۵، ۱ از ۱) و هرگز نباید به خاطر کوتاه بودن پاسخ یا فرمت نمره‌ای کسر شود.
 
 خروجی صرفاً JSON با ساختار زیر:
 {
@@ -1251,36 +1272,24 @@ ${JSON.stringify(questionsToAiGrade, null, 2)}
           for (const g of gradesArr) {
             const matchingQ = masterExam.questions.find((mq: any) => mq.id === g.id)
             const maxPts = Number(matchingQ?.points) || 3
-            const safeScore = Math.min(maxPts, Math.max(0, Number(g.score) || 0))
-            questionScores[g.id] = safeScore
-            questionFeedbacks[g.id] = g.feedback || 'پاسخ بررسی شد.'
-            totalScore += safeScore
+            const safeScoreVal = Math.min(maxPts, Math.max(0, Number(g.score) || 0))
+            aiScoresMap[g.id] = {
+              score: safeScoreVal,
+              feedback: g.feedback || 'پاسخ بررسی شد.',
+            }
           }
         } catch (e) {
-          console.warn('AI grading failed, using heuristic grading', e)
-          for (const q of questionsToAiGrade) {
-            const text = String(q.studentAnswer || '').trim()
-            let earned = 0
-            let fb = ''
-            if (text.length > 30) {
-              earned = q.points
-              fb = 'پاسخ کامل یا راه‌حل ثبت شده است.'
-            } else if (text.length > 0) {
-              earned = Math.round(q.points * 0.5 * 10) / 10
-              fb = 'پاسخ مختصر درج شده است.'
-            } else {
-              fb = 'پاسخی ثبت نشده است.'
-            }
-            questionScores[q.id] = earned
-            questionFeedbacks[q.id] = fb
-            totalScore += earned
-          }
+          console.warn('AI grading failed, using fallback heuristic', e)
         }
       }
 
+      // 2. Comprehensive deterministic grading using unified semantic evaluator
+      // This guarantees consistent and accurate evaluation for Multiple Choice, Fill in Blank, and Descriptive!
+      const evalResult = evaluateEntireExamSubmission(masterExam, answers || {}, aiScoresMap)
+
       serverTeacherNote = sanitizeTeacherNote(serverTeacherNote)
       if (!serverTeacherNote) {
-        const ratio = totalScore / (masterExam.totalPoints || 20)
+        const ratio = evalResult.percentage / 100
         if (ratio >= 0.85) {
           serverTeacherNote = `آفرین ${studentName} عزیزم! عملکردت در این آزمون بسیار عالی و چشم‌گیر بود و تسلط خوبی روی مفاهیم نشان دادی. همین مسیر باانگیزه را ادامه بده.`
         } else if (ratio >= 0.6) {
@@ -1290,9 +1299,6 @@ ${JSON.stringify(questionsToAiGrade, null, 2)}
         }
       }
 
-      const masterTotal = Number(masterExam.totalPoints) || 20
-      const scaledScore20 = masterTotal > 0 ? Math.round(((totalScore / masterTotal) * 20) * 10) / 10 : totalScore
-      const roundedScore = Math.round(totalScore * 10) / 10
       const submission = {
         id: `sub_${examId}_${studentId}_${Date.now()}`,
         examId,
@@ -1300,28 +1306,75 @@ ${JSON.stringify(questionsToAiGrade, null, 2)}
         studentName: studentName || 'دانش‌آموز',
         submittedAt: new Date().toISOString(),
         answers,
+        instantStats: {
+          totalQuestions: evalResult.totalQuestions,
+          answeredCount: evalResult.answeredCount,
+          unansweredCount: evalResult.unansweredCount,
+          correctCount: evalResult.correctCount,
+          wrongCount: evalResult.wrongCount,
+          percentage: evalResult.percentage,
+          scaledScore20: evalResult.scaledScore20,
+          earnedPoints: evalResult.earnedPoints,
+          maxPoints: evalResult.maxPoints,
+          status: evalResult.status,
+        },
         aiGrading: {
-          questionScores,
-          questionFeedbacks,
-          totalScore: roundedScore,
-          scaledScore20,
+          questionScores: evalResult.questionScores,
+          questionFeedbacks: evalResult.questionFeedbacks,
+          totalScore: evalResult.earnedPoints,
+          scaledScore20: evalResult.scaledScore20,
           gradedAt: new Date().toISOString(),
           summary: serverTeacherNote,
         },
         teacherGrading: {
           approved: false,
-          questionScores: { ...questionScores },
-          questionFeedbacks: { ...questionFeedbacks },
-          totalScore: roundedScore,
-          scaledScore20,
+          questionScores: { ...evalResult.questionScores },
+          questionFeedbacks: { ...evalResult.questionFeedbacks },
+          totalScore: evalResult.earnedPoints,
+          scaledScore20: evalResult.scaledScore20,
           teacherNotes: serverTeacherNote,
         },
+        status: 'pending_approval' as const,
+        isReleased: false,
       }
 
-      // Persist as independent submission record per (exam_id, student_id) in Supabase (Eliminating array race conditions)
+      // Persist as independent submission record per (exam_id, student_id) in Supabase
       await upsertExamSubmissionRecord(examId, studentId, submission).catch((e) =>
         console.warn('Sync independent exam submission to Supabase error:', e)
       )
+
+      // Deduplicate into cachedSubmissions array
+      const existingIdx = cachedSubmissions.findIndex(
+        (s) => s.id === submission.id || (s.examId === examId && String(s.studentId) === String(studentId))
+      )
+      if (existingIdx >= 0) {
+        cachedSubmissions[existingIdx] = submission
+      } else {
+        cachedSubmissions.push(submission)
+      }
+
+      // Check if student requested and results are not published: return safe submission
+      const isExamReleased = Boolean(
+        masterExam.resultsPublished ||
+        masterExam.results_published ||
+        masterExam.isResultsReleased
+      )
+
+      if (!isExamReleased) {
+        const studentSafeSubmission = {
+          id: submission.id,
+          examId,
+          studentId,
+          studentName: submission.studentName,
+          submittedAt: submission.submittedAt,
+          answers,
+          status: 'pending_approval',
+          isReleased: false,
+          syncStatus: 'synced',
+          message: 'پاسخ شما با موفقیت ثبت شد و در انتظار تایید آموزگار قرار دارد.',
+        }
+        return res.json({ success: true, submission: studentSafeSubmission })
+      }
 
       res.json({ success: true, submission })
     } catch (err: any) {

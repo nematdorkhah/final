@@ -1,0 +1,32 @@
+{
+  "test_preview_student": {
+    "studentId": "test_preview_student",
+    "studentName": "دانش‌آموز نمونه (تست معلم)",
+    "totalXp": 0,
+    "gems": 25,
+    "streak": 1,
+    "hearts": 5,
+    "lastActiveDate": "2026-10-20",
+    "unlockedTopicIndex": 0,
+    "completedTopics": {},
+    "completedQuestionIds": [],
+    "openedChests": [],
+    "wrongQuestionIds": [],
+    "updatedAt": "2026-10-20T16:36:16.018Z"
+  },
+  "4a2614ec-ebc7-437f-a90f-d6526caa082f": {
+    "studentId": "4a2614ec-ebc7-437f-a90f-d6526caa082f",
+    "studentName": "بردیا آذر",
+    "totalXp": 0,
+    "gems": 25,
+    "streak": 1,
+    "hearts": 5,
+    "lastActiveDate": "2026-10-20",
+    "unlockedTopicIndex": 0,
+    "completedTopics": {},
+    "completedQuestionIds": [],
+    "openedChests": [],
+    "wrongQuestionIds": [],
+    "updatedAt": "2026-10-25T10:04:37.560Z"
+  }
+}

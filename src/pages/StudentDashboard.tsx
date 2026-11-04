@@ -26,6 +26,7 @@ import {
 import { isItemExpiredForStudent } from '../utils/expiration'
 import { sanitizeTeacherFeedback } from '../utils/cleanFeedback'
 import { toPersianDigits } from '../utils/persianNumbers'
+import { getSubmissionEffectiveScore } from '../utils/persianSemanticGrader'
 
 
 type StudentTab = 'home' | 'tizhooshan' | 'homework' | 'grades' | 'profile'
@@ -45,13 +46,45 @@ export default function StudentDashboard({
 }) {
   const { weekday, jalali } = getJalaliDateLabel()
   const [activeTab, setActiveTab] = useState<StudentTab>('home')
-  const [posts, setPosts] = useState<any[]>([])
-  const [mySubmissions, setMySubmissions] = useState<any[]>([])
-  const [myGrades, setMyGrades] = useState<any[]>([])
+  const [posts, setPosts] = useState<any[]>(() => {
+    try {
+      if (typeof localStorage !== 'undefined') {
+        const raw = localStorage.getItem('cached_published_posts')
+        if (raw) return JSON.parse(raw)
+      }
+    } catch {}
+    return []
+  })
+  const [mySubmissions, setMySubmissions] = useState<any[]>(() => {
+    try {
+      if (typeof localStorage !== 'undefined' && student?.id) {
+        const raw = localStorage.getItem(`cached_submissions_${student.id}`)
+        if (raw) return JSON.parse(raw)
+      }
+    } catch {}
+    return []
+  })
+  const [myGrades, setMyGrades] = useState<any[]>(() => {
+    try {
+      if (typeof localStorage !== 'undefined' && student?.id) {
+        const raw = localStorage.getItem(`cached_grades_${student.id}`)
+        if (raw) return JSON.parse(raw)
+      }
+    } catch {}
+    return []
+  })
   const [myAttendance, setMyAttendance] = useState<any[]>([])
   const [exams, setExams] = useState<Exam[]>([])
   const [takingExam, setTakingExam] = useState<Exam | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(() => {
+    try {
+      if (typeof localStorage !== 'undefined') {
+        const raw = localStorage.getItem('cached_published_posts')
+        if (raw && JSON.parse(raw).length > 0) return false
+      }
+    } catch {}
+    return true
+  })
   const [loadError, setLoadError] = useState<string | null>(null)
   const [sendingPostId, setSendingPostId] = useState<string | null>(null)
   const [stagedFiles, setStagedFiles] = useState<Record<string, File>>({})
@@ -254,6 +287,16 @@ export default function StudentDashboard({
       setMyGrades(g?.data || [])
       setMyAttendance(att?.data || [])
 
+      try {
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem('cached_published_posts', JSON.stringify(cleanPosts))
+          if (studentId) {
+            localStorage.setItem(`cached_submissions_${studentId}`, JSON.stringify(sub?.data || []))
+            localStorage.setItem(`cached_grades_${studentId}`, JSON.stringify(g?.data || []))
+          }
+        }
+      } catch {}
+
       // Double-layer exam resolution: merge fetchPublishedExams with any exams directly in list_published_posts
       const extractedFromPosts = extractExamsFromPosts(rawPosts)
       const mergedExamsMap = new Map<string, Exam>()
@@ -393,41 +436,60 @@ export default function StudentDashboard({
     const subMap = new Map(examSubs.map((s) => [s.examId, s]))
 
     // Process existing Supabase grades with matched exams
-    const list = myGrades.map((g) => {
-      let matchedExam = g.exam || null
-      let matchedSub = g.sub || null
+    const list = myGrades
+      .filter((g) => {
+        // If this grade belongs to an exam, ensure results are approved and released
+        if (g.is_exam || g.examId) {
+          const matchedExam = g.exam || (g.examId ? examMap.get(g.examId) : null)
+          const matchedSub = g.sub || (g.examId ? subMap.get(g.examId) : null)
+          if (matchedExam) {
+            const isApproved = matchedSub?.teacherGrading?.approved === true || matchedSub?.status === 'released'
+            const isReleased = isExamResultsReleased(matchedExam, matchedSub)
+            if (!isApproved || !isReleased) return false
+          }
+        }
+        return true
+      })
+      .map((g) => {
+        let matchedExam = g.exam || null
+        let matchedSub = g.sub || null
 
-      if (!matchedExam) {
-        matchedExam =
-          localExams.find((e) => {
-            if (g.examId && e.id === g.examId) return true
-            if (g.id && (`exam_sub_${e.id}` === g.id || `exam_${e.id}` === g.id)) return true
-            const cleanE = sanitizeExamTitle(e.title, e.subject)
-            const cleanG = sanitizeExamTitle(g.skill || '', g.subject)
-            return cleanE && cleanG && (cleanE === cleanG || g.skill?.includes(cleanE))
-          }) || null
-      }
+        if (!matchedExam) {
+          matchedExam =
+            localExams.find((e) => {
+              if (g.examId && e.id === g.examId) return true
+              if (g.id && (`exam_sub_${e.id}` === g.id || `exam_${e.id}` === g.id)) return true
+              const cleanE = sanitizeExamTitle(e.title, e.subject)
+              const cleanG = sanitizeExamTitle(g.skill || '', g.subject)
+              return cleanE && cleanG && (cleanE === cleanG || g.skill?.includes(cleanE))
+            }) || null
+        }
 
-      if (matchedExam && !matchedSub) {
-        matchedSub = subMap.get(matchedExam.id) || null
-      }
+        if (matchedExam && !matchedSub) {
+          matchedSub = subMap.get(matchedExam.id) || null
+        }
 
-      return {
-        ...g,
-        matchedExam,
-        matchedSub,
-      }
-    })
+        return {
+          ...g,
+          matchedExam,
+          matchedSub,
+        }
+      })
 
-    // Add local exam submissions not yet in list
+    // Add local exam submissions not yet in list (Priority 3: Only approved & released)
     for (const sub of examSubs) {
       const exam = examMap.get(sub.examId)
       if (!exam) continue
-      const score = sub.teacherGrading?.totalScore ?? sub.aiGrading?.totalScore ?? (sub as any).studentScore
-      if (score === undefined || score === null) continue
-      const rawMax = Number(exam.totalPoints || (exam as any).totalScore) || 20
-      // Exact formula: Score = (Earned / Total) * 20
-      const scaledScore = rawMax > 0 ? Math.round(((Number(score) / rawMax) * 20) * 10) / 10 : Number(score)
+
+      // Security & Privacy Guard: Never expose provisional/unapproved exam scores to students or GPA!
+      const isApproved = sub.teacherGrading?.approved === true || sub.status === 'released'
+      const isReleased = isExamResultsReleased(exam, sub)
+      if (!isApproved || !isReleased) continue
+
+      const eff = getSubmissionEffectiveScore(exam, sub)
+      const score = eff.totalScore
+      const rawMax = eff.maxPoints
+      const scaledScore = eff.scaledScore20
       const cleanTitle = sanitizeTeacherFeedback(sanitizeExamTitle(exam.title, exam.subject))
 
       const exists = list.some(

@@ -17,12 +17,36 @@ export function useClassroomData(teacherPassword: string) {
       'full_name'
     )
   )
-  const [posts, setPosts] = useState<any[]>([])
-  const [submissions, setSubmissions] = useState<any[]>([])
+  const [posts, setPosts] = useState<any[]>(() => {
+    try {
+      if (typeof localStorage !== 'undefined') {
+        const raw = localStorage.getItem('cached_teacher_posts_v2')
+        if (raw) return JSON.parse(raw)
+      }
+    } catch {}
+    return []
+  })
+  const [submissions, setSubmissions] = useState<any[]>(() => {
+    try {
+      if (typeof localStorage !== 'undefined') {
+        const raw = localStorage.getItem('cached_teacher_submissions_v2')
+        if (raw) return JSON.parse(raw)
+      }
+    } catch {}
+    return []
+  })
   const [attendanceToday, setAttendanceToday] = useState<Record<string, string>>({})
   const [allAttendance, setAllAttendance] = useState<any[]>([])
   const [grades, setGrades] = useState<any[]>([])
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(() => {
+    try {
+      if (typeof localStorage !== 'undefined') {
+        const raw = localStorage.getItem('cached_teacher_posts_v2')
+        if (raw && JSON.parse(raw).length > 0) return false
+      }
+    } catch {}
+    return true
+  })
   const [error, setError] = useState<string | null>(null)
   const hasLoadedOnce = useRef(false)
 
@@ -92,6 +116,13 @@ export function useClassroomData(teacherPassword: string) {
       })
       setPosts(cleanPosts)
       setSubmissions(sub?.data || [])
+
+      try {
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem('cached_teacher_posts_v2', JSON.stringify(cleanPosts))
+          localStorage.setItem('cached_teacher_submissions_v2', JSON.stringify(sub?.data || []))
+        }
+      } catch {}
 
       const todayStr = todayISO()
       const attMap: Record<string, string> = {}

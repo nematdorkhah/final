@@ -10,7 +10,7 @@
  * 5. Safe Multi-Choice Resolution: Handles 0-based vs 1-based indexes, Persian digits, Persian letters (الف-د), and option text.
  */
 
-import { ExamQuestion, StudentExamAnswer } from '../types/examTypes'
+import { ExamQuestion, StudentExamAnswer, StudentExamSubmission } from '../types/examTypes'
 
 // ----------------------------------------------------------------------
 // 1. PERSIAN TEXT NORMALIZATION & CLEANING
@@ -47,7 +47,8 @@ export function normalizePersianText(text: string): string {
     .replace(/[ة]/g, 'ه')
     .replace(/[آأإ]/g, 'ا')
     .replace(/[ؤء]/g, 'و')
-    .replace(/[،,؛;:!؟?«»"'\(\)\[\]\{\}\-_\\\/]/g, ' ') // punctuation to space
+    .replace(/[،,؛;:!؟?«»"'\(\)\[\]\{\}\-_\\\/•*~`^=+<>|]/g, ' ') // punctuation to space
+    .replace(/[\u2700-\u27bf\u2600-\u26ff\ud800-\udfff]/g, ' ') // emojis and symbols (e.g. ❌, ✅) to space
     .replace(/\s+/g, ' ')
     .trim()
 }
@@ -517,10 +518,10 @@ export function resolveCorrectOptionIndex(q: ExamQuestion): ResolvedOption {
     }
   }
 
-  // Pass 2: Substring containment (only if NO option matched exactly)
+  // Pass 2: Substring containment (only if NO option matched exactly and BOTH strings are substantive words >= 4 chars)
   for (let i = 0; i < options.length; i++) {
     const optClean = cleanOptionText(options[i])
-    if (cleanRaw.length >= 4 && (optClean.includes(cleanRaw) || cleanRaw.includes(optClean))) {
+    if (cleanRaw.length >= 4 && optClean.length >= 4 && (optClean.includes(cleanRaw) || cleanRaw.includes(optClean))) {
       return {
         index: i,
         label: `گزینه ${i + 1} (${PERSIAN_OPTION_LETTERS[i] || i + 1})`,
@@ -698,6 +699,8 @@ export function resolveCorrectOptionIndex(q: ExamQuestion): ResolvedOption {
 /**
  * Resolves the student's selected option from their answer record
  * Position-independent: Matches selectedOptionText against options first!
+ * Handles 0-based and 1-based indexing, Persian digits, Persian letters (الف-د),
+ * and labels like "گزینه ۴".
  */
 export function resolveStudentSelectedOption(answer: any, options?: string[]): ResolvedOption {
   if (!answer) {
@@ -707,6 +710,11 @@ export function resolveStudentSelectedOption(answer: any, options?: string[]): R
   const optionsArr = Array.isArray(options) ? options : []
   const maxIdx = Math.max(0, optionsArr.length - 1)
 
+  const letterMap: Record<string, number> = {
+    'الف': 0, 'ب': 1, 'ج': 2, 'د': 3, 'هـ': 4, 'و': 5,
+    'a': 0, 'b': 1, 'c': 2, 'd': 3,
+  }
+
   // 1. Text-based match: If student answer has selectedOptionText or text
   const ansText = typeof answer === 'object' && answer !== null ? answer.selectedOptionText || answer.text : null
   if (ansText && optionsArr.length > 0) {
@@ -714,6 +722,19 @@ export function resolveStudentSelectedOption(answer: any, options?: string[]): R
     for (let i = 0; i < optionsArr.length; i++) {
       const optClean = cleanOptionText(optionsArr[i])
       if (optClean === targetClean || optionsArr[i] === ansText || compactPersianText(optionsArr[i]) === compactPersianText(ansText)) {
+        return {
+          index: i,
+          label: `گزینه ${i + 1} (${PERSIAN_OPTION_LETTERS[i] || i + 1})`,
+          text: optionsArr[i],
+          cleanText: optClean,
+          isValid: true,
+        }
+      }
+    }
+    // Substring containment for long option text
+    for (let i = 0; i < optionsArr.length; i++) {
+      const optClean = cleanOptionText(optionsArr[i])
+      if (targetClean.length >= 4 && (optClean.includes(targetClean) || targetClean.includes(optClean))) {
         return {
           index: i,
           label: `گزینه ${i + 1} (${PERSIAN_OPTION_LETTERS[i] || i + 1})`,
@@ -735,8 +756,111 @@ export function resolveStudentSelectedOption(answer: any, options?: string[]): R
     return { index: -1, label: 'بدون پاسخ', text: '', cleanText: '', isValid: false }
   }
 
-  // Direct number index (0-based)
+  const strRaw = String(raw).trim()
+  const cleanRaw = cleanOptionText(strRaw)
+  const normStr = normalizePersianText(strRaw)
+  const compactStr = compactPersianText(strRaw)
+
+  // 3. Option text match on strRaw (e.g. if raw itself is the option text)
+  if (optionsArr.length > 0) {
+    for (let i = 0; i < optionsArr.length; i++) {
+      const optClean = cleanOptionText(optionsArr[i])
+      if (optClean === cleanRaw || compactPersianText(optionsArr[i]) === compactStr || optionsArr[i] === strRaw) {
+        return {
+          index: i,
+          label: `گزینه ${i + 1} (${PERSIAN_OPTION_LETTERS[i] || i + 1})`,
+          text: optionsArr[i],
+          cleanText: optClean,
+          isValid: true,
+        }
+      }
+    }
+  }
+
+  // 4. Persian letter matching: "الف", "ب", "ج", "د"
+  if (letterMap[normStr] !== undefined && letterMap[normStr] <= maxIdx) {
+    const idx = letterMap[normStr]
+    return {
+      index: idx,
+      label: `گزینه ${idx + 1} (${PERSIAN_OPTION_LETTERS[idx] || idx + 1})`,
+      text: optionsArr[idx] || '',
+      cleanText: cleanOptionText(optionsArr[idx] || ''),
+      isValid: true,
+    }
+  }
+
+  for (const [letter, idx] of Object.entries(letterMap)) {
+    if (
+      normStr === letter ||
+      compactStr === letter ||
+      normStr.startsWith(`${letter})`) ||
+      normStr.startsWith(`${letter}:`) ||
+      normStr.startsWith(`${letter}-`) ||
+      normStr === `(${letter})`
+    ) {
+      if (idx <= maxIdx) {
+        return {
+          index: idx,
+          label: `گزینه ${idx + 1} (${PERSIAN_OPTION_LETTERS[idx] || idx + 1})`,
+          text: optionsArr[idx] || '',
+          cleanText: cleanOptionText(optionsArr[idx] || ''),
+          isValid: true,
+        }
+      }
+    }
+  }
+
+  // 5. Pattern match: "گزینه ۱", "گزینه 4", "گزینه د"
+  const optionMatch = normStr.match(/^گزینه\s*([0-9۰-۹۱۲۳۴۵۶۷۸۹]|الف|ب|ج|د|هـ|و|[A-Da-d])/u)
+  if (optionMatch && optionMatch[1]) {
+    const val = optionMatch[1]
+    if (letterMap[val] !== undefined && letterMap[val] <= maxIdx) {
+      const idx = letterMap[val]
+      return {
+        index: idx,
+        label: `گزینه ${idx + 1} (${PERSIAN_OPTION_LETTERS[idx] || idx + 1})`,
+        text: optionsArr[idx] || '',
+        cleanText: cleanOptionText(optionsArr[idx] || ''),
+        isValid: true,
+      }
+    }
+    const num = parseInt(convertDigitsToEnglish(val), 10)
+    if (!isNaN(num) && num >= 1 && num <= optionsArr.length) {
+      const zeroBased = num - 1
+      return {
+        index: zeroBased,
+        label: `گزینه ${num} (${PERSIAN_OPTION_LETTERS[zeroBased] || num})`,
+        text: optionsArr[zeroBased] || '',
+        cleanText: cleanOptionText(optionsArr[zeroBased] || ''),
+        isValid: true,
+      }
+    }
+  }
+
+  // 6. Direct number index handling (both 0-based and 1-based)
   if (typeof raw === 'number' && !isNaN(raw) && isFinite(raw)) {
+    // 0 is unambiguous: 0-based index 0 (گزینه ۱)
+    if (raw === 0) {
+      return {
+        index: 0,
+        label: `گزینه ۱ (${PERSIAN_OPTION_LETTERS[0]})`,
+        text: optionsArr[0] || '',
+        cleanText: cleanOptionText(optionsArr[0] || ''),
+        isValid: true,
+      }
+    }
+    // If raw equals optionsArr.length, it is 1-based (e.g. 4 in a 4-option question -> index 3)
+    if (raw === optionsArr.length) {
+      const zeroBased = raw - 1
+      return {
+        index: zeroBased,
+        label: `گزینه ${raw} (${PERSIAN_OPTION_LETTERS[zeroBased] || raw})`,
+        text: optionsArr[zeroBased] || '',
+        cleanText: cleanOptionText(optionsArr[zeroBased] || ''),
+        isValid: true,
+      }
+    }
+    // If within standard 0-based bounds 0..maxIdx
     if (raw >= 0 && raw <= maxIdx) {
       return {
         index: raw,
@@ -748,31 +872,37 @@ export function resolveStudentSelectedOption(answer: any, options?: string[]): R
     }
   }
 
-  const strRaw = String(raw).trim()
-  const num = parseInt(convertDigitsToEnglish(strRaw), 10)
-  if (!isNaN(num) && num >= 0 && num <= maxIdx && String(num) === convertDigitsToEnglish(strRaw)) {
-    return {
-      index: num,
-      label: `گزینه ${num + 1} (${PERSIAN_OPTION_LETTERS[num] || num + 1})`,
-      text: optionsArr[num] || '',
-      cleanText: cleanOptionText(optionsArr[num] || ''),
-      isValid: true,
+  // 7. Plain numeric string (e.g. "0", "1", "2", "3", "4", "۴")
+  const parsedInt = parseInt(convertDigitsToEnglish(strRaw), 10)
+  if (!isNaN(parsedInt) && String(parsedInt) === convertDigitsToEnglish(strRaw)) {
+    if (parsedInt === 0) {
+      return {
+        index: 0,
+        label: `گزینه ۱ (${PERSIAN_OPTION_LETTERS[0]})`,
+        text: optionsArr[0] || '',
+        cleanText: cleanOptionText(optionsArr[0] || ''),
+        isValid: true,
+      }
     }
-  }
-
-  // 3. Option text match on strRaw
-  if (optionsArr.length > 0) {
-    const cleanRaw = cleanOptionText(strRaw)
-    for (let i = 0; i < optionsArr.length; i++) {
-      const optClean = cleanOptionText(optionsArr[i])
-      if (optClean === cleanRaw || compactPersianText(optionsArr[i]) === compactPersianText(strRaw)) {
-        return {
-          index: i,
-          label: `گزینه ${i + 1} (${PERSIAN_OPTION_LETTERS[i] || i + 1})`,
-          text: optionsArr[i],
-          cleanText: optClean,
-          isValid: true,
-        }
+    // 1-based maximum (e.g. "4" in a 4-option question -> index 3)
+    if (parsedInt === optionsArr.length) {
+      const zeroBased = parsedInt - 1
+      return {
+        index: zeroBased,
+        label: `گزینه ${parsedInt} (${PERSIAN_OPTION_LETTERS[zeroBased] || parsedInt})`,
+        text: optionsArr[zeroBased] || '',
+        cleanText: cleanOptionText(optionsArr[zeroBased] || ''),
+        isValid: true,
+      }
+    }
+    // Standard 0-based index
+    if (parsedInt >= 0 && parsedInt <= maxIdx) {
+      return {
+        index: parsedInt,
+        label: `گزینه ${parsedInt + 1} (${PERSIAN_OPTION_LETTERS[parsedInt] || parsedInt + 1})`,
+        text: optionsArr[parsedInt] || '',
+        cleanText: cleanOptionText(optionsArr[parsedInt] || ''),
+        isValid: true,
       }
     }
   }
@@ -1000,7 +1130,13 @@ export function evaluateFillInTheBlank(q: ExamQuestion, studentAns: any): Questi
   }
 
   // D. Substring or Inclusion Match (e.g. expected "خورشید", student wrote "انرژی خورشید" or "نور خورشید")
-  if (correctCompact.length >= 3 && (studentCompact.includes(correctCompact) || correctCompact.includes(studentCompact))) {
+  if (
+    correctCompact.length >= 3 &&
+    (studentCompact.includes(correctCompact) ||
+      (studentCompact.length >= 3 &&
+        studentCompact.length >= Math.ceil(correctCompact.length * 0.6) &&
+        correctCompact.includes(studentCompact)))
+  ) {
     // If student answer is a reasonable phrase (< 45 chars) containing expected term
     if (studentText.length <= 45) {
       return {
@@ -1059,7 +1195,387 @@ export function evaluateFillInTheBlank(q: ExamQuestion, studentAns: any): Questi
 }
 
 // ----------------------------------------------------------------------
-// 9. DESCRIPTIVE QUESTION EVALUATION (SEMANTIC & HEURISTIC FALLBACK)
+// 8.5. MULTI-PART & SPELLING ERROR IDENTIFICATION EVALUATOR
+// ----------------------------------------------------------------------
+
+export function evaluateMultiPartOrSpellingQuestion(
+  q: ExamQuestion,
+  studentText: string,
+  maxScore: number,
+  hasAttachment: boolean
+): QuestionGradingOutput | null {
+  const qText = String(q.question || '').trim()
+  const keySources = [q.correctAnswer, q.rubricOrHint].filter(Boolean).map((s) => String(s).trim())
+  const rubric = keySources.join('\n')
+
+  // 1. Detect if this is a spelling correction or multi-part itemized question
+  const isSpellingQ =
+    /غلط\s*املایی|اشتباه\s*املایی|املای\s*درست|غلط[‌\s]*های\s*املایی|بازنویسی\s*کنید|با\s*املای\s*درست/.test(
+      qText
+    ) || /غلط|اشتباه|صحیح|املای/.test(rubric)
+
+  const isWordCompletionQ =
+    /کامل\s*کنید|کلمات\s*زیر|کلمه[‌\s]*های\s*زیر|\(\s*ت\s*\/\s*ط\s*\)|\(\s*س\s*\/\s*ص|\(\s*ز\s*\/\s*ض/.test(
+      qText
+    )
+
+  const isNumberedMultiPart =
+    /سه\s*غلط|دو\s*غلط|چهار\s*غلط|سه\s*مورد|دو\s*مورد|چهار\s*مورد|پنج\s*مورد|چند\s*مورد|الف\s*[\)\:\-]|ب\s*[\)\:\-]/.test(
+      qText
+    ) || /←|->|-->/.test(rubric)
+
+  if (!isSpellingQ && !isWordCompletionQ && !isNumberedMultiPart) {
+    return null
+  }
+
+  // 2. Extract pairs for spelling correction: wrong -> correct
+  interface SpellingPair {
+    wrong: string
+    correct: string
+  }
+  const pairs: SpellingPair[] = []
+
+  const META_PAIR_LABELS = new Set([
+    'غلط', 'غلطها', 'غلطهای', 'اشتباه', 'اشتباهات', 'پاسخ', 'کلید', 'راهنما', 'مورد', 'موارد',
+    'تصحیح', 'تبدیل', 'ویرایش', 'تغییر', 'نوشتن', 'پیدا', 'تسهیم', 'نسبت', 'مجموع', 'بارم'
+  ])
+
+  // Try extracting pairs from correctAnswer first if provided, else from rubricOrHint
+  const sourcesToTry = [String(q.correctAnswer || '').trim(), String(q.rubricOrHint || '').trim()].filter(Boolean)
+  const allSegments = sourcesToTry.flatMap((src) =>
+    src
+      .split(/[\n\r;؛]+/)
+      .flatMap((s) => s.split(/[،,]+/))
+      .map((s) => s.trim().replace(/^[-*•\d\.\(\)]+/, '').trim())
+      .filter(Boolean)
+  )
+
+  for (const src of sourcesToTry) {
+    if (pairs.length >= 2) break // Explicit pairs already found from primary key
+    const segs = src
+      .split(/[\n\r;؛]+/)
+      .flatMap((s) => s.split(/[،,]+/))
+      .map((s) => s.trim().replace(/^[-*•\d\.\(\)]+/, '').trim())
+      .filter(Boolean)
+
+    for (const seg of segs) {
+      const m = seg.match(/(?:تصحیح|تبدیل|تغییر|ویرایش)?\s*[«"']?([^\s:←\->()«"']+)[»"']?\s*(?:←|->|-->|:|شکل درست|-|به جای|به)\s*[«"']?([^\s:←\->()«"']+)[»"']?/)
+      if (m && m[1] && m[2]) {
+        const w = cleanOptionText(m[1]).replace(/^[«"']+|[»"']+$/g, '').trim()
+        const c = cleanOptionText(m[2]).replace(/^[«"']+|[»"']+$/g, '').trim()
+        const cW = compactPersianText(w)
+        const cC = compactPersianText(c)
+        if (w && c && !META_PAIR_LABELS.has(cW) && !META_PAIR_LABELS.has(cC) && w.length >= 2 && c.length >= 2) {
+          if (!pairs.some((p) => p.wrong === w && p.correct === c)) {
+            pairs.push({ wrong: w, correct: c })
+          }
+        }
+      }
+    }
+  }
+
+  // If no pairs found with arrow/colon, check for parenthesis pattern: e.g. آغار (آغاز)
+  if (pairs.length === 0) {
+    for (const seg of allSegments) {
+      const m = seg.match(/([^\s:←\->()]+)\s*\(\s*([^\s:←\->()]+)\s*\)/)
+      if (m && m[1] && m[2]) {
+        const w = cleanOptionText(m[1])
+        const c = cleanOptionText(m[2])
+        if (w && c) {
+          pairs.push({ wrong: w, correct: c })
+        }
+      }
+    }
+  }
+
+  // If no explicit pairs found, compare quoted sentence in question vs rubric sentence to extract intentional typos
+  if (pairs.length === 0 && rubric.length >= 10) {
+    const qQuoteMatch = qText.match(/«([^»]+)»|"([^"]+)"/)
+    if (qQuoteMatch) {
+      const qQuote = normalizePersianText(qQuoteMatch[1] || qQuoteMatch[2])
+      const rQuote = normalizePersianText(rubric)
+      const qWords = qQuote.split(/\s+/).filter(Boolean)
+      const rWords = rQuote.split(/\s+/).filter(Boolean)
+
+      for (const rw of rWords) {
+        if (rw.length >= 2 && !qWords.includes(rw)) {
+          let closestQW = rw
+          let bestDist = 999
+          for (const qw of qWords) {
+            if (qw.length >= 2 && !rWords.includes(qw)) {
+              const d = levenshteinDistance(rw, qw)
+              if (d < bestDist && d <= 4) {
+                bestDist = d
+                closestQW = qw
+              }
+            }
+          }
+          if (!pairs.some((p) => p.correct === rw)) {
+            pairs.push({ wrong: closestQW, correct: rw })
+          }
+        }
+      }
+    }
+  }
+
+  const normStudent = normalizePersianText(studentText)
+  const compactStudent = compactPersianText(studentText)
+  const studentWords = normStudent
+    .split(/\s+/)
+    .map((w) => compactPersianText(w))
+    .filter(Boolean)
+
+  // Direct check: If student rewrote the full sentence/poem correctly
+  if (rubric.length >= 15) {
+    const compactRub = compactPersianText(rubric)
+    if (compactStudent.length >= 15) {
+      if (compactStudent === compactRub || isMinorTypoMatch(compactStudent, compactRub)) {
+        return {
+          questionId: q.id,
+          score: maxScore,
+          maxScore,
+          status: 'correct',
+          feedback: `✅ بیت/جمله با املای کاملاً درست و دقیق بازنویسی شد (+${maxScore} نمره)`,
+          correctKeyDisplay: rubric,
+          studentAnswerDisplay: studentText,
+        }
+      }
+    }
+  }
+
+  // -------------------------------------------------------------
+  // BRANCH A: Spelling Correction with Pairs (e.g. Question 7, Question 8)
+  // -------------------------------------------------------------
+  if (pairs.length > 0) {
+    const totalPairs = pairs.length
+    const pointsPerPair = maxScore / totalPairs
+
+    let matchedFullCount = 0
+    let matchedWrongOnlyCount = 0
+    const matchedDescriptions: string[] = []
+    const missingDescriptions: string[] = []
+
+    for (const p of pairs) {
+      const cWrong = compactPersianText(p.wrong)
+      const cCorrect = compactPersianText(p.correct)
+
+      const hasCorrect =
+        studentWords.includes(cCorrect) ||
+        compactStudent.includes(cCorrect) ||
+        studentWords.some((sw) => isMinorTypoMatch(sw, p.correct))
+
+      const hasWrong =
+        studentWords.includes(cWrong) ||
+        compactStudent.includes(cWrong)
+
+      if (hasCorrect) {
+        matchedFullCount++
+        matchedDescriptions.push(`«${p.wrong} ← ${p.correct}»`)
+      } else if (hasWrong) {
+        matchedWrongOnlyCount++
+        matchedDescriptions.push(`«${p.wrong} (فقط شناسایی غلط)»`)
+      } else {
+        missingDescriptions.push(`«${p.wrong} ← ${p.correct}»`)
+      }
+    }
+
+    let calculatedScore =
+      matchedFullCount * pointsPerPair + matchedWrongOnlyCount * (pointsPerPair * 0.5)
+    calculatedScore = Math.min(maxScore, Math.max(0, Math.round(calculatedScore * 100) / 100))
+
+    if (matchedFullCount === totalPairs) {
+      return {
+        questionId: q.id,
+        score: maxScore,
+        maxScore,
+        status: 'correct',
+        feedback: `✅ هر ${totalPairs} غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: ${matchedDescriptions.join('، ')} (+${maxScore} نمره)`,
+        correctKeyDisplay: rubric,
+        studentAnswerDisplay: studentText,
+        correctParts: matchedDescriptions,
+      }
+    } else if (calculatedScore > 0) {
+      return {
+        questionId: q.id,
+        score: calculatedScore,
+        maxScore,
+        status: 'partial',
+        feedback: `📝 ${matchedFullCount} مورد از ${totalPairs} مورد به درستی پاسخ داده شد: ${matchedDescriptions.join('، ')}${
+          missingDescriptions.length > 0 ? ` — موارد جاافتاده یا ناقص: ${missingDescriptions.join('، ')}` : ''
+        } (${calculatedScore} از ${maxScore} نمره)`,
+        correctKeyDisplay: rubric,
+        studentAnswerDisplay: studentText,
+        correctParts: matchedDescriptions,
+        missingParts: missingDescriptions,
+      }
+    } else {
+      return {
+        questionId: q.id,
+        score: 0,
+        maxScore,
+        status: 'incorrect',
+        feedback: `❌ غلط‌های املایی شناسایی نشدند. پاسخ‌های مورد انتظار: ${pairs
+          .map((p) => `${p.wrong} ← ${p.correct}`)
+          .join('، ')}`,
+        correctKeyDisplay: rubric,
+        studentAnswerDisplay: studentText,
+        missingParts: missingDescriptions,
+      }
+    }
+  }
+
+  // -------------------------------------------------------------
+  // BRANCH B: Word Completion / Itemized List (e.g. Question 9: تفاوت، طرف، غفلت، نقطه)
+  // -------------------------------------------------------------
+  const RUBRIC_META_STOP_WORDS = new Set([
+    'انتخاب', 'حرف', 'حروف', 'نگارش', 'واژه', 'واژه‌ها', 'واژهها', 'کلمه', 'کلمات',
+    'برای', 'هر', 'مورد', 'موارد', 'نمره', 'بارم', 'راهنما', 'راهنمای', 'تصحیح',
+    'معیار', 'پاسخ', 'پاسخنامه', 'پاسخ‌نامه', 'صحیح', 'درست', 'غلط', 'اشتباه',
+    'کامل', 'کنید', 'کنیم', 'کردن', 'بنویسید', 'نوشتن', 'دانش‌آموز', 'دانشاموز',
+    'شکل', 'توضیح', 'بخش', 'قسمت', 'قسمتهای', 'قسمت‌های', 'بخشهای', 'بخش‌های',
+    'الف', 'ب', 'ج', 'د', 'هـ', 'و',
+    'ت', 'ط', 'س', 'ص', 'ز', 'ض', 'ظ', 'ذ', 'ث', 'ح', 'ه', 'ع', 'غ', 'ف', 'ق', 'ک', 'گ', 'ل', 'م', 'ن', 'ی', 'آ', 'ا', 'پ', 'چ', 'ژ',
+    'یک', 'دو', 'سه', 'چهار', 'پنج', 'شش', 'هفت', 'هشت', 'نه', 'ده',
+    '۰', '۱', '۲', '۳', '۴', '۵', '۶', '۷', '۸', '۹',
+    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
+    '۰٫۲۵', '۰.۲۵', '۰٫۵', '۰.۵', '۰٫۷۵', '۰.۷5', '۰.۲', '۰٫۲',
+    'زیر', 'را', 'با', 'یکی', 'از', 'به', 'در', 'که', 'تا', 'بر', 'یا', 'هم',
+    'است', 'باشد', 'شود', 'شدن', 'دارد', 'نظر', 'گرفته', 'لحاظ', 'توجه',
+    'گزینه', 'متن', 'بیت', 'شعر', 'جمله', 'عبارت', 'پیدا', 'کرده', 'بازنویسی'
+  ])
+
+  const targetItems: string[] = []
+
+  // 1. Try extracting labeled items from rubric: e.g. الف: تفاوت، ب: طرف، ج: غفلت، د: نقطه
+  const labeledRegex = /(?:الف|ب|ج|د|هـ|و|[1-6۱-۶])\s*[:\)\-\.]\s*([^\s,;،\(\)\/\\]+)/g
+  let lm: RegExpExecArray | null
+  while ((lm = labeledRegex.exec(rubric)) !== null) {
+    const rawWord = cleanOptionText(lm[1]).replace(/^[^\w\u0600-\u06FF]+|[^\w\u0600-\u06FF]+$/g, '').trim()
+    if (rawWord.length >= 2 && !RUBRIC_META_STOP_WORDS.has(rawWord) && !targetItems.includes(rawWord)) {
+      targetItems.push(rawWord)
+    }
+  }
+
+  // 2. Parse comma/dash/newline separated tokens directly from rubric (e.g. "تفاوت، طرف، غفلت، نقطه")
+  if (targetItems.length < 2) {
+    const afterColon = rubric.includes(':') ? rubric.split(':').slice(1).join(' ') : rubric
+    const rawTokens = afterColon
+      .split(/[\n\r;؛,،\(\)\[\]\/\-]+/)
+      .map((w) => cleanOptionText(w).replace(/^[^\w\u0600-\u06FF]+|[^\w\u0600-\u06FF]+$/g, '').trim())
+      .filter((w) => w.length >= 2 && !RUBRIC_META_STOP_WORDS.has(w) && !/^\d+/.test(w))
+
+    for (const tok of rawTokens) {
+      if (!targetItems.includes(tok)) {
+        targetItems.push(tok)
+      }
+    }
+  }
+
+  // 3. Fallback: Try extracting parenthesized choices from the question text (e.g. (تفاوت / طفاوت), (ترف / طرف), (غفلت / غفلط), (نقطه / نقتة))
+  if (targetItems.length < 2) {
+    const choiceRegex = /\(([^)]+)\/([^)]+)\)|\(([^)]+)\s+یا\s+([^)]+)\)/g
+    let cm: RegExpExecArray | null
+    while ((cm = choiceRegex.exec(qText)) !== null) {
+      const opt1 = cleanOptionText(cm[1] || cm[3]).trim()
+      const opt2 = cleanOptionText(cm[2] || cm[4]).trim()
+      if (opt1 && opt2 && opt1.length >= 2 && opt2.length >= 2 && !RUBRIC_META_STOP_WORDS.has(opt1) && !RUBRIC_META_STOP_WORDS.has(opt2)) {
+        const c1 = compactPersianText(opt1)
+        const c2 = compactPersianText(opt2)
+        const cRubric = compactPersianText(rubric)
+        if (cRubric.includes(c1) && !cRubric.includes(c2)) {
+          if (!targetItems.includes(opt1)) targetItems.push(opt1)
+        } else if (cRubric.includes(c2) && !cRubric.includes(c1)) {
+          if (!targetItems.includes(opt2)) targetItems.push(opt2)
+        } else {
+          const standardDict: Record<string, string> = {
+            'طفاوت': 'تفاوت',
+            'ترف': 'طرف',
+            'غفلط': 'غفلت',
+            'نقتة': 'نقطه',
+            'نقتله': 'نقطه',
+          }
+          if (standardDict[c1]) {
+            if (!targetItems.includes(opt2)) targetItems.push(opt2)
+          } else if (standardDict[c2]) {
+            if (!targetItems.includes(opt1)) targetItems.push(opt1)
+          } else {
+            if (!targetItems.includes(opt1)) targetItems.push(opt1)
+          }
+        }
+      }
+    }
+  }
+
+  if (targetItems.length >= 2) {
+    const totalItems = targetItems.length
+    const pointsPerItem = maxScore / totalItems
+
+    let matchedItemCount = 0
+    const matchedList: string[] = []
+    const missingList: string[] = []
+
+    for (const item of targetItems) {
+      const cItem = compactPersianText(item)
+      const hasItem =
+        studentWords.includes(cItem) ||
+        compactStudent.includes(cItem) ||
+        studentWords.some((sw) => isMinorTypoMatch(sw, item))
+
+      if (hasItem) {
+        matchedItemCount++
+        matchedList.push(item)
+      } else {
+        missingList.push(item)
+      }
+    }
+
+    let calculatedScore = matchedItemCount * pointsPerItem
+    calculatedScore = Math.min(maxScore, Math.max(0, Math.round(calculatedScore * 100) / 100))
+
+    if (matchedItemCount === totalItems) {
+      return {
+        questionId: q.id,
+        score: maxScore,
+        maxScore,
+        status: 'correct',
+        feedback: `✅ هر ${totalItems} مورد خواسته شده کاملاً درست نوشته شدند: ${matchedList.join('، ')} (+${maxScore} نمره)`,
+        correctKeyDisplay: rubric,
+        studentAnswerDisplay: studentText,
+        correctParts: matchedList,
+      }
+    } else if (calculatedScore > 0) {
+      return {
+        questionId: q.id,
+        score: calculatedScore,
+        maxScore,
+        status: 'partial',
+        feedback: `📝 ${matchedItemCount} مورد از ${totalItems} مورد درست نوشته شد: ${matchedList.join('، ')}${
+          missingList.length > 0 ? ` — موارد ناقص یا نادرست: ${missingList.join('، ')}` : ''
+        } (${calculatedScore} از ${maxScore} نمره)`,
+        correctKeyDisplay: rubric,
+        studentAnswerDisplay: studentText,
+        correctParts: matchedList,
+        missingParts: missingList,
+      }
+    } else {
+      return {
+        questionId: q.id,
+        score: 0,
+        maxScore,
+        status: 'incorrect',
+        feedback: `❌ کلمات یا موارد خواسته شده به درستی نوشته نشدند. پاسخ‌های مورد انتظار: ${targetItems.join('، ')}`,
+        correctKeyDisplay: rubric,
+        studentAnswerDisplay: studentText,
+        missingParts: missingList,
+      }
+    }
+  }
+
+  return null
+}
+
+// ----------------------------------------------------------------------
+// 9. DESCRIPTIVE QUESTION EVALUATION (CONCEPT-FIRST & ACCURATE HEURISTIC)
 // ----------------------------------------------------------------------
 
 export function evaluateDescriptiveQuestion(
@@ -1072,7 +1588,7 @@ export function evaluateDescriptiveQuestion(
   const studentText = String(rawStudent || '').trim()
   const hasAttachment = Boolean(typeof studentAns === 'object' && studentAns?.imageAttachment)
 
-  const rubric = String(q.rubricOrHint || q.correctAnswer || 'پاسخ تشریحی بر اساس مفاهیم کتاب درسی').trim()
+  const rubric = String(q.correctAnswer || q.rubricOrHint || 'پاسخ تشریحی بر اساس مفاهیم کتاب درسی').trim()
   const correctKeyDisplay = rubric
 
   if (!studentText && !hasAttachment) {
@@ -1087,30 +1603,30 @@ export function evaluateDescriptiveQuestion(
     }
   }
 
-  // 1. If AI score was proposed from server: Validate strictly
-  if (aiGradeProposal && typeof aiGradeProposal.score !== 'undefined') {
-    const proposed = safeNumber(aiGradeProposal.score, -1)
-    if (proposed >= 0 && proposed <= maxScore && !isNaN(proposed) && isFinite(proposed)) {
-      const cleanProposalScore = Math.min(maxScore, Math.max(0, proposed))
-      const isFull = cleanProposalScore >= maxScore * 0.85
-      const isZero = cleanProposalScore === 0
-      return {
-        questionId: q.id,
-        score: cleanProposalScore,
-        maxScore,
-        status: isFull ? 'correct' : isZero ? 'incorrect' : 'partial',
-        feedback: aiGradeProposal.feedback || `ارزیابی تشریحی: ${cleanProposalScore} از ${maxScore}`,
-        correctKeyDisplay,
-        studentAnswerDisplay: hasAttachment ? `[تصویر پاسخ ارسال شده] ${studentText}` : studentText,
-      }
+  // 1. High-Precision Multi-Part & Spelling Error Evaluation (Rules 1 & 4)
+  const multiPartRes = evaluateMultiPartOrSpellingQuestion(q, studentText, maxScore, hasAttachment)
+  if (multiPartRes) {
+    return multiPartRes
+  }
+
+  // 2. Image attachment without text
+  if (hasAttachment && !studentText) {
+    return {
+      questionId: q.id,
+      score: maxScore,
+      maxScore,
+      status: 'needs_teacher_review',
+      feedback: '📸 تصویر برگه پاسخ دانش‌آموز دریافت شد و جهت بررسی دقیق در پنل آموزگار آماده است.',
+      correctKeyDisplay,
+      studentAnswerDisplay: '[تصویر پاسخ پیوست شده]',
     }
   }
 
-  // 2. High-Accuracy Pedagogical Heuristic Rubric (Fallback when AI is offline)
+  // 3. Concept-First Evaluation with Curriculum Synonym Clusters
   const normStudent = normalizePersianText(studentText)
   const normRubric = normalizePersianText(rubric)
+  const compactStudent = compactPersianText(studentText)
 
-  // Extract key concept words from rubric (excluding common filler words)
   const stopWords = new Set([
     'در', 'به', 'با', 'از', 'که', 'و', 'یا', 'را', 'این', 'آن', 'برای', 'است', 'شد', 'می',
     'یک', 'هم', 'تا', 'بر', 'هر', 'چه', 'چون', 'اگر', 'پس', 'اما', 'ولی', 'باید', 'نمی'
@@ -1120,16 +1636,14 @@ export function evaluateDescriptiveQuestion(
     .split(/\s+/)
     .filter((w) => w.length >= 3 && !stopWords.has(w))
 
-  const compactStudent = compactPersianText(studentText)
-
-  let matchedKeywordCount = 0
+  let matchedConceptCount = 0
   for (const kw of rubricKeywords) {
     const stemKw = kw.replace(/(‌های|های|ها|تر|ترین|ات|ان|ی)$/, '').trim()
     if (normStudent.includes(kw) || (stemKw.length >= 3 && normStudent.includes(stemKw))) {
-      matchedKeywordCount++
+      matchedConceptCount++
     } else {
-      // Check if any synonym in clusters matches
-      let clusterMatched = false
+      // Check cluster synonyms (e.g. بزرگتر -> بیشتر, افزایش -> زیاد شدن)
+      let clusterFound = false
       for (const cluster of GRADE6_CONCEPT_CLUSTERS) {
         const kwInCluster = cluster.synonyms.some((s) => {
           const cs = compactPersianText(s)
@@ -1143,8 +1657,8 @@ export function evaluateDescriptiveQuestion(
             return normStudent.includes(ns) || compactStudent.includes(cs)
           })
           if (studentInCluster) {
-            matchedKeywordCount++
-            clusterMatched = true
+            matchedConceptCount++
+            clusterFound = true
             break
           }
         }
@@ -1152,36 +1666,72 @@ export function evaluateDescriptiveQuestion(
     }
   }
 
-  const keywordCoverage = rubricKeywords.length > 0 ? matchedKeywordCount / rubricKeywords.length : 0.5
+  const conceptCoverage = rubricKeywords.length > 0 ? matchedConceptCount / rubricKeywords.length : 0.5
 
-  let assignedScore = 0
-  let feedback = ''
-  let status: 'correct' | 'partial' | 'incorrect' | 'needs_teacher_review' = 'partial'
+  // 4. If AI proposed a score, validate with concept-first lower bound
+  if (aiGradeProposal && typeof aiGradeProposal.score !== 'undefined') {
+    const proposed = safeNumber(aiGradeProposal.score, -1)
+    if (proposed >= 0 && proposed <= maxScore && !isNaN(proposed) && isFinite(proposed)) {
+      // If student covered the concept, AI cannot unfairly reduce score below maxScore
+      const cleanProposalScore = conceptCoverage >= 0.5 ? maxScore : Math.min(maxScore, Math.max(0, proposed))
+      const isFull = cleanProposalScore >= maxScore * 0.95
+      const isZero = cleanProposalScore === 0
+      return {
+        questionId: q.id,
+        score: cleanProposalScore,
+        maxScore,
+        status: isFull ? 'correct' : isZero ? 'incorrect' : 'partial',
+        feedback: aiGradeProposal.feedback || `ارزیابی مفهومی: ${cleanProposalScore} از ${maxScore}`,
+        correctKeyDisplay,
+        studentAnswerDisplay: hasAttachment ? `[تصویر پیوست شده] ${studentText}` : studentText,
+      }
+    }
+  }
 
-  if (hasAttachment) {
-    assignedScore = maxScore
-    feedback = '📸 تصویر برگه پاسخ دانش‌آموز دریافت شد و جهت بررسی دقیق در پنل آموزگار آماده است.'
-    status = 'needs_teacher_review'
-  } else if (keywordCoverage >= 0.6 || (keywordCoverage >= 0.45 && studentText.length >= 40)) {
-    assignedScore = maxScore
-    feedback = `✅ پاسخ تشریحی جامع و بیان‌کننده مفهوم اصلی است (+${maxScore} نمره)`
-    status = 'correct'
-  } else if (keywordCoverage >= 0.15 || studentText.length >= 15) {
-    assignedScore = Math.round(maxScore * 0.6 * 10) / 10
-    feedback = `📝 پاسخ بخشی از مفهوم را پوشش می‌دهد (نمره اولیه: ${assignedScore} از ${maxScore})`
-    status = 'partial'
-  } else {
-    assignedScore = Math.round(maxScore * 0.35 * 10) / 10
-    feedback = `📝 پاسخ مختصر است و نیازمند بررسی تکمیلی آموزگار می‌باشد (${assignedScore} از ${maxScore})`
-    status = 'needs_teacher_review'
+  // 5. Deterministic Pedagogical Rubric
+  // Rule 7: Short but accurate answers must NOT be penalized for length!
+  if (conceptCoverage >= 0.5 || (matchedConceptCount >= 2 && matchedConceptCount >= rubricKeywords.length * 0.4)) {
+    return {
+      questionId: q.id,
+      score: maxScore,
+      maxScore,
+      status: 'correct',
+      feedback: `✅ پاسخ تشریحی بیان‌کننده مفهوم و جان کلام درس است (+${maxScore} نمره)`,
+      correctKeyDisplay,
+      studentAnswerDisplay: studentText,
+      conceptMatched: true,
+      isSemanticMatch: true,
+    }
+  } else if (conceptCoverage >= 0.25 || matchedConceptCount >= 1) {
+    const partial = Math.round(maxScore * 0.65 * 10) / 10
+    return {
+      questionId: q.id,
+      score: partial,
+      maxScore,
+      status: 'partial',
+      feedback: `📝 پاسخ بخشی از مفهوم را پوشش می‌دهد (نمره اولیه: ${partial} از ${maxScore})`,
+      correctKeyDisplay,
+      studentAnswerDisplay: studentText,
+    }
+  } else if (studentText.length >= 6) {
+    const partial = Math.round(maxScore * 0.4 * 10) / 10
+    return {
+      questionId: q.id,
+      score: partial,
+      maxScore,
+      status: 'needs_teacher_review',
+      feedback: `📝 پاسخ ثبت شده و جهت تصمیم‌گیری نهایی در صف بررسی آموزگار قرار گرفت (${partial} از ${maxScore})`,
+      correctKeyDisplay,
+      studentAnswerDisplay: studentText,
+    }
   }
 
   return {
     questionId: q.id,
-    score: assignedScore,
+    score: 0,
     maxScore,
-    status,
-    feedback,
+    status: 'incorrect',
+    feedback: `❌ پاسخ ثبت‌شده با مفهوم مورد انتظار مطابقت ندارد. پاسخ مورد نظر: ${correctKeyDisplay}`,
     correctKeyDisplay,
     studentAnswerDisplay: studentText,
   }
@@ -1285,6 +1835,70 @@ export function evaluateEntireExamSubmission(
     questionGrading,
     status,
     hasPendingTeacherReview,
+  }
+}
+
+/**
+ * Single Authoritative Source of Truth for submission scores across the entire application:
+ * - If teacher has approved: reads teacher approved question scores, calculates strict mathematical sum, and preserves manual overrides.
+ * - If not approved: runs fresh semantic evaluator on answers so lists, modals, and report cards always show accurate up-to-date scores.
+ * - Guarantees: Total score is strictly equal to the sum of individual question scores.
+ */
+export interface EffectiveSubmissionScore {
+  isApproved: boolean
+  totalScore: number
+  maxPoints: number
+  scaledScore20: number
+  questionScores: Record<string, number>
+  status: 'excellent' | 'good' | 'needs_practice'
+}
+
+export function getSubmissionEffectiveScore(
+  exam: { questions: ExamQuestion[]; totalPoints?: number } | null | undefined,
+  sub: StudentExamSubmission | null | undefined
+): EffectiveSubmissionScore {
+  if (!exam || !sub) {
+    return {
+      isApproved: false,
+      totalScore: 0,
+      maxPoints: 20,
+      scaledScore20: 0,
+      questionScores: {},
+      status: 'needs_practice',
+    }
+  }
+
+  const maxPoints = Number(exam.totalPoints) || 20
+  const isApproved = Boolean(sub.teacherGrading?.approved)
+
+  if (isApproved && sub.teacherGrading?.questionScores) {
+    const questionScores: Record<string, number> = {}
+    let sum = 0
+    for (const q of exam.questions || []) {
+      const qScore = safeScore(sub.teacherGrading.questionScores[q.id], Number(q.points) || 10, 0)
+      questionScores[q.id] = qScore
+      sum += qScore
+    }
+    const totalScore = Math.min(maxPoints, Math.max(0, Math.round(sum * 100) / 100))
+    const scaledScore20 = safeScaled20(totalScore, maxPoints)
+    return {
+      isApproved: true,
+      totalScore,
+      maxPoints,
+      scaledScore20,
+      questionScores,
+      status: scaledScore20 >= 16 ? 'excellent' : scaledScore20 >= 12 ? 'good' : 'needs_practice',
+    }
+  }
+
+  const evalResult = evaluateEntireExamSubmission(exam, sub.answers || {})
+  return {
+    isApproved: false,
+    totalScore: evalResult.earnedPoints,
+    maxPoints,
+    scaledScore20: evalResult.scaledScore20,
+    questionScores: evalResult.questionScores,
+    status: evalResult.status,
   }
 }
 

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { toPersianDigits } from '../utils/persianNumbers'
 import { sanitizeExamTitle, getLocalExams, getLocalSubmissions } from '../utils/examStore'
 import { sanitizeTeacherFeedback } from '../utils/cleanFeedback'
+import { getSubmissionEffectiveScore } from '../utils/persianSemanticGrader'
 import ExamReviewModal from './ExamReviewModal'
 import SchoolLogo from './SchoolLogo'
 
@@ -51,15 +52,17 @@ export default function StudentReportCard({
     }
 
     if (matchedSub && matchedExam) {
-      const subEarned =
-        matchedSub.teacherGrading?.totalScore ??
-        matchedSub.aiGrading?.totalScore ??
-        matchedSub.studentScore
-      if (subEarned !== undefined && subEarned !== null) {
-        rawScore = Number(subEarned)
-      }
-      if (matchedExam.totalPoints || matchedExam.totalScore) {
-        rawMax = Number(matchedExam.totalPoints || matchedExam.totalScore)
+      const isApprovedOrReleased = Boolean(
+        matchedSub.teacherGrading?.approved ||
+        matchedSub.status === 'released' ||
+        matchedExam.resultsPublished ||
+        matchedExam.isResultsReleased ||
+        matchedExam.results_published
+      )
+      if (isApprovedOrReleased) {
+        const eff = getSubmissionEffectiveScore(matchedExam, matchedSub)
+        rawScore = eff.totalScore
+        rawMax = eff.maxPoints
       }
     }
 
