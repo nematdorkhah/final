@@ -3,6 +3,7 @@ import { toPersianDigits } from '../utils/persianNumbers'
 import { sanitizeExamTitle, getLocalExams, getLocalSubmissions } from '../utils/examStore'
 import { sanitizeTeacherFeedback } from '../utils/cleanFeedback'
 import { getSubmissionEffectiveScore } from '../utils/persianSemanticGrader'
+import { isSameStudent } from '../classStudents'
 import ExamReviewModal from './ExamReviewModal'
 import SchoolLogo from './SchoolLogo'
 
@@ -48,7 +49,12 @@ export default function StudentReportCard({
 
     if (!matchedSub && matchedExam) {
       const allSubs = getLocalSubmissions()
-      matchedSub = allSubs.find((s) => s.examId === matchedExam.id && s.studentId === student.id) || null
+      matchedSub =
+        allSubs.find(
+          (s) =>
+            s.examId === matchedExam.id &&
+            isSameStudent(s.studentId, student.id, s.studentName, student.fullName || student.full_name)
+        ) || null
     }
 
     if (matchedSub && matchedExam) {

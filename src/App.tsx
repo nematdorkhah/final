@@ -41,13 +41,14 @@ function getStoredAuthSession(): AuthSession | null {
         }
         if (parsed.role === 'student') {
           const sId = parsed.student?.id || parsed.studentId || parsed.student?.access_code
-          const match = CLASS_STUDENTS_ROSTER.find((cs) => cs.nationalCode === sId)
-          const validStudent = parsed.student || (match ? {
-            id: match.nationalCode,
+          const match = CLASS_STUDENTS_ROSTER.find((cs) => cs.nationalCode === sId || cs.id === sId || cs.fullName === parsed.student?.full_name)
+          const validStudent = match ? {
+            id: match.id,
+            nationalCode: match.nationalCode,
             full_name: match.fullName,
             father_name: match.fatherName,
             access_code: match.nationalCode,
-          } : (sId ? { id: sId, full_name: parsed.studentName || 'دانش‌آموز', access_code: sId } : null))
+          } : (parsed.student || (sId ? { id: sId, full_name: parsed.studentName || 'دانش‌آموز', access_code: sId } : null))
 
           if (validStudent) {
             return {
@@ -381,12 +382,13 @@ export default function App() {
       }
       // Roster fallback if Supabase returns error or has no record
       const localMatch = CLASS_STUDENTS_ROSTER.find(
-        (cs) => cs.nationalCode === selectedStudentId || cs.fullName === selectedStudent?.full_name
+        (cs) => cs.nationalCode === selectedStudentId || cs.id === selectedStudentId || cs.fullName === selectedStudent?.full_name
       )
       if (localMatch && localMatch.nationalCode === accessCode.trim()) {
         setChecking(false)
         persistStudent({
-          id: localMatch.nationalCode,
+          id: localMatch.id,
+          nationalCode: localMatch.nationalCode,
           full_name: localMatch.fullName,
           access_code: localMatch.nationalCode,
           father_name: localMatch.fatherName,
@@ -397,12 +399,13 @@ export default function App() {
       setLoginError('کد ورود (کد ملی) صحیح نمی‌باشد.')
     } catch {
       const localMatch = CLASS_STUDENTS_ROSTER.find(
-        (cs) => cs.nationalCode === selectedStudentId || cs.fullName === selectedStudent?.full_name
+        (cs) => cs.nationalCode === selectedStudentId || cs.id === selectedStudentId || cs.fullName === selectedStudent?.full_name
       )
       if (localMatch && localMatch.nationalCode === accessCode.trim()) {
         setChecking(false)
         persistStudent({
-          id: localMatch.nationalCode,
+          id: localMatch.id,
+          nationalCode: localMatch.nationalCode,
           full_name: localMatch.fullName,
           access_code: localMatch.nationalCode,
           father_name: localMatch.fatherName,

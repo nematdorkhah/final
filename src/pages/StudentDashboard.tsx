@@ -15,6 +15,7 @@ import MathRenderer from '../components/MathRenderer'
 import { Exam } from '../types/examTypes'
 import {
   fetchPublishedExams,
+  fetchExamSubmissions,
   getStudentExamSubmission,
   sanitizeExamTitle,
   getLocalExams,
@@ -27,6 +28,7 @@ import { isItemExpiredForStudent } from '../utils/expiration'
 import { sanitizeTeacherFeedback } from '../utils/cleanFeedback'
 import { toPersianDigits } from '../utils/persianNumbers'
 import { getSubmissionEffectiveScore } from '../utils/persianSemanticGrader'
+import { resolveCanonicalStudent, isSameStudent } from '../classStudents'
 
 
 type StudentTab = 'home' | 'tizhooshan' | 'homework' | 'grades' | 'profile'
@@ -253,28 +255,31 @@ export default function StudentDashboard({
     )
 
     try {
-      const studentId = student?.id || student?.access_code
-      const accessCode = student?.access_code || student?.id
+      const rawId = student?.id || student?.access_code
+      const rosterInfo = resolveCanonicalStudent(rawId || student?.full_name)
+      const canonicalStudentId = rosterInfo?.id || rawId
+      const canonicalAccessCode = rosterInfo?.nationalCode || student?.access_code || rawId
 
-      if (!studentId) {
+      if (!canonicalStudentId) {
         throw new Error('مشخصات نشست دانش‌آموز یافت نشد. لطفاً مجدداً وارد شوید.')
       }
 
       const fetchPromise = Promise.all([
         supabase.rpc('list_published_posts'),
         supabase.rpc('student_list_my_submissions', {
-          p_student_id: studentId,
-          p_access_code: accessCode,
+          p_student_id: canonicalStudentId,
+          p_access_code: canonicalAccessCode,
         }),
         supabase.rpc('student_list_my_grades', {
-          p_student_id: studentId,
-          p_access_code: accessCode,
+          p_student_id: canonicalStudentId,
+          p_access_code: canonicalAccessCode,
         }),
         supabase.rpc('student_list_my_attendance', {
-          p_student_id: studentId,
-          p_access_code: accessCode,
+          p_student_id: canonicalStudentId,
+          p_access_code: canonicalAccessCode,
         }),
         fetchPublishedExams(),
+        fetchExamSubmissions(undefined, canonicalStudentId),
       ])
 
       const [p, sub, g, att, examList] = (await Promise.race([fetchPromise, timeoutPromise])) as any[]
@@ -290,9 +295,9 @@ export default function StudentDashboard({
       try {
         if (typeof localStorage !== 'undefined') {
           localStorage.setItem('cached_published_posts', JSON.stringify(cleanPosts))
-          if (studentId) {
-            localStorage.setItem(`cached_submissions_${studentId}`, JSON.stringify(sub?.data || []))
-            localStorage.setItem(`cached_grades_${studentId}`, JSON.stringify(g?.data || []))
+          if (canonicalStudentId) {
+            localStorage.setItem(`cached_submissions_${canonicalStudentId}`, JSON.stringify(sub?.data || []))
+            localStorage.setItem(`cached_grades_${canonicalStudentId}`, JSON.stringify(g?.data || []))
           }
         }
       } catch {}
@@ -322,7 +327,7 @@ export default function StudentDashboard({
         if (activeExamId && Array.isArray(examList)) {
           const found = examList.find((e: Exam) => e.id === activeExamId)
           if (found) {
-            const prevSub = getStudentExamSubmission(found.id, studentId)
+            const prevSub = getStudentExamSubmission(found.id, canonicalStudentId)
             if (!prevSub) {
               setTakingExam(found)
             } else {
@@ -431,7 +436,9 @@ export default function StudentDashboard({
   // Combined grades merging Supabase grades with local exam scores
   const combinedGrades = useMemo(() => {
     const localExams = getLocalExams()
-    const examSubs = getLocalSubmissions().filter((s) => s.studentId === student.id)
+    const examSubs = getLocalSubmissions().filter(
+      (s) => isSameStudent(s.studentId, student.id, s.studentName, student.full_name || (student as any).fullName)
+    )
     const examMap = new Map(localExams.map((e) => [e.id, e]))
     const subMap = new Map(examSubs.map((s) => [s.examId, s]))
 
@@ -469,8 +476,30 @@ export default function StudentDashboard({
           matchedSub = subMap.get(matchedExam.id) || null
         }
 
+        let officialScore = Number(g.score) || 0
+        let officialMaxScore = Number(g.max_score) || 20
+        let rawEarned: number | undefined = (g as any).raw_score
+        let rawTotal: number | undefined = (g as any).raw_max
+        let officialNotes = g.notes || ''
+
+        if (matchedExam && matchedSub) {
+          const eff = getSubmissionEffectiveScore(matchedExam, matchedSub)
+          if (eff.isApproved) {
+            officialScore = eff.scaledScore20
+            officialMaxScore = 20
+            rawEarned = eff.totalScore
+            rawTotal = eff.maxPoints
+            officialNotes = matchedSub.teacherGrading?.teacherNotes || officialNotes
+          }
+        }
+
         return {
           ...g,
+          score: officialScore,
+          max_score: officialMaxScore,
+          raw_score: rawEarned,
+          raw_max: rawTotal,
+          notes: officialNotes,
           matchedExam,
           matchedSub,
         }
@@ -503,6 +532,8 @@ export default function StudentDashboard({
           skill: `آزمون: ${cleanTitle}`,
           score: scaledScore,
           max_score: 20,
+          raw_score: score,
+          raw_max: rawMax,
           recorded_at: sub.submittedAt || new Date().toISOString(),
           is_exam: true,
           examId: exam.id,
@@ -513,7 +544,13 @@ export default function StudentDashboard({
         })
       }
     }
-    return list
+    const seenAssessmentKeys = new Set<string>()
+    return list.filter((g) => {
+      const key = g.matchedExam?.id || g.examId || (g.skill ? sanitizeExamTitle(g.skill, g.subject) : g.id)
+      if (seenAssessmentKeys.has(key)) return false
+      seenAssessmentKeys.add(key)
+      return true
+    })
   }, [myGrades, student.id])
 
   // Teacher report card recommendation note
@@ -1540,6 +1577,11 @@ export default function StudentDashboard({
                                 {toPersianDigits(normalized)}
                               </span>
                               <span className="text-xs text-slate-400 mr-1 font-bold">از ۲۰</span>
+                              {(g as any).raw_score !== undefined && (g as any).raw_max !== undefined && (
+                                <span className="text-[11px] text-slate-500 font-bold block mt-0.5">
+                                  ({toPersianDigits((g as any).raw_score)} از {toPersianDigits((g as any).raw_max)} نمره)
+                                </span>
+                              )}
                             </div>
                           </div>
                         </div>

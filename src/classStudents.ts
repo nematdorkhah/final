@@ -60,3 +60,40 @@ export function getStudentByUuid(uuid: string): ClassStudentInfo | undefined {
   const clean = String(uuid).trim()
   return CLASS_STUDENTS_ROSTER.find((c) => c.id === clean || c.nationalCode === clean)
 }
+
+export function resolveCanonicalStudent(identifier: string | undefined | null): ClassStudentInfo | undefined {
+  if (!identifier) return undefined
+  const clean = String(identifier).trim()
+  return CLASS_STUDENTS_ROSTER.find(
+    (c) =>
+      c.id === clean ||
+      c.nationalCode === clean ||
+      String(c.row) === clean ||
+      c.fullName === clean
+  )
+}
+
+export function isSameStudent(
+  a: string | undefined | null,
+  b: string | undefined | null,
+  nameA?: string,
+  nameB?: string
+): boolean {
+  if (!a && !b && !nameA && !nameB) return false
+  const cleanA = a ? String(a).trim() : ''
+  const cleanB = b ? String(b).trim() : ''
+  if (cleanA && cleanB && cleanA === cleanB) return true
+
+  const norm = (s?: string) => (s ? s.replace(/[\u200c\s]/g, '') : '')
+  if (nameA && nameB && norm(nameA) === norm(nameB)) return true
+
+  const studentA = resolveCanonicalStudent(cleanA || nameA)
+  const studentB = resolveCanonicalStudent(cleanB || nameB)
+
+  if (studentA && studentB && studentA.id === studentB.id) return true
+  if (studentA && (cleanB === studentA.id || cleanB === studentA.nationalCode || norm(nameB) === norm(studentA.fullName))) return true
+  if (studentB && (cleanA === studentB.id || cleanA === studentB.nationalCode || norm(nameA) === norm(studentB.fullName))) return true
+
+  return false
+}
+

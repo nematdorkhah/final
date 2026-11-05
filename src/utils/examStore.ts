@@ -9,7 +9,7 @@ import {
   RegradeQuestionDiff,
 } from '../types/examTypes'
 import { supabase } from '../supabaseClient'
-import { CLASS_STUDENTS_ROSTER, ClassStudentInfo } from '../classStudents'
+import { CLASS_STUDENTS_ROSTER, ClassStudentInfo, resolveCanonicalStudent, isSameStudent } from '../classStudents'
 import {
   generateExamQuestionsHybrid,
   regenerateSingleQuestionHybrid,
@@ -990,7 +990,29 @@ export async function fetchExamSubmissions(examId?: string, studentId?: string):
   const local = getLocalSubmissions()
   const fetchedList: StudentExamSubmission[] = []
 
-  console.log('[ExamStore:fetchExamSubmissions] Fetching exam submissions from Supabase...', { examId, studentId })
+  console.log('[ExamStore:fetchExamSubmissions] Fetching exam submissions...', { examId, studentId })
+
+  // 0. Primary Fast Source: Authoritative backend API (/api/exams/submissions)
+  try {
+    const teacherPass = typeof window !== 'undefined' ? sessionStorage.getItem('teacherPassword') || '' : ''
+    const params = new URLSearchParams()
+    if (examId) params.append('examId', examId)
+    if (studentId) params.append('studentId', studentId)
+    const resp = await fetch(`/api/exams/submissions?${params.toString()}`, {
+      headers: teacherPass ? { 'x-teacher-password': teacherPass } : {},
+    })
+    if (resp.ok) {
+      const json = await resp.json()
+      if (json && json.success && Array.isArray(json.submissions)) {
+        json.submissions.forEach((s: StudentExamSubmission) => {
+          if (s && s.examId && s.studentId) fetchedList.push(s)
+        })
+        console.log(`[ExamStore:fetchExamSubmissions] Synced ${json.submissions.length} submissions from backend API`)
+      }
+    }
+  } catch (apiErr) {
+    console.warn('[ExamStore:fetchExamSubmissions] Backend API query warning:', apiErr)
+  }
 
   // 1. Direct Supabase Query: __SYSTEM_EXAM_SUBMISSIONS__ from posts table
   try {
@@ -2077,6 +2099,30 @@ export async function approveExamSubmission(params: {
   sub.isReleased = true
   sub.is_released = true
   sub.status = 'graded'
+  sub.earnedPoints = totalScore
+  sub.totalScore = totalScore
+  sub.scaledScore20 = scaledScore20
+
+  if (!sub.instantStats) {
+    sub.instantStats = {
+      totalQuestions: exam.questions?.length || 9,
+      answeredCount: Object.keys(sub.answers || {}).length,
+      unansweredCount: Math.max(0, (exam.questions?.length || 9) - Object.keys(sub.answers || {}).length),
+      correctCount: 0,
+      wrongCount: 0,
+      percentage: Math.round((totalScore / maxExamPts) * 100),
+      scaledScore20,
+      earnedPoints: totalScore,
+      maxPoints: maxExamPts,
+      status: scaledScore20 >= 16 ? 'excellent' : scaledScore20 >= 12 ? 'good' : 'needs_practice',
+    }
+  } else {
+    sub.instantStats.earnedPoints = totalScore
+    sub.instantStats.scaledScore20 = scaledScore20
+    sub.instantStats.percentage = Math.round((totalScore / maxExamPts) * 100)
+    sub.instantStats.status = scaledScore20 >= 16 ? 'excellent' : scaledScore20 >= 12 ? 'good' : 'needs_practice'
+  }
+
   sub.teacherGrading = {
     approved: true,
     questionScores: cleanScores,
@@ -2090,22 +2136,57 @@ export async function approveExamSubmission(params: {
   saveLocalSubmissions(all)
   notifySubmissionUpdated(sub)
 
-  // Direct sync to Supabase (no backend required)
+  // Clear stale cached student grades in localStorage
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem(`cached_grades_${studentId}`)
+      localStorage.removeItem(`cached_grades_${sub.studentId}`)
+    }
+  } catch {}
+
+  // 1. Authoritative Backend Server API Call (Persists directly to server memory and disk backup)
+  try {
+    const resp = await fetch('/api/exams/approve', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-teacher-password': teacherPass,
+      },
+      body: JSON.stringify({
+        submissionId: sub.id,
+        approvedScores: cleanScores,
+        teacherNotes: teacherNotes || 'تایید شده توسط آموزگار محترم',
+        teacherPassword: teacherPass,
+      }),
+    })
+    if (!resp.ok) {
+      console.warn('[approveExamSubmission] Backend /api/exams/approve returned status:', resp.status)
+    }
+  } catch (err) {
+    console.warn('[approveExamSubmission] Backend /api/exams/approve network warning:', err)
+  }
+
+  // 2. Direct sync to Supabase posts table
   try {
     await syncExamSubmissionsToSupabase(all, teacherPass)
   } catch (err) {
     console.warn('[approveExamSubmission] Failed to sync approval to Supabase:', err)
   }
 
-  if (teacherPassword) {
+  // 3. Persist grade directly to Supabase gradebook
+  const rosterStudent = resolveCanonicalStudent(studentId || sub.studentId || sub.studentName)
+  const canonicalStudentId = rosterStudent?.id || sub.studentId || studentId
+  const effectiveTeacherPass = teacherPassword || teacherPass || '1234'
+
+  if (canonicalStudentId) {
     try {
       await supabase.rpc('teacher_add_grade', {
-        p_password: teacherPassword,
-        p_student_id: studentId,
+        p_password: effectiveTeacherPass,
+        p_student_id: canonicalStudentId,
         p_subject: exam.subject || 'عمومی',
         p_skill: `آزمون: ${sanitizeExamTitle(exam.title, exam.subject)}`,
-        p_score: totalScore,
-        p_max_score: exam.totalPoints || 20,
+        p_score: scaledScore20,
+        p_max_score: 20,
       })
     } catch (e) {
       console.warn('Could not record grade to Supabase gradebook', e)

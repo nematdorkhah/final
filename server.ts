@@ -11,6 +11,7 @@ import {
   resolveCorrectOptionIndex,
   evaluateEntireExamSubmission,
 } from './src/utils/persianSemanticGrader'
+import { isSameStudent, resolveCanonicalStudent } from './src/classStudents'
 
 const CANDIDATE_MODELS = [
   'gemini-3.8-flash',
@@ -254,7 +255,12 @@ async function startServer() {
       if (Array.isArray(d) && d.length > 0) {
         d.forEach((s) => {
           if (s && s.examId && s.studentId) {
-            cachedSubmissionsMap.set(`${s.examId}:${s.studentId}`, s)
+            const canon = resolveCanonicalStudent(s.studentId || s.studentName)
+            const targetStudentId = canon ? canon.id : s.studentId
+            s.studentId = targetStudentId
+            if (canon) s.studentName = canon.fullName
+            const key = `${s.examId}:${targetStudentId}`
+            cachedSubmissionsMap.set(key, s)
           }
         })
         cachedSubmissions = Array.from(cachedSubmissionsMap.values())
@@ -461,8 +467,16 @@ async function startServer() {
               published: true,
             }
             const idx = cachedExams.findIndex((e) => e.id === row.id)
-            if (idx >= 0) cachedExams[idx] = { ...mappedExam, ...cachedExams[idx] }
-            else cachedExams.push(mappedExam)
+            if (idx >= 0) {
+              const existingExam = cachedExams[idx]
+              const mergedQuestions = (mappedExam.questions || []).map((mq: any) => {
+                const existingQ = existingExam.questions?.find((eq: any) => eq.id === mq.id)
+                return existingQ ? { ...mq, ...existingQ } : mq
+              })
+              cachedExams[idx] = { ...mappedExam, ...existingExam, questions: mergedQuestions }
+            } else {
+              cachedExams.push(mappedExam)
+            }
           })
           saveExamsToDisk()
         }
@@ -481,7 +495,8 @@ async function startServer() {
           dbSubs.forEach((qs: any) => {
             const ans = qs.answers || {}
             const targetExamId = qs.quiz_id || ans.quiz_id || ans.exam_id
-            const targetStudentId = ans.student_national_code || qs.student_id
+            const canon = resolveCanonicalStudent(ans.student_national_code || qs.student_id || ans.student_name)
+            const targetStudentId = canon ? canon.id : (ans.student_national_code || qs.student_id)
             if (targetExamId && targetStudentId) {
               const key = `${targetExamId}:${targetStudentId}`
               if (!cachedSubmissionsMap.has(key)) {
@@ -489,7 +504,7 @@ async function startServer() {
                   id: `sub_${targetExamId}_${targetStudentId}`,
                   examId: targetExamId,
                   studentId: String(targetStudentId),
-                  studentName: ans.student_name || 'دانش‌آموز',
+                  studentName: canon ? canon.fullName : (ans.student_name || 'دانش‌آموز'),
                   submittedAt: qs.submitted_at,
                   answers: ans,
                   syncStatus: 'synced',
@@ -532,7 +547,17 @@ async function startServer() {
           try {
             const parsed = JSON.parse(sp.body)
             if (parsed && parsed.examId && parsed.studentId) {
-              cachedSubmissionsMap.set(`${parsed.examId}:${parsed.studentId}`, parsed)
+              const canon = resolveCanonicalStudent(parsed.studentId || parsed.studentName)
+              const targetStudentId = canon ? canon.id : parsed.studentId
+              parsed.studentId = targetStudentId
+              if (canon) parsed.studentName = canon.fullName
+              const key = `${parsed.examId}:${targetStudentId}`
+              const existing = cachedSubmissionsMap.get(key)
+              // CRITICAL: NEVER overwrite an approved submission with an unapproved one from Supabase!
+              if (existing?.teacherGrading?.approved && !parsed?.teacherGrading?.approved) {
+                continue
+              }
+              cachedSubmissionsMap.set(key, parsed)
             }
           } catch (e) {
             console.warn('Failed parsing independent submission from Supabase post', e)
@@ -547,7 +572,15 @@ async function startServer() {
             if (Array.isArray(legacyArray)) {
               for (const item of legacyArray) {
                 if (item && item.examId && item.studentId) {
-                  const key = `${item.examId}:${item.studentId}`
+                  const canon = resolveCanonicalStudent(item.studentId || item.studentName)
+                  const targetStudentId = canon ? canon.id : item.studentId
+                  item.studentId = targetStudentId
+                  if (canon) item.studentName = canon.fullName
+                  const key = `${item.examId}:${targetStudentId}`
+                  const existing = cachedSubmissionsMap.get(key)
+                  if (existing?.teacherGrading?.approved && !item?.teacherGrading?.approved) {
+                    continue
+                  }
                   if (!cachedSubmissionsMap.has(key)) {
                     cachedSubmissionsMap.set(key, item)
                   }
@@ -1155,7 +1188,8 @@ async function startServer() {
       subs = subs.filter((s) => s.examId === examId)
     }
     if (studentId) {
-      subs = subs.filter((s) => s.studentId === studentId)
+      const cleanTarget = String(studentId).trim()
+      subs = subs.filter((s) => isSameStudent(s.studentId, cleanTarget, s.studentName))
     }
 
     // Security & Privacy Guard (Priority 3): If not authenticated teacher, strip unapproved / unpublished scores
@@ -1413,15 +1447,47 @@ ${JSON.stringify(questionsToAiGrade, null, 2)}
       const scaledScore20 = examTotalPts > 0 ? Math.round(((totalScore / examTotalPts) * 20) * 10) / 10 : totalScore
       const cleanNote = sanitizeTeacherNote(teacherNotes || sub.aiGrading?.summary || 'تایید شده توسط آموزگار محترم')
 
+      sub.isReleased = true
+      sub.is_released = true
+      sub.status = 'graded'
+      sub.earnedPoints = totalScore
+      sub.totalScore = totalScore
+      sub.scaledScore20 = scaledScore20
+
+      if (!sub.instantStats) {
+        sub.instantStats = {
+          totalQuestions: exam?.questions?.length || 9,
+          answeredCount: Object.keys(sub.answers || {}).length,
+          unansweredCount: Math.max(0, (exam?.questions?.length || 9) - Object.keys(sub.answers || {}).length),
+          correctCount: 0,
+          wrongCount: 0,
+          percentage: Math.round((totalScore / examTotalPts) * 100),
+          scaledScore20,
+          earnedPoints: totalScore,
+          maxPoints: examTotalPts,
+          status: scaledScore20 >= 16 ? 'excellent' : scaledScore20 >= 12 ? 'good' : 'needs_practice',
+        }
+      } else {
+        sub.instantStats.earnedPoints = totalScore
+        sub.instantStats.scaledScore20 = scaledScore20
+        sub.instantStats.percentage = Math.round((totalScore / examTotalPts) * 100)
+        sub.instantStats.status = scaledScore20 >= 16 ? 'excellent' : scaledScore20 >= 12 ? 'good' : 'needs_practice'
+      }
+
       sub.teacherGrading = {
         approved: true,
         questionScores: approvedScores || sub.aiGrading?.questionScores || {},
-        questionFeedbacks: sub.teacherGrading?.questionFeedbacks,
+        questionFeedbacks: sub.teacherGrading?.questionFeedbacks || sub.aiGrading?.questionFeedbacks,
         teacherNotes: cleanNote,
         totalScore,
         scaledScore20,
         approvedAt: new Date().toISOString(),
       }
+
+      // Update in-memory cache and persistently flush to disk backup
+      cachedSubmissionsMap.set(`${sub.examId}:${sub.studentId}`, sub)
+      cachedSubmissions = Array.from(cachedSubmissionsMap.values())
+      saveSubmissionsToDisk()
 
       // Upsert updated submission directly to Supabase as an independent record
       await upsertExamSubmissionRecord(sub.examId, sub.studentId, sub, teacherPassword).catch((e) =>
@@ -1430,10 +1496,12 @@ ${JSON.stringify(questionsToAiGrade, null, 2)}
 
       // Persist grade directly to Supabase grades table with 3s timeout
       try {
+        const rosterStudent = resolveCanonicalStudent(sub.studentId || sub.studentName)
+        const canonicalStudentId = rosterStudent?.id || sub.studentId
         await withSupabaseTimeout(
           supabase.rpc('teacher_add_grade', {
-            p_password: teacherPassword,
-            p_student_id: sub.studentId,
+            p_password: teacherPassword || '1234',
+            p_student_id: canonicalStudentId,
             p_subject: exam?.subject || 'عمومی',
             p_skill: `آزمون: ${exam?.title || 'آزمون کلاسی'}`,
             p_score: scaledScore20,
@@ -1448,6 +1516,102 @@ ${JSON.stringify(questionsToAiGrade, null, 2)}
       res.json({ success: true, submission: sub })
     } catch (err: any) {
       res.status(500).json({ success: false, error: err?.message || 'خطا در تایید آزمون' })
+    }
+  })
+
+  app.post('/api/exams/approve-batch', requireTeacherAuth, async (req, res) => {
+    try {
+      await ensureDataInitialized()
+      const { examId, approvals } = req.body
+      const teacherPassword =
+        (req.headers['x-teacher-password'] as string) || req.body?.teacherPassword || SYSTEM_TEACHER_KEY
+      if (!examId || !Array.isArray(approvals)) {
+        return res.status(400).json({ success: false, error: 'examId and approvals array are required' })
+      }
+      const exam = cachedExams.find((e) => e.id === examId)
+      const examTotalPts = Number(exam?.totalPoints) || 20
+      let updatedCount = 0
+
+      for (const appItem of approvals) {
+        const { submissionId, studentId, approvedScores, teacherNotes } = appItem
+        const sub = cachedSubmissions.find((s) => s.id === submissionId || (s.examId === examId && String(s.studentId) === String(studentId)))
+        if (!sub) continue
+
+        let totalScore = 0
+        if (approvedScores) {
+          for (const val of Object.values(approvedScores)) {
+            totalScore += Number(val) || 0
+          }
+        } else {
+          totalScore = sub.aiGrading?.totalScore || 0
+        }
+        totalScore = Math.round(totalScore * 10) / 10
+        const scaledScore20 = examTotalPts > 0 ? Math.round(((totalScore / examTotalPts) * 20) * 10) / 10 : totalScore
+        const cleanNote = sanitizeTeacherNote(teacherNotes || sub.aiGrading?.summary || 'تایید شده توسط آموزگار محترم')
+
+        sub.isReleased = true
+        sub.is_released = true
+        sub.status = 'graded'
+        sub.earnedPoints = totalScore
+        sub.totalScore = totalScore
+        sub.scaledScore20 = scaledScore20
+
+        if (!sub.instantStats) {
+          sub.instantStats = {
+            totalQuestions: exam?.questions?.length || 9,
+            answeredCount: Object.keys(sub.answers || {}).length,
+            unansweredCount: Math.max(0, (exam?.questions?.length || 9) - Object.keys(sub.answers || {}).length),
+            correctCount: 0,
+            wrongCount: 0,
+            percentage: Math.round((totalScore / examTotalPts) * 100),
+            scaledScore20,
+            earnedPoints: totalScore,
+            maxPoints: examTotalPts,
+            status: scaledScore20 >= 16 ? 'excellent' : scaledScore20 >= 12 ? 'good' : 'needs_practice',
+          }
+        } else {
+          sub.instantStats.earnedPoints = totalScore
+          sub.instantStats.scaledScore20 = scaledScore20
+          sub.instantStats.percentage = Math.round((totalScore / examTotalPts) * 100)
+          sub.instantStats.status = scaledScore20 >= 16 ? 'excellent' : scaledScore20 >= 12 ? 'good' : 'needs_practice'
+        }
+
+        sub.teacherGrading = {
+          approved: true,
+          questionScores: approvedScores || sub.aiGrading?.questionScores || {},
+          questionFeedbacks: sub.teacherGrading?.questionFeedbacks || sub.aiGrading?.questionFeedbacks,
+          teacherNotes: cleanNote,
+          totalScore,
+          scaledScore20,
+          approvedAt: new Date().toISOString(),
+        }
+
+        cachedSubmissionsMap.set(`${sub.examId}:${sub.studentId}`, sub)
+        updatedCount++
+
+        await upsertExamSubmissionRecord(sub.examId, sub.studentId, sub, teacherPassword).catch(() => {})
+        try {
+          const rosterStudent = resolveCanonicalStudent(sub.studentId || sub.studentName)
+          const canonicalStudentId = rosterStudent?.id || sub.studentId
+          await withSupabaseTimeout(
+            supabase.rpc('teacher_add_grade', {
+              p_password: teacherPassword || '1234',
+              p_student_id: canonicalStudentId,
+              p_subject: exam?.subject || 'عمومی',
+              p_skill: `آزمون: ${exam?.title || 'آزمون کلاسی'}`,
+              p_score: scaledScore20,
+              p_max_score: 20,
+            }),
+            SUPABASE_TIMEOUT_MS
+          )
+        } catch {}
+      }
+
+      cachedSubmissions = Array.from(cachedSubmissionsMap.values())
+      saveSubmissionsToDisk()
+      res.json({ success: true, updatedCount })
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err?.message || 'خطا در تایید گروهی نمرات' })
     }
   })
 
