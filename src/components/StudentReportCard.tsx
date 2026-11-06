@@ -57,6 +57,7 @@ export default function StudentReportCard({
         ) || null
     }
 
+    const officialDbScore = Number(g.score) || 0
     if (matchedSub && matchedExam) {
       const isApprovedOrReleased = Boolean(
         matchedSub.teacherGrading?.approved ||
@@ -67,12 +68,22 @@ export default function StudentReportCard({
       )
       if (isApprovedOrReleased) {
         const eff = getSubmissionEffectiveScore(matchedExam, matchedSub)
-        rawScore = eff.totalScore
-        rawMax = eff.maxPoints
+        if (eff.scaledScore20 >= officialDbScore || officialDbScore === 0) {
+          rawScore = eff.totalScore
+          rawMax = eff.maxPoints
+        } else {
+          if (matchedExam.totalPoints) {
+            rawScore = Math.round(((officialDbScore / 20) * matchedExam.totalPoints) * 10) / 10
+            rawMax = matchedExam.totalPoints
+          }
+        }
       }
+    } else if (matchedExam && matchedExam.totalPoints && officialDbScore > 0) {
+      rawScore = Math.round(((officialDbScore / 20) * matchedExam.totalPoints) * 10) / 10
+      rawMax = matchedExam.totalPoints
     }
 
-    const scaledScore = rawMax > 0 ? Math.round(((rawScore / rawMax) * 20) * 10) / 10 : rawScore
+    const scaledScore = rawMax > 0 ? Math.round(((rawScore / rawMax) * 20) * 10) / 10 : (officialDbScore || rawScore)
     const cleanLabel = sanitizeTeacherFeedback(sanitizeExamTitle(g.skill || g.subject || 'عمومی', g.subject))
 
     let qualitativeStatus = 'خیلی خوب'

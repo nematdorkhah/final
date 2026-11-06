@@ -12,7 +12,7 @@ import AttachmentViewerModal from '../components/AttachmentViewerModal'
 import ExamReviewModal from '../components/ExamReviewModal'
 import StudentReportCard from '../components/StudentReportCard'
 import MathRenderer from '../components/MathRenderer'
-import { Exam } from '../types/examTypes'
+import { Exam, StudentExamSubmission } from '../types/examTypes'
 import {
   fetchPublishedExams,
   fetchExamSubmissions,
@@ -75,8 +75,24 @@ export default function StudentDashboard({
     } catch {}
     return []
   })
-  const [myAttendance, setMyAttendance] = useState<any[]>([])
-  const [exams, setExams] = useState<Exam[]>([])
+  const [myAttendance, setMyAttendance] = useState<any[]>(() => {
+    try {
+      if (typeof localStorage !== 'undefined' && student?.id) {
+        const raw = localStorage.getItem(`cached_attendance_${student.id}`)
+        if (raw) return JSON.parse(raw)
+      }
+    } catch {}
+    return []
+  })
+  const [exams, setExams] = useState<Exam[]>(() => {
+    try {
+      const cached = getLocalExams()
+      if (Array.isArray(cached) && cached.length > 0) {
+        return cached.filter((e) => e.published !== false)
+      }
+    } catch {}
+    return []
+  })
   const [takingExam, setTakingExam] = useState<Exam | null>(null)
   const [loading, setLoading] = useState(() => {
     try {
@@ -103,6 +119,7 @@ export default function StudentDashboard({
   const [viewingAttachmentUrl, setViewingAttachmentUrl] = useState<string | null>(null)
   const [viewingAttachmentTitle, setViewingAttachmentTitle] = useState<string>('فایل پیوست')
   const [reviewExamData, setReviewExamData] = useState<{ exam: any; submission: any } | null>(null)
+  const [myExamSubs, setMyExamSubs] = useState<StudentExamSubmission[]>([])
   const [showReportCardModal, setShowReportCardModal] = useState(false)
   const [currentTime, setCurrentTime] = useState(Date.now())
   const hasLoadedOnce = useRef(false)
@@ -282,7 +299,7 @@ export default function StudentDashboard({
         fetchExamSubmissions(undefined, canonicalStudentId),
       ])
 
-      const [p, sub, g, att, examList] = (await Promise.race([fetchPromise, timeoutPromise])) as any[]
+      const [p, sub, g, att, examList, examSubsList] = (await Promise.race([fetchPromise, timeoutPromise])) as any[]
 
       // Filter out all system posts so students only see genuine announcements and homework
       const rawPosts = p?.data || []
@@ -291,6 +308,9 @@ export default function StudentDashboard({
       setMySubmissions(sub?.data || [])
       setMyGrades(g?.data || [])
       setMyAttendance(att?.data || [])
+      if (Array.isArray(examSubsList)) {
+        setMyExamSubs(examSubsList)
+      }
 
       try {
         if (typeof localStorage !== 'undefined') {
@@ -435,8 +455,9 @@ export default function StudentDashboard({
 
   // Combined grades merging Supabase grades with local exam scores
   const combinedGrades = useMemo(() => {
-    const localExams = getLocalExams()
-    const examSubs = getLocalSubmissions().filter(
+    const localExams = exams.length > 0 ? exams : getLocalExams()
+    const allSubs = myExamSubs.length > 0 ? myExamSubs : getLocalSubmissions()
+    const examSubs = allSubs.filter(
       (s) => isSameStudent(s.studentId, student.id, s.studentName, student.full_name || (student as any).fullName)
     )
     const examMap = new Map(localExams.map((e) => [e.id, e]))
@@ -450,7 +471,7 @@ export default function StudentDashboard({
           const matchedExam = g.exam || (g.examId ? examMap.get(g.examId) : null)
           const matchedSub = g.sub || (g.examId ? subMap.get(g.examId) : null)
           if (matchedExam) {
-            const isApproved = matchedSub?.teacherGrading?.approved === true || matchedSub?.status === 'released'
+            const isApproved = matchedSub?.teacherGrading?.approved === true || matchedSub?.status === 'released' || matchedSub?.status === 'approved'
             const isReleased = isExamResultsReleased(matchedExam, matchedSub)
             if (!isApproved || !isReleased) return false
           }
@@ -473,7 +494,14 @@ export default function StudentDashboard({
         }
 
         if (matchedExam && !matchedSub) {
-          matchedSub = subMap.get(matchedExam.id) || null
+          matchedSub =
+            subMap.get(matchedExam.id) ||
+            allSubs.find(
+              (s) =>
+                (s.examId === matchedExam.id || s.examId === g.examId) &&
+                isSameStudent(s.studentId, student.id, s.studentName, student.full_name || (student as any).fullName)
+            ) ||
+            null
         }
 
         let officialScore = Number(g.score) || 0
@@ -485,12 +513,18 @@ export default function StudentDashboard({
         if (matchedExam && matchedSub) {
           const eff = getSubmissionEffectiveScore(matchedExam, matchedSub)
           if (eff.isApproved) {
-            officialScore = eff.scaledScore20
+            // Never downgrade an official teacher score recorded in database!
+            officialScore = Math.max(officialScore, eff.scaledScore20)
             officialMaxScore = 20
             rawEarned = eff.totalScore
             rawTotal = eff.maxPoints
             officialNotes = matchedSub.teacherGrading?.teacherNotes || officialNotes
           }
+        }
+        
+        if (matchedExam && matchedExam.totalPoints && rawEarned === undefined) {
+          rawEarned = Math.round(((officialScore / 20) * matchedExam.totalPoints) * 10) / 10
+          rawTotal = matchedExam.totalPoints
         }
 
         return {
@@ -551,7 +585,7 @@ export default function StudentDashboard({
       seenAssessmentKeys.add(key)
       return true
     })
-  }, [myGrades, student.id])
+  }, [myGrades, student.id, exams, myExamSubs])
 
   // Teacher report card recommendation note
   const reportNote = useMemo(() => {
@@ -589,13 +623,49 @@ export default function StudentDashboard({
     })
   }, [posts, mySubmissions])
 
-  // Exams are visible for 3 days after scheduled date/deadline, then archived to report card only!
+  // Active exams for home dashboard
   const activeExams = useMemo(() => {
-    return exams.filter((e) => !isItemExpiredForStudent(e, 3))
-  }, [exams])
+    return exams
+      .filter((e) => {
+        if (!e || e.published === false) return false
+        const sub = getStudentExamSubmission(e.id, student.id)
+        if (!sub) return true
+        return !isItemExpiredForStudent(e, 5)
+      })
+      .sort((a, b) => {
+        const subA = getStudentExamSubmission(a.id, student.id)
+        const subB = getStudentExamSubmission(b.id, student.id)
+        if (!subA && subB) return -1
+        if (subA && !subB) return 1
+        return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+      })
+  }, [exams, student.id])
+
+  // Dedicated list for Homework (تکالیف) tab:
+  // ONLY includes active homework assignments (e.g. آزمون تقسیم), strictly excluding concluded past exams (e.g. املای درس اول و دوم)
+  const homeworkAssignments = useMemo(() => {
+    return exams
+      .filter((e) => {
+        if (!e || e.published === false) return false
+        // Concluded spelling exam has ended and belongs in report card / home archive
+        if (e.id === 'a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2' || e.title.includes('املای درس اول و دوم')) {
+          return false
+        }
+        return true
+      })
+      .sort((a, b) => {
+        const subA = getStudentExamSubmission(a.id, student.id)
+        const subB = getStudentExamSubmission(b.id, student.id)
+        if (!subA && subB) return -1
+        if (subA && !subB) return 1
+        return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+      })
+  }, [exams, student.id])
 
   const submittedIds = new Set(mySubmissions.map((s) => s.post_id))
-  const pendingCount = homeworkPosts.filter((p) => !submittedIds.has(p.id)).length
+  const pendingExamCount = homeworkAssignments.filter((e) => !getStudentExamSubmission(e.id, student.id)).length
+  const pendingHwCount = homeworkPosts.filter((p) => !submittedIds.has(p.id)).length
+  const pendingCount = pendingHwCount + pendingExamCount
 
   const newUnsubmittedHomeworks = useMemo(() => {
     return homeworkPosts.filter((p) => !submittedIds.has(p.id))
@@ -1013,7 +1083,7 @@ export default function StudentDashboard({
             </div>
 
             {/* INTERACTIVE ASSIGNMENTS & ONLINE EXAMS SECTION */}
-            {activeExams.length > 0 && (
+            {homeworkAssignments.length > 0 && (
               <div className="space-y-3">
                 <div className="flex items-center gap-2">
                   <span className="text-lg">🌟</span>
@@ -1022,7 +1092,7 @@ export default function StudentDashboard({
                   </h3>
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {activeExams.map((assignment) => {
+                  {homeworkAssignments.map((assignment) => {
                     const sub = getStudentExamSubmission(assignment.id, student.id)
                     const isSubmitted = Boolean(sub)
                     const isApproved = Boolean(sub?.teacherGrading?.approved || (sub as any)?.approved)
@@ -1030,15 +1100,31 @@ export default function StudentDashboard({
                     return (
                       <div
                         key={assignment.id}
-                        className="bg-blue-50/60 border border-blue-200/90 rounded-2xl p-4.5 shadow-xs flex flex-col justify-between"
+                        className={`rounded-2xl p-4.5 transition-all flex flex-col justify-between cursor-pointer group ${
+                          !isSubmitted
+                            ? 'bg-gradient-to-br from-blue-50/80 via-white to-indigo-50/60 border-2 border-blue-400 hover:border-blue-600 shadow-sm hover:shadow-md ring-2 ring-blue-100/70'
+                            : isApproved
+                            ? 'bg-white hover:bg-slate-50/60 border border-slate-200/90 hover:border-slate-300 shadow-2xs'
+                            : 'bg-white hover:bg-amber-50/30 border border-amber-200 hover:border-amber-400 shadow-2xs'
+                        }`}
+                        onClick={() => setTakingExam(assignment)}
                       >
                         <div>
                           <div className="flex justify-between items-start gap-2 mb-2">
                             <div>
-                              <span className="text-[11px] font-black bg-blue-100 text-blue-800 px-2 py-0.5 rounded-md">
-                                {assignment.subject} · {isQuizMode ? 'آزمون آنلاین' : 'تکلیف تعاملی'}
-                              </span>
-                              <h4 className="text-base font-black text-slate-900 mt-1.5 mb-1">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className={`text-[11px] font-black px-2.5 py-0.5 rounded-md ${
+                                  !isSubmitted ? 'bg-blue-600 text-white' : 'bg-blue-100 text-blue-800'
+                                }`}>
+                                  {assignment.subject || 'عمومی'} · {isQuizMode ? 'آزمون آنلاین' : 'تکلیف تعاملی'}
+                                </span>
+                                {!isSubmitted && (
+                                  <span className="text-[10px] font-black bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-md animate-pulse">
+                                    🟢 جدید · آماده انجام
+                                  </span>
+                                )}
+                              </div>
+                              <h4 className="text-base font-black text-slate-900 group-hover:text-blue-700 transition-colors mt-2 mb-1">
                                 {sanitizeExamTitle(assignment.title, assignment.subject)}
                               </h4>
                             </div>
@@ -1048,20 +1134,20 @@ export default function StudentDashboard({
                                   ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
                                   : isSubmitted
                                   ? 'bg-amber-50 text-amber-800 border-amber-200'
-                                  : 'bg-slate-100 text-slate-700 border-slate-200'
+                                  : 'bg-rose-50 text-rose-700 border-rose-200 font-black'
                               }`}
                             >
                               {isApproved ? '✅ تایید شد' : isSubmitted ? '✓ ارسال شد' : '⭕ در انتظار حل'}
                             </span>
                           </div>
 
-                          <div className="text-xs text-slate-500 mb-3">
-                            <span>
-                              تعداد سوالات: {toPersianDigits(assignment.questions?.length || 0)} سوال · بارم:{' '}
-                              {toPersianDigits(assignment.totalPoints || 20)} نمره
-                            </span>
+                          <div className="text-xs text-slate-500 mb-3 space-y-1">
+                            <div className="font-semibold text-slate-600">
+                              تعداد سوالات: <strong className="text-slate-800">{toPersianDigits(assignment.questions?.length || 0)} سوال</strong> · بارم:{' '}
+                              <strong className="text-slate-800">{toPersianDigits(assignment.totalPoints || 20)} نمره</strong>
+                            </div>
                             {assignment.dueDate && (
-                              <div className="mt-1 text-blue-700 font-bold">
+                              <div className="text-blue-700 font-bold">
                                 ⏰ مهلت تحویل: {toPersianDigits(new Date(assignment.dueDate).toLocaleString('fa-IR'))}
                               </div>
                             )}
@@ -1070,8 +1156,17 @@ export default function StudentDashboard({
 
                         <button
                           type="button"
-                          className="w-full py-2 px-3 text-xs font-black text-white bg-blue-600 hover:bg-blue-700 rounded-xl shadow-xs transition-colors cursor-pointer inline-flex items-center justify-center gap-1.5"
-                          onClick={() => setTakingExam(assignment)}
+                          className={`w-full py-2.5 px-3 text-xs font-black rounded-xl transition-all cursor-pointer inline-flex items-center justify-center gap-1.5 ${
+                            !isSubmitted
+                              ? 'text-white bg-blue-600 hover:bg-blue-700 group-hover:bg-blue-700 shadow-sm'
+                              : isApproved
+                              ? 'text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200'
+                              : 'text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200'
+                          }`}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setTakingExam(assignment)
+                          }}
                         >
                           {isApproved
                             ? '📊 مشاهده کارنامه و نمره'
@@ -1088,7 +1183,7 @@ export default function StudentDashboard({
               </div>
             )}
 
-            {homeworkPosts.length === 0 && activeExams.length === 0 && (
+            {homeworkPosts.length === 0 && homeworkAssignments.length === 0 && (
               <div className="bg-white border border-slate-200/80 rounded-2xl p-8 text-center shadow-xs">
                 <div className="w-14 h-14 mx-auto mb-3 rounded-2xl bg-slate-50 text-slate-400 flex items-center justify-center text-2xl shadow-2xs">
                   📝
@@ -1513,7 +1608,7 @@ export default function StudentDashboard({
                         badgeLabel = 'خوب'
                       }
 
-                      const hasReview = Boolean(g.matchedExam && g.matchedSub)
+                      const hasReview = Boolean(g.matchedExam)
 
                       return (
                         <div
@@ -1524,11 +1619,21 @@ export default function StudentDashboard({
                               : 'border-slate-200/80'
                           }`}
                           onClick={() => {
-                            if (hasReview) {
-                              setReviewExamData({
-                                exam: g.matchedExam,
-                                submission: g.matchedSub,
-                              })
+                            if (g.matchedExam) {
+                              const sub =
+                                g.matchedSub ||
+                                (myExamSubs.length > 0 ? myExamSubs : getLocalSubmissions()).find(
+                                  (s) =>
+                                    (s.examId === g.matchedExam.id || s.examId === g.examId) &&
+                                    isSameStudent(s.studentId, student.id, s.studentName, student.full_name || (student as any).fullName)
+                                ) ||
+                                null
+                              if (sub) {
+                                setReviewExamData({
+                                  exam: g.matchedExam,
+                                  submission: sub,
+                                })
+                              }
                             }
                           }}
                         >
@@ -1803,6 +1908,15 @@ export default function StudentDashboard({
           url={viewingAttachmentUrl}
           title={viewingAttachmentTitle || 'فایل پیوست'}
           onClose={() => setViewingAttachmentUrl(null)}
+        />
+      )}
+
+      {/* Student Exam Review Popup Modal */}
+      {reviewExamData && (
+        <ExamReviewModal
+          exam={reviewExamData.exam}
+          submission={reviewExamData.submission}
+          onClose={() => setReviewExamData(null)}
         />
       )}
     </div>

@@ -10,6 +10,7 @@ import {
   safeNumber,
   safeScore,
   safeScaled20,
+  getSubmissionEffectiveScore,
 } from '../utils/persianSemanticGrader'
 
 interface ExamReviewModalProps {
@@ -133,16 +134,11 @@ export default function ExamReviewModal({
   }
 
 
-  // Calculate score scaled to 20
-  const maxScore = safeNumber(exam.totalPoints || exam.totalScore, 20) || 20
-  const rawScore = safeScore(
-    submission?.teacherGrading?.totalScore ??
-    submission?.aiGrading?.totalScore ??
-    submission?.studentScore ??
-    0,
-    maxScore
-  )
-  const scaledScore = safeScaled20(rawScore, maxScore)
+  // Calculate authoritative effective score scaled to 20
+  const eff = getSubmissionEffectiveScore(exam, submission)
+  const maxScore = eff.maxPoints || safeNumber(exam.totalPoints || exam.totalScore, 20) || 20
+  const rawScore = eff.totalScore
+  const scaledScore = eff.scaledScore20
 
   const questions: any[] = exam.questions || []
   const answers: Record<string, any> = submission.answers || {}
@@ -306,18 +302,24 @@ export default function ExamReviewModal({
               const blankEval = !isMultiChoice ? evaluateFillInTheBlank(q, rawAns) : null
               const isCorrectBlank = blankEval?.status === 'correct'
 
-              // Earned score for question
-              const earned = safeScore(
-                submission.teacherGrading?.questionScores?.[q.id] ??
-                submission.aiGrading?.questionScores?.[q.id] ??
-                (isMultiChoice ? (mcEval?.score ?? 0) : (blankEval?.score ?? 0)),
-                qPoints
-              )
+              // Question 1 (q2) of spelling exam is strictly graded per teacher instructions (only option 2 is correct)
+              const isBonusToAll = q.id === 'q2' ? false : Boolean(q.awardFullScoreToAll || q.allOptionsCorrect || q.allAnswersCorrect || q.isBonusToAll)
 
-              const feedback =
-                submission.teacherGrading?.questionFeedbacks?.[q.id] ||
-                submission.aiGrading?.questionFeedbacks?.[q.id] ||
-                (isMultiChoice ? mcEval?.feedback : blankEval?.feedback)
+              // Earned score for question
+              const earned = isBonusToAll
+                ? qPoints
+                : safeScore(
+                    submission.teacherGrading?.questionScores?.[q.id] ??
+                    submission.aiGrading?.questionScores?.[q.id] ??
+                    (isMultiChoice ? (mcEval?.score ?? 0) : (blankEval?.score ?? 0)),
+                    qPoints
+                  )
+
+              const feedback = isBonusToAll
+                ? `✅ با تصمیم آموزگار، نمره کامل این سوال به تمامی دانش‌آموزان اختصاص داده شد (+${toPersianDigits(qPoints)} نمره)`
+                : (submission.teacherGrading?.questionFeedbacks?.[q.id] ||
+                    submission.aiGrading?.questionFeedbacks?.[q.id] ||
+                    (isMultiChoice ? mcEval?.feedback : blankEval?.feedback))
 
               const isPassed = earned >= qPoints * 0.75
               const isPartial = earned > 0 && earned < qPoints * 0.75

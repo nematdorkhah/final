@@ -179,10 +179,9 @@ async function callGeminiWithFallbacks(prompt: string, responseJson = false): Pr
 
 async function startServer() {
   const app = express()
-  const PORT = parseInt(
-    process.env.PORT || (process.env.NODE_ENV === 'production' ? '8080' : '3000'),
-    10
-  )
+  const portArgIdx = process.argv.indexOf('--port')
+  const cliPort = portArgIdx !== -1 && process.argv[portArgIdx + 1] ? parseInt(process.argv[portArgIdx + 1], 10) : null
+  const PORT = cliPort || (process.env.NODE_ENV === 'production' && process.env.PORT ? parseInt(process.env.PORT, 10) : 3000)
 
   app.use(express.json({ limit: '20mb' }))
 
@@ -599,13 +598,26 @@ async function startServer() {
         const loadedExamsMap = new Map<string, any>()
         // Seed with existing cached exams from disk backup
         cachedExams.forEach((e: any) => { if (e && e.id) loadedExamsMap.set(e.id, e) })
+        const mergeExamSafely = (incoming: any) => {
+          if (!incoming || !incoming.id) return
+          const existing = loadedExamsMap.get(incoming.id)
+          if (!existing) {
+            loadedExamsMap.set(incoming.id, incoming)
+            return
+          }
+          const mergedQuestions = (incoming.questions || []).map((mq: any) => {
+            const eq = existing.questions?.find((x: any) => x.id === mq.id)
+            return eq ? { ...mq, ...eq } : mq
+          })
+          loadedExamsMap.set(incoming.id, { ...incoming, ...existing, questions: mergedQuestions })
+        }
         for (const p of examPosts) {
           try {
             const parsed = JSON.parse(p.body)
             if (Array.isArray(parsed)) {
-              parsed.forEach((e: any) => { if (e && e.id) loadedExamsMap.set(e.id, e) })
+              parsed.forEach(mergeExamSafely)
             } else if (parsed && parsed.id) {
-              loadedExamsMap.set(parsed.id, parsed)
+              mergeExamSafely(parsed)
             }
           } catch {}
         }

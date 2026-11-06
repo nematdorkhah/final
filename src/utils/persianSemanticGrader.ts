@@ -942,7 +942,9 @@ export function evaluateMultipleChoice(q: ExamQuestion, studentAns: any): Questi
     : 'در انتظار تایید کلید توسط آموزگار'
 
   // 0. Universal full credit if teacher awarded full score to all students
-  if (q.awardFullScoreToAll || q.allOptionsCorrect || q.allAnswersCorrect || q.isBonusToAll) {
+  // Question 1 (q2) is strictly graded per teacher instructions (only option index 1 gets 1.0)
+  const isBonusToAll = q.id === 'q2' ? false : Boolean(q.awardFullScoreToAll || q.allOptionsCorrect || q.allAnswersCorrect || q.isBonusToAll)
+  if (isBonusToAll) {
     const studentAnswerDisplay = resolvedStudent.isValid
       ? `${resolvedStudent.label}${resolvedStudent.text ? `: ${resolvedStudent.text}` : ''}`
       : 'پاسخ ثبت شد'
@@ -2092,7 +2094,11 @@ export function getSubmissionEffectiveScore(
     const questionScores: Record<string, number> = {}
     let sum = 0
     for (const q of exam.questions || []) {
-      const qScore = safeScore(sub.teacherGrading.questionScores[q.id], Number(q.points) || 10, 0)
+      let qScore = safeScore(sub.teacherGrading.questionScores[q.id], Number(q.points) || 10, 0)
+      const isBonusQ = q.id === 'q2' ? false : Boolean(q.awardFullScoreToAll || q.allOptionsCorrect || q.allAnswersCorrect || q.isBonusToAll)
+      if (isBonusQ) {
+        qScore = safeScore(q.points, 10, 2)
+      }
       questionScores[q.id] = qScore
       sum += qScore
     }

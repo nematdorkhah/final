@@ -46,10 +46,10 @@
           "برگ درختان سبز در نظر هوشیار، هر ورقش دفتری‌ست معرفت کردگار، وز باد سحرگاهی شگفت‌زده و مضطرب نهراسید."
         ],
         "correctAnswer": 3,
-        "awardFullScoreToAll": true,
-        "allOptionsCorrect": true,
         "rubricOrHint": "در متن درس کلمه‌ی «شگفت‌زده» آمده است اما ترکیب‌های تحریف‌شده ساختگی ندارد و ساختار سایر گزینه‌ها کاملاً با متن منطبق است؛ همچنین توجه به واژگان هوشیار و کردگار.",
-        "points": 1
+        "points": 1,
+        "awardFullScoreToAll": true,
+        "allOptionsCorrect": true
       },
       {
         "id": "q10",

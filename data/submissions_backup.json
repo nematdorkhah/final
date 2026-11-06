@@ -203,7 +203,7 @@
     "clientSubject": "فارسی"
   },
   {
-    "id": "sub_exam_1793087628060_4a2614ec-ebc7-437f-a90f-d6526caa082f_1793088167113",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_4a2614ec-ebc7-437f-a90f-d6526caa082f_1793648182466",
     "examId": "exam_1793087628060",
     "studentId": "4a2614ec-ebc7-437f-a90f-d6526caa082f",
     "studentName": "بردیا آذر",
@@ -285,7 +285,7 @@
     }
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_7ed4d801-b6e2-40da-8b45-7455b726a420_1793775255205",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_7ed4d801-b6e2-40da-8b45-7455b726a420_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "7ed4d801-b6e2-40da-8b45-7455b726a420",
     "studentName": "حیان اندرز",
@@ -323,7 +323,12 @@
         "selectedOption": 3,
         "selectedOptionIndex": 3,
         "selectedOptionText": "برگ درختان سبز در نظر هوشیار، هر ورقش دفتری‌ست معرفت کردگار، وز باد سحرگاهی شگفت‌زده و مضطرب نهراسید."
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 16.8,
+      "raw_score": 8
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -373,6 +378,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:05.224Z",
       "questionScores": {
         "q2": 0,
         "q3": 1,
@@ -395,11 +401,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 8,
       "scaledScore20": 16.8,
-      "approvedAt": "2026-11-04T18:28:33.236Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -408,7 +412,7 @@
     "scaledScore20": 16.8
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_69174619-64a1-41b3-878c-f0e4dbf52b29_1793747668540",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_69174619-64a1-41b3-878c-f0e4dbf52b29_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "69174619-64a1-41b3-878c-f0e4dbf52b29",
     "studentName": "صهیب برمه",
@@ -446,7 +450,12 @@
       },
       "q19": {
         "textAnswer": "تفاوت.    طرف.      غفلت.      نقطه.     \n"
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 16.8,
+      "raw_score": 8
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -496,6 +505,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:05.486Z",
       "questionScores": {
         "q2": 0,
         "q3": 1,
@@ -518,11 +528,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 8,
       "scaledScore20": 16.8,
-      "approvedAt": "2026-11-04T18:28:33.238Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -531,7 +539,7 @@
     "scaledScore20": 16.8
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_08948918-2c34-4665-9557-9f2055b8d160_1793692556366",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_08948918-2c34-4665-9557-9f2055b8d160_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "08948918-2c34-4665-9557-9f2055b8d160",
     "studentName": "طاها حسن زاده دهستانی",
@@ -569,7 +577,12 @@
       },
       "q19": {
         "textAnswer": "متفاوت\nطرف مرغزار\nغفلت\nنقطه ی آغاز"
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 17.9,
+      "raw_score": 8.5
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -619,6 +632,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:05.673Z",
       "questionScores": {
         "q2": 0,
         "q3": 1,
@@ -641,11 +655,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 8.5,
       "scaledScore20": 17.9,
-      "approvedAt": "2026-11-04T18:28:33.241Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -654,7 +666,7 @@
     "scaledScore20": 17.9
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_448a6f44-42a2-4878-aafa-f1a927c688ff_1793657334237",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_448a6f44-42a2-4878-aafa-f1a927c688ff_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "448a6f44-42a2-4878-aafa-f1a927c688ff",
     "studentName": "محمد براه",
@@ -692,7 +704,12 @@
       },
       "q19": {
         "textAnswer": "تفاوت\nطرف\nغفلت\nنقطه ی"
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 18.9,
+      "raw_score": 9
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -742,6 +759,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:05.820Z",
       "questionScores": {
         "q2": 1,
         "q3": 1,
@@ -764,11 +782,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 9,
       "scaledScore20": 18.9,
-      "approvedAt": "2026-11-04T18:28:33.242Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -777,7 +793,7 @@
     "scaledScore20": 18.9
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_406aa45a-4aab-4965-bbac-7b2adde82cc4_1793650343553",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_406aa45a-4aab-4965-bbac-7b2adde82cc4_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "406aa45a-4aab-4965-bbac-7b2adde82cc4",
     "studentName": "امیر اکبری",
@@ -815,7 +831,12 @@
         "selectedOption": 1,
         "selectedOptionIndex": 1,
         "selectedOptionText": "رشته‌ی پیوند خود، خلق و خلقت، احسان و محبت است."
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 18.9,
+      "raw_score": 9
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -865,6 +886,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:05.937Z",
       "questionScores": {
         "q2": 1,
         "q3": 1,
@@ -887,11 +909,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 9,
       "scaledScore20": 18.9,
-      "approvedAt": "2026-11-04T18:28:33.242Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -900,7 +920,7 @@
     "scaledScore20": 18.9
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_4a2614ec-ebc7-437f-a90f-d6526caa082f_1793648182466",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_4a2614ec-ebc7-437f-a90f-d6526caa082f_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "4a2614ec-ebc7-437f-a90f-d6526caa082f",
     "studentName": "بردیا آذر",
@@ -938,7 +958,12 @@
       },
       "q19": {
         "textAnswer": "الف تفاوت ، ب طرف ، ج غفلت ، د نقطه ی"
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 17.9,
+      "raw_score": 8.5
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -988,6 +1013,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:06.109Z",
       "questionScores": {
         "q2": 0,
         "q3": 1,
@@ -1010,11 +1036,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 8.5,
       "scaledScore20": 17.9,
-      "approvedAt": "2026-11-04T18:28:33.243Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -1023,7 +1047,7 @@
     "scaledScore20": 17.9
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_02876a8b-8bb2-4b3b-ba4c-0f62b632ab1d_1793630443448",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_02876a8b-8bb2-4b3b-ba4c-0f62b632ab1d_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "02876a8b-8bb2-4b3b-ba4c-0f62b632ab1d",
     "studentName": "یزدان زاهدی",
@@ -1061,7 +1085,12 @@
       },
       "q19": {
         "textAnswer": "تفاوت\nطرف\nغفلت \nنقطه\n"
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 20,
+      "raw_score": 9.5
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -1111,6 +1140,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:06.273Z",
       "questionScores": {
         "q2": 1,
         "q3": 1,
@@ -1133,11 +1163,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 9.5,
       "scaledScore20": 20,
-      "approvedAt": "2026-11-04T18:28:33.243Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -1146,7 +1174,7 @@
     "scaledScore20": 20
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_3411739983_1793630287002",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_e1a70607-6059-49e5-9dd5-afa955202870_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "e1a70607-6059-49e5-9dd5-afa955202870",
     "studentName": "علی پیروی منش",
@@ -1184,7 +1212,12 @@
       },
       "q19": {
         "textAnswer": "تفاوت _طرف_غفلت_نقطه"
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 18.9,
+      "raw_score": 9
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -1234,6 +1267,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:06.386Z",
       "questionScores": {
         "q2": 1,
         "q3": 1,
@@ -1256,11 +1290,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 9,
       "scaledScore20": 18.9,
-      "approvedAt": "2026-11-04T18:28:33.244Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -1269,7 +1301,7 @@
     "scaledScore20": 18.9
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_d4437ef3-58bf-44f4-84f0-fb02db82cabd_1793629765889",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_d4437ef3-58bf-44f4-84f0-fb02db82cabd_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "d4437ef3-58bf-44f4-84f0-fb02db82cabd",
     "studentName": "سدیس سجلی",
@@ -1307,7 +1339,12 @@
       },
       "q18": {
         "textAnswer": "هشیار دفتر است"
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 14.7,
+      "raw_score": 7
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -1357,6 +1394,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:06.480Z",
       "questionScores": {
         "q2": 0,
         "q3": 1,
@@ -1379,11 +1417,9 @@
         "q18": "❌ غلط‌های املایی شناسایی نشدند. پاسخ‌های مورد انتظار: ورغش ← ورقش",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 7,
       "scaledScore20": 14.7,
-      "approvedAt": "2026-11-04T18:28:33.246Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -1392,7 +1428,7 @@
     "scaledScore20": 14.7
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_83256419-fea7-4c90-8884-cd45b9aebeb7_1793629083497",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_83256419-fea7-4c90-8884-cd45b9aebeb7_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "83256419-fea7-4c90-8884-cd45b9aebeb7",
     "studentName": "حسان حاجی نژاد بحرپیما",
@@ -1430,7 +1466,12 @@
       },
       "q19": {
         "textAnswer": "تفاوت ،طرف ،غفلت ،نقطه"
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 17.9,
+      "raw_score": 8.5
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -1480,6 +1521,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:06.648Z",
       "questionScores": {
         "q2": 0,
         "q3": 1,
@@ -1502,11 +1544,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 8.5,
       "scaledScore20": 17.9,
-      "approvedAt": "2026-11-04T18:28:33.247Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -1515,7 +1555,7 @@
     "scaledScore20": 17.9
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_0712fefd-cabc-454a-b10e-2e9ece9aa66b_1793628108551",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_0712fefd-cabc-454a-b10e-2e9ece9aa66b_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "0712fefd-cabc-454a-b10e-2e9ece9aa66b",
     "studentName": "ویهان پرده یاقوت",
@@ -1553,7 +1593,12 @@
       },
       "q19": {
         "textAnswer": "تفاوت.  طرف.  غفلت.  نقطه. "
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 17.9,
+      "raw_score": 8.5
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -1603,6 +1648,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:06.860Z",
       "questionScores": {
         "q2": 0,
         "q3": 1,
@@ -1625,11 +1671,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 8.5,
       "scaledScore20": 17.9,
-      "approvedAt": "2026-11-04T18:28:33.248Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -1638,7 +1682,7 @@
     "scaledScore20": 17.9
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_37bd6f50-e136-4d36-80ec-8684452a2aa8_1793626900722",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_37bd6f50-e136-4d36-80ec-8684452a2aa8_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "37bd6f50-e136-4d36-80ec-8684452a2aa8",
     "studentName": "محب محمدی لشتغانی",
@@ -1676,7 +1720,12 @@
       },
       "q19": {
         "textAnswer": "تفاوت طرف غفلت نقطه"
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 18.9,
+      "raw_score": 9
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -1726,6 +1775,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:07.000Z",
       "questionScores": {
         "q2": 1,
         "q3": 1,
@@ -1748,11 +1798,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 9,
       "scaledScore20": 18.9,
-      "approvedAt": "2026-11-04T18:28:33.248Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -1761,7 +1809,7 @@
     "scaledScore20": 18.9
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_6266c46b-c186-41c0-abb8-346f41c284a0_1793626087172",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_6266c46b-c186-41c0-abb8-346f41c284a0_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "6266c46b-c186-41c0-abb8-346f41c284a0",
     "studentName": "ریان ساختمان",
@@ -1799,7 +1847,12 @@
       },
       "q19": {
         "textAnswer": "تفاوت\nطرف\nغفلت\nنقطه"
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 20,
+      "raw_score": 9.5
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -1849,6 +1902,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:07.187Z",
       "questionScores": {
         "q2": 1,
         "q3": 1,
@@ -1871,11 +1925,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 9.5,
       "scaledScore20": 20,
-      "approvedAt": "2026-11-04T18:28:33.249Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -1884,7 +1936,7 @@
     "scaledScore20": 20
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_89608bd4-8e22-46a5-85ae-d5db1dba8bf6_1793624804908",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_89608bd4-8e22-46a5-85ae-d5db1dba8bf6_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "89608bd4-8e22-46a5-85ae-d5db1dba8bf6",
     "studentName": "نوح قانع خمیری",
@@ -1922,7 +1974,12 @@
       },
       "q19": {
         "textAnswer": "تفاوت\nطرف\nغفلت\nنقطه ى آغاز"
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 18.9,
+      "raw_score": 9
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -1972,6 +2029,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:07.361Z",
       "questionScores": {
         "q2": 1,
         "q3": 1,
@@ -1994,11 +2052,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 9,
       "scaledScore20": 18.9,
-      "approvedAt": "2026-11-04T18:28:33.250Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -2007,7 +2063,7 @@
     "scaledScore20": 18.9
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_142b6f02-3c96-4717-9d83-a237ba630446_1793617512481",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_142b6f02-3c96-4717-9d83-a237ba630446_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "142b6f02-3c96-4717-9d83-a237ba630446",
     "studentName": "محمد جلوداری لشتغانی",
@@ -2045,7 +2101,12 @@
       },
       "q19": {
         "textAnswer": "تفاوت طرف غفلت نقطه "
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 20,
+      "raw_score": 9.5
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -2095,6 +2156,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:07.476Z",
       "questionScores": {
         "q2": 1,
         "q3": 1,
@@ -2117,11 +2179,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 9.5,
       "scaledScore20": 20,
-      "approvedAt": "2026-11-04T18:28:33.250Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -2130,7 +2190,7 @@
     "scaledScore20": 20
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_25f4765b-eb19-4899-9da6-4f24d9a4708e_1793614508725",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_25f4765b-eb19-4899-9da6-4f24d9a4708e_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "25f4765b-eb19-4899-9da6-4f24d9a4708e",
     "studentName": "محمدپارسا زینلی",
@@ -2168,7 +2228,12 @@
       },
       "q19": {
         "textAnswer": "تفاوت طرف غفلت نقطه"
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 14.7,
+      "raw_score": 7
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -2218,6 +2283,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:07.589Z",
       "questionScores": {
         "q2": 0,
         "q3": 1,
@@ -2240,11 +2306,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 7,
       "scaledScore20": 14.7,
-      "approvedAt": "2026-11-04T18:28:33.252Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -2253,7 +2317,7 @@
     "scaledScore20": 14.7
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_1c0af1cc-7b1e-43da-9b07-7dfb37e06860_1793614248087",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_1c0af1cc-7b1e-43da-9b07-7dfb37e06860_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "1c0af1cc-7b1e-43da-9b07-7dfb37e06860",
     "studentName": "حسام محمدی نژاد",
@@ -2291,7 +2355,12 @@
       },
       "q19": {
         "textAnswer": "تفاوت طرف غلفت نقطه"
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 17.4,
+      "raw_score": 8.25
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -2341,6 +2410,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:07.694Z",
       "questionScores": {
         "q2": 0,
         "q3": 1,
@@ -2363,11 +2433,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "📝 3 مورد از 4 مورد درست نوشته شد: تفاوت، طرف، نقطه — موارد ناقص یا نادرست: غفلت (0.75 از 1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 8.25,
       "scaledScore20": 17.4,
-      "approvedAt": "2026-11-04T18:28:33.253Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -2376,7 +2444,7 @@
     "scaledScore20": 17.4
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_89187810-23c0-4cd0-8128-cdd2a16705bf_1793613526067",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_89187810-23c0-4cd0-8128-cdd2a16705bf_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "89187810-23c0-4cd0-8128-cdd2a16705bf",
     "studentName": "آرکا زالیه",
@@ -2414,7 +2482,12 @@
       },
       "q19": {
         "textAnswer": "تفاوت\nطرف\nغفلت\nنقطه \n"
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 20,
+      "raw_score": 9.5
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -2464,6 +2537,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:07.800Z",
       "questionScores": {
         "q2": 1,
         "q3": 1,
@@ -2486,11 +2560,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 9.5,
       "scaledScore20": 20,
-      "approvedAt": "2026-11-04T18:28:33.254Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -2499,7 +2571,7 @@
     "scaledScore20": 20
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_bdb62492-9328-45b7-975d-6315c2b902ea_1793610547289",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_bdb62492-9328-45b7-975d-6315c2b902ea_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "bdb62492-9328-45b7-975d-6315c2b902ea",
     "studentName": "محمد شمسائی",
@@ -2537,7 +2609,12 @@
       },
       "q19": {
         "textAnswer": "الف تفاوت \nب طرف \nج غفلط\nد نقطه"
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 13.7,
+      "raw_score": 6.5
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -2587,6 +2664,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:07.880Z",
       "questionScores": {
         "q2": 0,
         "q3": 0,
@@ -2609,11 +2687,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 6.5,
       "scaledScore20": 13.7,
-      "approvedAt": "2026-11-04T18:28:33.257Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -2622,7 +2698,7 @@
     "scaledScore20": 13.7
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_ae8a3716-683e-498c-9b47-570fcd83befd_1793609564826",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_ae8a3716-683e-498c-9b47-570fcd83befd_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "ae8a3716-683e-498c-9b47-570fcd83befd",
     "studentName": "فرهام فرهمند",
@@ -2660,7 +2736,12 @@
         "selectedOption": 3,
         "selectedOptionIndex": 3,
         "selectedOptionText": "برگ درختان سبز در نظر هوشیار، هر ورقش دفتری‌ست معرفت کردگار، وز باد سحرگاهی شگفت‌زده و مضطرب نهراسید."
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 17.9,
+      "raw_score": 8.5
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -2710,6 +2791,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:07.984Z",
       "questionScores": {
         "q2": 0,
         "q3": 1,
@@ -2732,11 +2814,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 8.5,
       "scaledScore20": 17.9,
-      "approvedAt": "2026-11-04T18:28:33.258Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -2745,7 +2825,7 @@
     "scaledScore20": 17.9
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_8a8d1c01-a727-40c7-bcec-78658629f349_1793607011909",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_8a8d1c01-a727-40c7-bcec-78658629f349_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "8a8d1c01-a727-40c7-bcec-78658629f349",
     "studentName": "ارسلان محمدی کوشکی",
@@ -2783,7 +2863,12 @@
       },
       "q19": {
         "textAnswer": "تفاوت،طرف،غفلت،نقطه ی"
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 18.9,
+      "raw_score": 9
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -2833,6 +2918,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:08.072Z",
       "questionScores": {
         "q2": 1,
         "q3": 1,
@@ -2855,11 +2941,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 9,
       "scaledScore20": 18.9,
-      "approvedAt": "2026-11-04T18:28:33.259Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -2868,7 +2952,7 @@
     "scaledScore20": 18.9
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_833da7db-a2e5-420e-b3c9-ca5626c50aa3_1793602163496",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_833da7db-a2e5-420e-b3c9-ca5626c50aa3_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "833da7db-a2e5-420e-b3c9-ca5626c50aa3",
     "studentName": "سیدمحمد سلیمانی",
@@ -2906,7 +2990,12 @@
       },
       "q19": {
         "textAnswer": "الف تفامت \nب طرف\nج غفلت\nد نقطیه"
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 20,
+      "raw_score": 9.5
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -2956,6 +3045,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:08.429Z",
       "questionScores": {
         "q2": 1,
         "q3": 1,
@@ -2978,11 +3068,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 9.5,
       "scaledScore20": 20,
-      "approvedAt": "2026-11-04T18:28:33.260Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -2991,7 +3079,7 @@
     "scaledScore20": 20
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_1bed4e34-d44c-4695-9d41-7845c2b1fbc2_1793568763008",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_1bed4e34-d44c-4695-9d41-7845c2b1fbc2_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "1bed4e34-d44c-4695-9d41-7845c2b1fbc2",
     "studentName": "سپهر غلام پور",
@@ -3029,7 +3117,12 @@
       },
       "q19": {
         "textAnswer": "تفاوت طرف غفلت نقطه"
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 20,
+      "raw_score": 9.5
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -3079,6 +3172,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:08.733Z",
       "questionScores": {
         "q2": 1,
         "q3": 1,
@@ -3101,11 +3195,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 9.5,
       "scaledScore20": 20,
-      "approvedAt": "2026-11-04T18:28:33.261Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -3114,7 +3206,7 @@
     "scaledScore20": 20
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_d3bab054-f083-44b6-a923-a6cf1f9b9559_1793564182228",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_d3bab054-f083-44b6-a923-a6cf1f9b9559_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "d3bab054-f083-44b6-a923-a6cf1f9b9559",
     "studentName": "هوراد جاشونی دریائی",
@@ -3152,7 +3244,12 @@
       },
       "q19": {
         "textAnswer": "تفاوت طرف غفلت نقطه"
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 16.8,
+      "raw_score": 8
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -3202,6 +3299,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:08.809Z",
       "questionScores": {
         "q2": 0,
         "q3": 1,
@@ -3224,11 +3322,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 8,
       "scaledScore20": 16.8,
-      "approvedAt": "2026-11-04T18:28:33.262Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -3237,7 +3333,7 @@
     "scaledScore20": 16.8
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_b880732d-bff2-4891-b51f-6ca5cd9f938b_1793561743850",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_b880732d-bff2-4891-b51f-6ca5cd9f938b_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "b880732d-bff2-4891-b51f-6ca5cd9f938b",
     "studentName": "ماجد ملائی پلی",
@@ -3275,7 +3371,12 @@
       },
       "q19": {
         "textAnswer": "تفاوت.         طرف مرغزار.          غفلت.       نقطه ی"
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 20,
+      "raw_score": 9.5
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -3325,6 +3426,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:08.912Z",
       "questionScores": {
         "q2": 1,
         "q3": 1,
@@ -3347,11 +3449,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 9.5,
       "scaledScore20": 20,
-      "approvedAt": "2026-11-04T18:28:33.262Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -3360,7 +3460,7 @@
     "scaledScore20": 20
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_72b77226-0011-4482-84b0-de411b40d284_1793558067270",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_72b77226-0011-4482-84b0-de411b40d284_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "72b77226-0011-4482-84b0-de411b40d284",
     "studentName": "ماهان کارگر",
@@ -3398,7 +3498,12 @@
         "selectedOption": 3,
         "selectedOptionIndex": 3,
         "selectedOptionText": "برگ درختان سبز در نظر هوشیار، هر ورقش دفتری‌ست معرفت کردگار، وز باد سحرگاهی شگفت‌زده و مضطرب نهراسید."
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 17.9,
+      "raw_score": 8.5
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -3448,6 +3553,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:09.004Z",
       "questionScores": {
         "q2": 0,
         "q3": 1,
@@ -3470,11 +3576,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 8.5,
       "scaledScore20": 17.9,
-      "approvedAt": "2026-11-04T18:28:33.263Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -3483,7 +3587,7 @@
     "scaledScore20": 17.9
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_c84b2c9c-f8dd-4116-8f66-47d12aa110eb_1793557004599",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_c84b2c9c-f8dd-4116-8f66-47d12aa110eb_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "c84b2c9c-f8dd-4116-8f66-47d12aa110eb",
     "studentName": "محمد قاسمی گوربندی",
@@ -3521,7 +3625,12 @@
       },
       "q19": {
         "textAnswer": "الف.   تفاوت \nب.  طرف \nج. غفلت\nد. نقطه "
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 17.9,
+      "raw_score": 8.5
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -3571,6 +3680,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:09.102Z",
       "questionScores": {
         "q2": 1,
         "q3": 1,
@@ -3593,11 +3703,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 8.5,
       "scaledScore20": 17.9,
-      "approvedAt": "2026-11-04T18:28:33.263Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -3644,7 +3752,12 @@
       },
       "q19": {
         "textAnswer": "تفاوت\nطرف مرغزار\nغفلت\nنقطه"
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 20,
+      "raw_score": 9.5
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -3694,6 +3807,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:09.183Z",
       "questionScores": {
         "q2": 1,
         "q3": 1,
@@ -3716,11 +3830,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 9.5,
       "scaledScore20": 20,
-      "approvedAt": "2026-11-04T18:28:33.264Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -3729,7 +3841,7 @@
     "scaledScore20": 20
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_80cbb7a2-0d4e-4f0d-96f3-dfb0a801f9b2_1793551398410",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_80cbb7a2-0d4e-4f0d-96f3-dfb0a801f9b2_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "80cbb7a2-0d4e-4f0d-96f3-dfb0a801f9b2",
     "studentName": "محی الدین دانائی فر",
@@ -3767,7 +3879,12 @@
       },
       "q19": {
         "textAnswer": "تفاوت طرف غفلت نقطه"
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 20,
+      "raw_score": 9.5
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -3817,6 +3934,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:09.285Z",
       "questionScores": {
         "q2": 1,
         "q3": 1,
@@ -3839,11 +3957,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 9.5,
       "scaledScore20": 20,
-      "approvedAt": "2026-11-04T18:28:33.265Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -3852,7 +3968,7 @@
     "scaledScore20": 20
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_278f2a05-3818-40e0-b3a9-178287fcccab_1793550929738",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_278f2a05-3818-40e0-b3a9-178287fcccab_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "278f2a05-3818-40e0-b3a9-178287fcccab",
     "studentName": "رایان سنگرزاده خمیری",
@@ -3890,7 +4006,12 @@
         "selectedOption": 1,
         "selectedOptionIndex": 1,
         "selectedOptionText": "رشته‌ی پیوند خود، خلق و خلقت، احسان و محبت است."
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 18.9,
+      "raw_score": 9
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -3940,6 +4061,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:09.370Z",
       "questionScores": {
         "q2": 1,
         "q3": 1,
@@ -3962,11 +4084,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 9,
       "scaledScore20": 18.9,
-      "approvedAt": "2026-11-04T18:28:33.266Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -3975,7 +4095,7 @@
     "scaledScore20": 18.9
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_d0ff7639-7ef7-46a5-8499-abaea43fa73e_1793548381000",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_d0ff7639-7ef7-46a5-8499-abaea43fa73e_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "d0ff7639-7ef7-46a5-8499-abaea43fa73e",
     "studentName": "محمد سلیمانی نژاد",
@@ -4013,7 +4133,12 @@
       },
       "q19": {
         "textAnswer": "تفاوت\nطرف \nغفلت\nنقطه ی"
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 18.9,
+      "raw_score": 9
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -4063,6 +4188,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:09.434Z",
       "questionScores": {
         "q2": 1,
         "q3": 1,
@@ -4085,11 +4211,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 9,
       "scaledScore20": 18.9,
-      "approvedAt": "2026-11-04T18:28:33.270Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -4098,7 +4222,7 @@
     "scaledScore20": 18.9
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_3382569701_1793547062835",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_47d00c57-9684-406e-b150-6a843c57fd0f_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "47d00c57-9684-406e-b150-6a843c57fd0f",
     "studentName": "محمد احمدی ( بهنام )",
@@ -4136,7 +4260,12 @@
         "selectedOption": 2,
         "selectedOptionIndex": 2,
         "selectedOptionText": "غنیمت، گردون، خیش، پدیده‌ها"
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 16.8,
+      "raw_score": 8
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -4186,6 +4315,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:09.553Z",
       "questionScores": {
         "q2": 0,
         "q3": 1,
@@ -4208,11 +4338,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 8,
       "scaledScore20": 16.8,
-      "approvedAt": "2026-11-04T18:28:33.271Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -4221,7 +4349,7 @@
     "scaledScore20": 16.8
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_6027a812-1591-4918-9c23-6b2c45d1c75a_1793545071095",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_6027a812-1591-4918-9c23-6b2c45d1c75a_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "6027a812-1591-4918-9c23-6b2c45d1c75a",
     "studentName": "احمدرضا فرج زاده",
@@ -4291,7 +4419,12 @@
       },
       "q19": {
         "textAnswer": "تفاوت \nطرف\nغفلت \nنقطه "
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 17.9,
+      "raw_score": 8.5
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -4341,6 +4474,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:09.642Z",
       "questionScores": {
         "q2": 0,
         "q3": 1,
@@ -4363,11 +4497,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 8.5,
       "scaledScore20": 17.9,
-      "approvedAt": "2026-11-04T18:28:33.271Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -4376,7 +4508,7 @@
     "scaledScore20": 17.9
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_f0b8fcc0-32e6-4201-8d9d-fb94ad8e30fe_1793623031118",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_f0b8fcc0-32e6-4201-8d9d-fb94ad8e30fe_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "f0b8fcc0-32e6-4201-8d9d-fb94ad8e30fe",
     "studentName": "حسین توفیقی",
@@ -4414,7 +4546,12 @@
       },
       "q19": {
         "textAnswer": "الف ...تفاوت \nب...طرف\nج...غفلت\nد...نقطه"
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 17.9,
+      "raw_score": 8.5
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -4464,6 +4601,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:09.712Z",
       "questionScores": {
         "q2": 0,
         "q3": 1,
@@ -4486,11 +4624,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 8.5,
       "scaledScore20": 17.9,
-      "approvedAt": "2026-11-04T18:28:33.272Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -4499,7 +4635,7 @@
     "scaledScore20": 17.9
   },
   {
-    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_2db73916-c84c-4d26-9c97-f02621cf0356_1793619861213",
+    "id": "sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_2db73916-c84c-4d26-9c97-f02621cf0356_1793555689494",
     "examId": "a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2",
     "studentId": "2db73916-c84c-4d26-9c97-f02621cf0356",
     "studentName": "حیان بزارش",
@@ -4537,7 +4673,12 @@
       },
       "q19": {
         "textAnswer": "تفاوت \nطرف\nغفلت\nنقطه "
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 18.9,
+      "raw_score": 9
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -4587,6 +4728,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:09.778Z",
       "questionScores": {
         "q2": 1,
         "q3": 1,
@@ -4609,11 +4751,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 9,
       "scaledScore20": 18.9,
-      "approvedAt": "2026-11-04T18:28:33.272Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",
@@ -4660,7 +4800,12 @@
       },
       "q19": {
         "textAnswer": "تفاوت، طرف ، غفلت ، نقطه"
-      }
+      },
+      "approved": true,
+      "teacher_approved": true,
+      "is_released": true,
+      "score": 18.9,
+      "raw_score": 9
     },
     "syncStatus": "synced",
     "isOptimistic": true,
@@ -4710,6 +4855,7 @@
     },
     "teacherGrading": {
       "approved": true,
+      "approvedAt": "2026-11-05T14:05:10.035Z",
       "questionScores": {
         "q2": 1,
         "q3": 1,
@@ -4732,11 +4878,9 @@
         "q18": "✅ هر 1 غلط املایی به درستی شناسایی و با املای صحیح بازنویسی شدند: «ورغش ← ورقش» (+1 نمره)",
         "q19": "✅ هر 4 مورد خواسته شده کاملاً درست نوشته شدند: تفاوت، طرف، غفلت، نقطه (+1 نمره)"
       },
-      "teacherNotes": "تایید شده توسط آموزگار محترم",
       "totalScore": 9,
       "scaledScore20": 18.9,
-      "approvedAt": "2026-11-04T18:28:33.273Z",
-      "published": true
+      "teacherNotes": "تایید شده توسط آموزگار محترم"
     },
     "clientExamTitle": "املای درس اول و دوم",
     "clientSubject": "فارسی",

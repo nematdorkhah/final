@@ -619,7 +619,7 @@ runTest('31. Real-Data Benchmark: Mohi-eddin Danaifar submission scores 9.5/9.5 
   const exams = JSON.parse(fs.readFileSync('./data/exams_backup.json', 'utf8'))
   const subs = JSON.parse(fs.readFileSync('./data/submissions_backup.json', 'utf8'))
   const exam = exams.find((e: any) => e.id === 'a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2')
-  const mohiSub = subs.find((s: any) => s.id === 'sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_80cbb7a2-0d4e-4f0d-96f3-dfb0a801f9b2_1793551398410')
+  const mohiSub = subs.find((s: any) => s.studentId === '80cbb7a2-0d4e-4f0d-96f3-dfb0a801f9b2' || s.studentName?.includes('محی الدین'))
   assert.ok(exam, 'Exam must exist in backup')
   assert.ok(mohiSub, 'Mohi submission must exist in backup')
 
@@ -635,15 +635,17 @@ runTest('31. Real-Data Benchmark: Mohi-eddin Danaifar submission scores 9.5/9.5 
   assert.strictEqual(res.earnedPoints, Math.round(sumScores * 100) / 100, 'Earned points must mathematically equal sum of questions')
 })
 
-runTest('32. Real-Data Benchmark: Amir Akbari Q6 ("ه") and Q3 bonus earn 1.0 each, total score reaches 9.0/9.5', () => {
+runTest('32. Real-Data Benchmark: Amir Akbari Q6 ("ه"), Q1 bonus, and Q3 bonus earn 1.0 each, total score reaches 9.0/9.5', () => {
   const exams = JSON.parse(fs.readFileSync('./data/exams_backup.json', 'utf8'))
   const subs = JSON.parse(fs.readFileSync('./data/submissions_backup.json', 'utf8'))
   const exam = exams.find((e: any) => e.id === 'a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2')
-  const amirSub = subs.find((s: any) => s.id === 'sub_a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2_406aa45a-4aab-4965-bbac-7b2adde82cc4_1793650343553')
+  const amirSub = subs.find((s: any) => s.studentId === '406aa45a-4aab-4965-bbac-7b2adde82cc4' || s.studentName?.includes('امیر اکبری'))
   assert.ok(exam, 'Exam must exist')
   assert.ok(amirSub, 'Amir Akbari submission must exist')
 
   const res = evaluateEntireExamSubmission(exam, amirSub.answers)
+  assert.strictEqual(res.questionGrading['q2']?.score, 1.0, 'Amir Akbari Q1 (q2) bonus must receive 1.0/1.0')
+  assert.strictEqual(res.questionGrading['q2']?.status, 'correct')
   assert.strictEqual(res.questionGrading['q12']?.score, 1.0, 'Amir Akbari Q6 ("ه") must receive 1.0/1.0')
   assert.strictEqual(res.questionGrading['q12']?.status, 'correct')
   assert.strictEqual(res.questionGrading['q4']?.score, 1.0, 'Amir Akbari Q3 (q4) bonus must receive 1.0/1.0')
@@ -749,6 +751,22 @@ runTest('38. Universal Q3 check: All 36 students in spelling exam receive 1.0 on
   for (const sub of spellingSubs) {
     const res = evaluateEntireExamSubmission(exam, sub.answers)
     assert.strictEqual(res.questionScores['q4'], 1.0, `${sub.studentName} must receive 1.0 on Q3`)
+    const sum = Object.values(res.questionScores).reduce((a: number, b: any) => a + (Number(b) || 0), 0)
+    const diff = Math.abs(res.earnedPoints - Math.round(sum * 100) / 100)
+    assert.ok(diff < 0.001, `Discrepancy for ${sub.studentName} must be 0.00`)
+  }
+})
+
+runTest('39. Universal Q1 (q2) check: All 36 students in spelling exam receive 1.0 full point on Question 1', () => {
+  const exams = JSON.parse(fs.readFileSync('./data/exams_backup.json', 'utf8'))
+  const subs = JSON.parse(fs.readFileSync('./data/submissions_backup.json', 'utf8'))
+  const exam = exams.find((e: any) => e.id === 'a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2')
+  const spellingSubs = subs.filter((s: any) => s.examId === 'a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2')
+
+  assert.strictEqual(spellingSubs.length, 36, 'Must evaluate all 36 students')
+  for (const sub of spellingSubs) {
+    const res = evaluateEntireExamSubmission(exam, sub.answers)
+    assert.strictEqual(res.questionScores['q2'], 1.0, `${sub.studentName} must receive 1.0 on Q1`)
     const sum = Object.values(res.questionScores).reduce((a: number, b: any) => a + (Number(b) || 0), 0)
     const diff = Math.abs(res.earnedPoints - Math.round(sum * 100) / 100)
     assert.ok(diff < 0.001, `Discrepancy for ${sub.studentName} must be 0.00`)
