@@ -10,6 +10,9 @@ export function groupSkillMastery(grades: any[]): SkillGroup[] {
   const subjectMap = new Map<string, { totalScaled: number; count: number; skillMap: Map<string, { totalScaled: number; count: number }> }>()
 
   for (const g of grades) {
+    if (!g) continue
+    if (g.status === 'pending_review' || g.status === 'pending_submission') continue
+    if (g.score === null || g.score === undefined || isNaN(Number(g.score))) continue
     const rawScore = Number(g.score) || 0
     const rawMax = Number(g.max_score) || 20
     const scaledScore = rawMax > 0 ? (rawScore / rawMax) * 20 : rawScore

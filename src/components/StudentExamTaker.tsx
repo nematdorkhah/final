@@ -9,10 +9,13 @@ import {
   InstantExamResult,
   sanitizeExamTitle,
   isExamResultsReleased,
+  saveExamDraftToCloud,
+  getExamDraftFromCloud,
+  deleteExamDraftFromCloud,
 } from '../utils/examStore'
 import { toPersianDigits } from '../utils/persianNumbers'
 import MathRenderer from './MathRenderer'
-import { safeNumber, safeScore, safeScaled20 } from '../utils/persianSemanticGrader'
+import { safeNumber, safeScore, safeScaled20, getSubmissionEffectiveScore } from '../utils/persianSemanticGrader'
 
 interface StudentExamDraft {
   examId: string
@@ -44,6 +47,9 @@ export default function StudentExamTaker({
   const [submittedResult, setSubmittedResult] = useState<StudentExamSubmission | null>(null)
   const [draftRestored, setDraftRestored] = useState(false)
   const [saveIndicator, setSaveIndicator] = useState<'saved' | 'saving'>('saved')
+  const [showExitConfirmModal, setShowExitConfirmModal] = useState(false)
+  const [exitSaveStatus, setExitSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
+  const [exitErrorMessage, setExitErrorMessage] = useState<string | null>(null)
 
   // Canonical storage key for this specific student and exam
   const studentDraftKey = `exam_draft_${exam.id}_${student.id}`
@@ -75,8 +81,18 @@ export default function StudentExamTaker({
   const isAssignment = exam.mode === 'assignment' || Boolean(exam.isUntimed) || Number(exam.durationMinutes) <= 0
   const isPastDue = Boolean(exam.dueDate && new Date(exam.dueDate) < new Date())
 
+  // Cloud draft sync debounce timer ref
+  const cloudDraftTimerRef = useRef<any>(null)
+
+  function syncDraftToCloudAsync(draftObj: StudentExamDraft) {
+    if (cloudDraftTimerRef.current) clearTimeout(cloudDraftTimerRef.current)
+    cloudDraftTimerRef.current = setTimeout(() => {
+      saveExamDraftToCloud(exam.id, String(student.id), student.full_name, draftObj).catch(() => {})
+    }, 1500)
+  }
+
   // Helper to persist draft immediately to localStorage with monotonic elapsedSeconds
-  function persistDraft(updatedAnswers: Record<string, StudentExamAnswer>, qIdx: number = currentQIndex) {
+  function persistDraft(updatedAnswers: Record<string, StudentExamAnswer>, qIdx: number = currentQIndex): boolean {
     try {
       const draftObj: StudentExamDraft = {
         examId: exam.id,
@@ -87,10 +103,52 @@ export default function StudentExamTaker({
         elapsedSeconds: elapsedSecondsRef.current,
         lastSavedAt: Date.now(),
       }
-      localStorage.setItem(studentDraftKey, JSON.stringify(draftObj))
+      const serialized = JSON.stringify(draftObj)
+      localStorage.setItem(studentDraftKey, serialized)
+      localStorage.setItem(legacyDraftKey, serialized)
       setSaveIndicator('saved')
+      syncDraftToCloudAsync(draftObj)
+      return true
     } catch (err) {
       console.warn('Failed saving exam draft to localStorage', err)
+      return false
+    }
+  }
+
+  async function handleTemporaryExit() {
+    setExitSaveStatus('saving')
+    setExitErrorMessage(null)
+    try {
+      const ok = persistDraft(answersRef.current, currentQIndex)
+      if (!ok) {
+        setExitSaveStatus('error')
+        setExitErrorMessage('خطا در ذخیره‌سازی پاسخ‌ها در حافظه مرورگر. لطفاً مجدداً امتحان کنید.')
+        return
+      }
+
+      // Immediately sync draft to Supabase and server so other devices get it instantly!
+      const draftObj: StudentExamDraft = {
+        examId: exam.id,
+        studentId: String(student.id),
+        answers: answersRef.current,
+        startTime: startTimeRef.current,
+        currentQIndex,
+        elapsedSeconds: elapsedSecondsRef.current,
+        lastSavedAt: Date.now(),
+      }
+      await saveExamDraftToCloud(exam.id, String(student.id), student.full_name, draftObj).catch((e) => {
+        console.warn('Cloud draft sync warning upon exit:', e)
+      })
+
+      setExitSaveStatus('saved')
+      setTimeout(() => {
+        sessionStorage.removeItem('active_taking_exam_id')
+        setShowExitConfirmModal(false)
+        onClose()
+      }, 500)
+    } catch (err: any) {
+      setExitSaveStatus('error')
+      setExitErrorMessage('خطا در ذخیره‌سازی موقت: ' + (err?.message || 'حافظه در دسترس نیست'))
     }
   }
 
@@ -98,14 +156,26 @@ export default function StudentExamTaker({
   useEffect(() => {
     // Check if exam already submitted
     const prevSub = getStudentExamSubmission(exam.id, student.id)
+    const isApprovedOrReleased = Boolean(
+      prevSub?.teacherGrading?.approved ||
+      (prevSub && isExamResultsReleased(exam, prevSub))
+    )
+
     if (prevSub) {
       setExistingSubmission(prevSub)
-      setSubmittedResult(prevSub)
       if (prevSub.answers) {
         setAnswers(prevSub.answers)
         answersRef.current = prevSub.answers
+      }
+
+      // If timed exam, or past due date, or officially approved/released by teacher: lock in results view
+      if (!isAssignment || isPastDue || isApprovedOrReleased) {
+        setSubmittedResult(prevSub)
         return
       }
+
+      // Untimed exam before deadline: keep in live editing mode so student can modify or complete answers
+      setSubmittedResult(null)
     }
 
     // Restore local draft from localStorage if page refreshed or disconnected mid-exam
@@ -180,6 +250,28 @@ export default function StudentExamTaker({
           return
         }
       }
+
+      // Check cloud draft (Supabase & server) for cross-device synchronization
+      getExamDraftFromCloud(exam.id, String(student.id)).then((cloudDraft) => {
+        if (cloudDraft && cloudDraft.answers && typeof cloudDraft.answers === 'object') {
+          const localRaw = localStorage.getItem(studentDraftKey)
+          let localTime = 0
+          if (localRaw) {
+            try { localTime = JSON.parse(localRaw)?.lastSavedAt || 0 } catch {}
+          }
+          // If cloud draft is newer or local is empty, restore cloud draft
+          if (!localTime || (cloudDraft.lastSavedAt && cloudDraft.lastSavedAt > localTime)) {
+            console.log('[ExamTaker] Restoring newer cloud draft from Supabase/server for cross-device sync')
+            setAnswers((prev) => ({ ...prev, ...cloudDraft.answers }))
+            answersRef.current = { ...answersRef.current, ...cloudDraft.answers }
+            if (typeof cloudDraft.currentQIndex === 'number' && cloudDraft.currentQIndex >= 0 && cloudDraft.currentQIndex < exam.questions.length) {
+              setCurrentQIndex(cloudDraft.currentQIndex)
+            }
+            setDraftRestored(true)
+            localStorage.setItem(studentDraftKey, JSON.stringify(cloudDraft))
+          }
+        }
+      }).catch(() => {})
 
       // Persist draft immediately so startTime and elapsedSeconds are firmly established
       const initialDraft: StudentExamDraft = {
@@ -295,12 +387,13 @@ export default function StudentExamTaker({
       // 2. Celebratory confetti animation
       confetti({ particleCount: 90, spread: 75, origin: { y: 0.6 } })
 
-      // 3. Clear in-progress drafts from storage
+      // 3. Clear in-progress drafts from storage (local & cloud)
       try {
         localStorage.removeItem(studentDraftKey)
         localStorage.removeItem(legacyDraftKey)
         sessionStorage.removeItem('active_taking_exam_id')
       } catch {}
+      deleteExamDraftFromCloud(exam.id, String(student.id))
 
       // 4. Instantly display result screen without blocking
       setSubmittedResult(sub)
@@ -408,20 +501,33 @@ export default function StudentExamTaker({
               )}
             </div>
 
-            <button
-              type="button"
-              onClick={onClose}
-              className="w-full py-3 px-4 bg-slate-900 hover:bg-slate-800 active:scale-95 text-white font-black text-sm rounded-xl transition-all shadow-md cursor-pointer"
-            >
-              متوجه شدم (بازگشت به کلاس)
-            </button>
+            <div className="flex flex-col sm:flex-row gap-2.5 mt-2">
+              {isAssignment && !isPastDue && (
+                <button
+                  type="button"
+                  onClick={() => setSubmittedResult(null)}
+                  className="flex-1 py-3 px-4 bg-blue-600 hover:bg-blue-700 active:scale-95 text-white font-black text-xs sm:text-sm rounded-xl transition-all shadow-md cursor-pointer flex items-center justify-center gap-1.5"
+                >
+                  <span>✏️</span>
+                  <span>ویرایش و تغییر پاسخ‌ها</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={onClose}
+                className="flex-1 py-3 px-4 bg-slate-900 hover:bg-slate-800 active:scale-95 text-white font-black text-xs sm:text-sm rounded-xl transition-all shadow-md cursor-pointer"
+              >
+                متوجه شدم (بازگشت به کلاس)
+              </button>
+            </div>
           </div>
         </div>
       )
     }
 
     // 2. If results ARE officially released: Show full report card & answers breakdown
-    const isApproved = sub.teacherGrading?.approved
+    const eff = getSubmissionEffectiveScore(exam, sub)
+    const isApproved = eff.isApproved
     const isSyncing = sub.syncStatus === 'syncing'
     const isFailed = sub.syncStatus === 'failed'
 
@@ -429,12 +535,14 @@ export default function StudentExamTaker({
     const stats: InstantExamResult =
       sub.instantStats || computeInstantExamResult(exam, sub.answers || {})
 
-    const maxPts = safeNumber(stats.maxPoints || exam.totalPoints, 20) || 20
+    const maxPts = eff.maxPoints || safeNumber(stats.maxPoints || exam.totalPoints, 20) || 20
     const finalScore = isApproved
-      ? safeScore(sub.teacherGrading?.totalScore ?? stats.earnedPoints, maxPts)
+      ? eff.totalScore
       : safeScore(sub.aiGrading?.totalScore ?? stats.earnedPoints, maxPts)
 
-    const finalScaled20 = safeScaled20(finalScore, maxPts)
+    const finalScaled20 = isApproved
+      ? eff.scaledScore20
+      : safeScaled20(finalScore, maxPts)
 
     return (
       <div
@@ -491,21 +599,21 @@ export default function StudentExamTaker({
               <span className="text-sm sm:text-base font-bold text-slate-400">از ۲۰</span>
             </div>
             <div className="text-xs font-bold text-slate-600 mt-1">
-              (معادل {toPersianDigits(finalScore)} از {toPersianDigits(stats.maxPoints)} بارم کل)
+              (معادل {toPersianDigits(finalScore)} از {toPersianDigits(maxPts)} بارم کل)
             </div>
 
             {/* Performance status pill */}
             <div className="mt-3 flex justify-center">
               <span
                 className={`px-3 py-1 rounded-full text-xs font-black shadow-2xs ${
-                  stats.percentage >= 80
+                  finalScaled20 >= 16
                     ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
-                    : stats.percentage >= 60
+                    : finalScaled20 >= 12
                     ? 'bg-blue-100 text-blue-800 border border-blue-200'
                     : 'bg-amber-100 text-amber-800 border border-amber-200'
                 }`}
               >
-                {stats.percentage >= 80 ? 'سطح: عالی و درخشان 🌟' : stats.percentage >= 60 ? 'سطح: خوب و رضایت‌بخش 👍' : 'سطح: نیازمند تمرین بیشتر 📚'}
+                {finalScaled20 >= 16 ? 'سطح: عالی و درخشان 🌟' : finalScaled20 >= 12 ? 'سطح: خوب و رضایت‌بخش 👍' : 'سطح: نیازمند تمرین بیشتر 📚'}
               </span>
             </div>
           </div>
@@ -568,10 +676,20 @@ export default function StudentExamTaker({
             <div className="max-h-52 overflow-y-auto space-y-2 pr-1">
               {exam.questions.map((q, idx) => {
                 const qMax = safeScore(q.points, 10, 2)
-                const qScore = safeScore(sub.teacherGrading?.questionScores?.[q.id] ?? stats.questionScores[q.id] ?? 0, qMax)
+                const qScore = safeScore(
+                  sub.teacherGrading?.questionScores?.[q.id] ??
+                  eff.questionScores?.[q.id] ??
+                  stats.questionScores?.[q.id] ?? 0,
+                  qMax
+                )
                 const isFull = qScore >= qMax
                 const isZero = qScore === 0
-                const fb = (sub.teacherGrading?.questionFeedbacks?.[q.id] ?? stats.questionFeedbacks[q.id]) || ''
+                let fb = (sub.teacherGrading?.questionFeedbacks?.[q.id] ?? stats.questionFeedbacks?.[q.id]) || ''
+                if (q.id === 'q2' && fb.includes('با تصمیم آموزگار')) {
+                  fb = qScore > 0
+                    ? '✅ پاسخ کاملاً درست است (+1 نمره)'
+                    : '❌ پاسخ نادرست است. گزینه ۲ (معرفت، سپاس‌داری، پایبند، مشاهده) صحیح می‌باشد.'
+                }
 
                 return (
                   <div
@@ -728,21 +846,28 @@ export default function StudentExamTaker({
             <button
               type="button"
               onClick={() => {
-                if (confirm('آیا می‌خواهید موقتاً از محیط آزمون خارج شوید؟ تمام پاسخ‌های ثبت‌شده و زمان سپری‌شده در مرورگر شما ذخیره شده باقی می‌ماند و می‌توانید مجدداً آزمون را ادامه دهید.')) {
-                  sessionStorage.removeItem('active_taking_exam_id')
-                  onClose()
-                }
+                setExitSaveStatus('idle')
+                setExitErrorMessage(null)
+                setShowExitConfirmModal(true)
               }}
               style={{
                 background: '#F1F5F9',
-                border: '1px solid #CBD5E1',
-                borderRadius: 8,
-                padding: '4px 8px',
-                fontSize: 12,
+                border: '1.5px solid #CBD5E1',
+                borderRadius: 10,
+                padding: '6px 12px',
+                fontSize: 12.5,
+                fontWeight: 800,
+                color: '#334155',
                 cursor: 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 5,
+                boxShadow: '0 1px 2px rgba(0,0,0,0.05)',
               }}
+              title="ذخیره موقت پاسخ‌ها و خروج به کلاس بدون نهایی‌سازی"
             >
-              ✕ خروج موقت
+              <span>✕</span>
+              <span>خروج موقت</span>
             </button>
           </div>
         </div>
@@ -1149,6 +1274,128 @@ export default function StudentExamTaker({
                 style={{ flex: 1, background: '#10B981' }}
               >
                 {submitting ? 'در حال ثبت پاسخ‌ها...' : 'تایید و ثبت نهایی 🚀'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* IN-APP TEMPORARY EXIT MODAL */}
+      {showExitConfirmModal && (
+        <div
+          dir="rtl"
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(15, 23, 42, 0.75)',
+            backdropFilter: 'blur(4px)',
+            zIndex: 100000,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 16,
+          }}
+          onClick={() => {
+            if (exitSaveStatus !== 'saving') setShowExitConfirmModal(false)
+          }}
+        >
+          <div
+            style={{
+              background: '#FFFFFF',
+              borderRadius: 24,
+              padding: 24,
+              maxWidth: 440,
+              width: '100%',
+              border: '2px solid #0F172A',
+              textAlign: 'center',
+              boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ fontSize: 44, marginBottom: 8 }}>💾</div>
+            <h3 style={{ fontSize: 18, fontWeight: 900, color: '#0F172A', margin: '0 0 8px 0' }}>
+              ذخیره موقت و خروج از آزمون
+            </h3>
+            <p style={{ fontSize: 13, color: '#475569', margin: '0 0 14px 0', lineHeight: 1.6 }}>
+              آیا می‌خواهید موقتاً از محیط آزمون خارج شوید؟
+              <br />
+              تمام پاسخ‌های ثبت‌شده شما تا این لحظه (<strong>{toPersianDigits(answeredCount)}</strong> از <strong>{toPersianDigits(exam.questions.length)}</strong> سوال) به صورت کامل ذخیره می‌شود و وضعیت آزمون <strong>در حال انجام</strong> باقی می‌ماند تا هر زمان خواستید بتوانید آن را ادامه دهید.
+            </p>
+
+            {exitErrorMessage && (
+              <div
+                style={{
+                  background: '#FEE2E2',
+                  border: '1px solid #FCA5A5',
+                  color: '#991B1B',
+                  borderRadius: 12,
+                  padding: '8px 12px',
+                  fontSize: 12,
+                  fontWeight: 800,
+                  marginBottom: 14,
+                }}
+              >
+                ⚠️ {exitErrorMessage}
+              </div>
+            )}
+
+            {exitSaveStatus === 'saved' && (
+              <div
+                style={{
+                  background: '#DCFCE7',
+                  border: '1px solid #86EFAC',
+                  color: '#166534',
+                  borderRadius: 12,
+                  padding: '8px 12px',
+                  fontSize: 12,
+                  fontWeight: 800,
+                  marginBottom: 14,
+                }}
+              >
+                ✅ پاسخ‌ها با موفقیت ذخیره شدند. در حال انتقال به کلاس...
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
+              <button
+                type="button"
+                disabled={exitSaveStatus === 'saving'}
+                onClick={() => setShowExitConfirmModal(false)}
+                style={{
+                  flex: 1,
+                  padding: '10px 14px',
+                  borderRadius: 12,
+                  fontSize: 13,
+                  fontWeight: 800,
+                  background: '#F1F5F9',
+                  border: '1px solid #CBD5E1',
+                  color: '#334155',
+                  cursor: 'pointer',
+                }}
+              >
+                ↩️ ادامه آزمون
+              </button>
+              <button
+                type="button"
+                disabled={exitSaveStatus === 'saving'}
+                onClick={handleTemporaryExit}
+                style={{
+                  flex: 1,
+                  padding: '10px 14px',
+                  borderRadius: 12,
+                  fontSize: 13,
+                  fontWeight: 800,
+                  background: exitSaveStatus === 'saved' ? '#059669' : '#2563EB',
+                  color: '#FFFFFF',
+                  border: 'none',
+                  cursor: 'pointer',
+                }}
+              >
+                {exitSaveStatus === 'saving'
+                  ? 'در حال ذخیره‌سازی...'
+                  : exitSaveStatus === 'saved'
+                  ? 'ذخیره شد ✓'
+                  : '💾 ذخیره و خروج موقت'}
               </button>
             </div>
           </div>

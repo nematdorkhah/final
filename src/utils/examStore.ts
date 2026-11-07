@@ -1030,8 +1030,33 @@ export function mergeSubmissionsDeduplicated(
           ? {
               ...(secondary.teacherGrading || {}),
               ...(primary.teacherGrading || {}),
-              totalScore: primary.teacherGrading?.totalScore ?? secondary.teacherGrading?.totalScore ?? 0,
-              scaledScore20: primary.teacherGrading?.scaledScore20 ?? secondary.teacherGrading?.scaledScore20 ?? 0,
+              questionScores:
+                primary.teacherGrading?.questionScores ||
+                secondary.teacherGrading?.questionScores,
+              questionFeedbacks:
+                primary.teacherGrading?.questionFeedbacks ||
+                secondary.teacherGrading?.questionFeedbacks,
+              teacherNotes:
+                primary.teacherGrading?.teacherNotes ||
+                secondary.teacherGrading?.teacherNotes,
+              totalScore: (() => {
+                const qScores =
+                  primary.teacherGrading?.questionScores ||
+                  secondary.teacherGrading?.questionScores
+                if (qScores && typeof qScores === 'object') {
+                  const sum = Object.values(qScores).reduce(
+                    (acc: number, v: any) => acc + (Number(v) || 0),
+                    0
+                  )
+                  if (sum > 0) return Math.round(sum * 100) / 100
+                }
+                const pTot = primary.teacherGrading?.totalScore
+                const sTot = secondary.teacherGrading?.totalScore
+                return pTot !== undefined ? pTot : (sTot !== undefined ? sTot : 0)
+              })(),
+              scaledScore20:
+                primary.teacherGrading?.scaledScore20 ??
+                secondary.teacherGrading?.scaledScore20 ?? 0,
               approved: true,
             }
           : primary.teacherGrading || secondary.teacherGrading,
@@ -1166,6 +1191,32 @@ export async function fetchExamSubmissions(examId?: string, studentId?: string):
             answersObj.is_released ||
             answersObj.isReleased
           )
+          const rawScore = Number(
+            answersObj.raw_score ??
+            answersObj.totalScore ??
+            answersObj.earnedPoints ??
+            answersObj.teacherGrading?.totalScore
+          )
+          const scaledScore = Number(
+            qs.score ??
+            answersObj.score ??
+            answersObj.scaledScore20 ??
+            answersObj.teacherGrading?.scaledScore20
+          )
+          const existingTeacherGrading = answersObj.teacherGrading || {}
+          const qScores = answersObj.questionScores || existingTeacherGrading.questionScores
+          const qFeedbacks = answersObj.questionFeedbacks || existingTeacherGrading.questionFeedbacks
+          const teacherNotes = answersObj.teacherNotes || existingTeacherGrading.teacherNotes
+
+          let calculatedRaw = !isNaN(rawScore) && rawScore > 0 ? rawScore : 0
+          if (qScores && typeof qScores === 'object') {
+            const sum = Object.values(qScores).reduce((acc: number, v: any) => acc + (Number(v) || 0), 0)
+            if (sum > 0) calculatedRaw = Math.round(sum * 100) / 100
+          }
+          if (calculatedRaw <= 0 && !isNaN(scaledScore) && scaledScore > 0) {
+            calculatedRaw = scaledScore
+          }
+
           fetchedList.push({
             id: subId,
             examId: targetExamId,
@@ -1178,8 +1229,11 @@ export async function fetchExamSubmissions(examId?: string, studentId?: string):
             is_released: isApproved,
             status: isApproved ? 'graded' : 'pending_approval',
             teacherGrading: {
-              totalScore: Number(qs.score) || 0,
-              scaledScore20: Number(qs.score) || 0,
+              totalScore: calculatedRaw,
+              scaledScore20: !isNaN(scaledScore) && scaledScore > 0 ? scaledScore : calculatedRaw,
+              questionScores: qScores,
+              questionFeedbacks: qFeedbacks,
+              teacherNotes: teacherNotes,
               approved: isApproved,
               approvedAt: answersObj.approved_at,
             },
@@ -1198,7 +1252,7 @@ export async function fetchExamSubmissions(examId?: string, studentId?: string):
 
   let filtered = deduplicated
   if (examId) filtered = filtered.filter((s) => s.examId === examId)
-  if (studentId) filtered = filtered.filter((s) => String(s.studentId).trim() === String(studentId).trim())
+  if (studentId) filtered = filtered.filter((s) => isSameStudent(s.studentId, studentId, s.studentName))
 
   console.log(`[ExamStore:fetchExamSubmissions] Deduplicated into ${filtered.length} unique student submissions for exam ${examId || 'all'}`)
   return filtered
@@ -2418,3 +2472,154 @@ export async function restoreSystemBackup(backupJson: string, teacherPassword?: 
     }
   }
 }
+
+/**
+ * In-Progress Exam Drafts: Saves a draft to Supabase and the server.
+ * Guarantees cross-device resumption and recovery upon browser close / refresh / device change.
+ */
+export async function saveExamDraftToCloud(
+  examId: string,
+  studentId: string,
+  studentName: string,
+  draftData: {
+    answers: Record<string, any>
+    currentQIndex?: number
+    startTime?: number
+    elapsedSeconds?: number
+    lastSavedAt?: number
+  }
+): Promise<boolean> {
+  const normalizedDraft = {
+    ...draftData,
+    examId,
+    studentId: String(studentId),
+    studentName: studentName || 'دانش‌آموز',
+    lastSavedAt: draftData.lastSavedAt || Date.now(),
+    isDraft: true,
+    status: 'in_progress',
+  }
+
+  let serverOk = false
+  // 1. Try server endpoint
+  try {
+    const res = await fetch('/api/exams/draft/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        examId,
+        studentId: String(studentId),
+        studentName,
+        draft: normalizedDraft,
+      }),
+    })
+    if (res.ok) serverOk = true
+  } catch {
+    // Offline or server unavailable
+  }
+
+  // 2. Direct Supabase posts table synchronization
+  try {
+    const postTitle = `__EXAM_DRAFT__:${examId}:${studentId}`
+    const draftBody = JSON.stringify(normalizedDraft)
+    const { data: existing } = await supabase
+      .from('posts')
+      .select('id')
+      .eq('title', postTitle)
+      .maybeSingle()
+
+    if (existing?.id) {
+      await supabase
+        .from('posts')
+        .update({ body: draftBody, publish_at: new Date().toISOString() })
+        .eq('id', existing.id)
+    } else {
+      await supabase
+        .from('posts')
+        .insert({
+          title: postTitle,
+          body: draftBody,
+          type: 'announcement',
+          publish_at: new Date().toISOString(),
+        })
+    }
+    return true
+  } catch (e) {
+    console.warn('[ExamStore] Direct Supabase draft sync failed:', e)
+  }
+
+  return serverOk
+}
+
+/**
+ * In-Progress Exam Drafts: Fetches a draft from server or Supabase.
+ */
+export async function getExamDraftFromCloud(
+  examId: string,
+  studentId: string
+): Promise<any | null> {
+  // 1. Try server endpoint first
+  try {
+    const res = await fetch(
+      `/api/exams/draft?examId=${encodeURIComponent(examId)}&studentId=${encodeURIComponent(studentId)}`
+    )
+    if (res.ok) {
+      const data = await res.json()
+      if (data?.draft && typeof data.draft === 'object') {
+        return data.draft
+      }
+    }
+  } catch {
+    // Continue to direct Supabase lookup
+  }
+
+  // 2. Direct Supabase lookup
+  try {
+    const postTitle = `__EXAM_DRAFT__:${examId}:${studentId}`
+    const { data: post } = await supabase
+      .from('posts')
+      .select('body')
+      .eq('title', postTitle)
+      .order('publish_at', { ascending: false })
+      .maybeSingle()
+
+    if (post?.body) {
+      const parsed = JSON.parse(post.body)
+      if (parsed && typeof parsed === 'object' && parsed.isDraft !== false && parsed.status === 'in_progress') {
+        return parsed
+      }
+    }
+  } catch (e) {
+    console.warn('[ExamStore] Direct Supabase draft fetch failed:', e)
+  }
+
+  return null
+}
+
+/**
+ * In-Progress Exam Drafts: Deletes a draft from server and Supabase once finally submitted.
+ */
+export async function deleteExamDraftFromCloud(
+  examId: string,
+  studentId: string
+): Promise<void> {
+  try {
+    fetch('/api/exams/draft/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ examId, studentId: String(studentId) }),
+    }).catch(() => {})
+  } catch {}
+
+  try {
+    const postTitle = `__EXAM_DRAFT__:${examId}:${studentId}`
+    await supabase.from('posts').delete().eq('title', postTitle)
+    await supabase
+      .from('posts')
+      .update({
+        body: JSON.stringify({ isDraft: false, status: 'cleared', clearedAt: Date.now() }),
+        publish_at: new Date().toISOString(),
+      })
+      .eq('title', postTitle)
+  } catch {}
+}
+

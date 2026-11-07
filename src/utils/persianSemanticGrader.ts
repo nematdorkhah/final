@@ -2088,7 +2088,27 @@ export function getSubmissionEffectiveScore(
   }
 
   const maxPoints = Number(exam.totalPoints) || 20
-  const isApproved = Boolean(sub.teacherGrading?.approved)
+  const isApproved = Boolean(
+    sub.teacherGrading?.approved ||
+    (sub.status as string) === 'released' ||
+    (sub.status as string) === 'approved' ||
+    sub.status === 'graded' ||
+    (sub.answers as any)?.teacher_approved ||
+    (sub.answers as any)?.approved ||
+    (sub.answers as any)?.is_released
+  )
+
+  const officialTeacherScaled = Number(
+    sub.teacherGrading?.scaledScore20 ??
+    (sub as any).scaledScore20 ??
+    (sub.answers as any)?.score
+  )
+  const officialTeacherTotal = Number(
+    sub.teacherGrading?.totalScore ??
+    (sub as any).totalScore ??
+    (sub as any).earnedPoints ??
+    (sub.answers as any)?.raw_score
+  )
 
   if (isApproved && sub.teacherGrading?.questionScores) {
     const questionScores: Record<string, number> = {}
@@ -2102,14 +2122,46 @@ export function getSubmissionEffectiveScore(
       questionScores[q.id] = qScore
       sum += qScore
     }
-    const totalScore = Math.min(maxPoints, Math.max(0, Math.round(sum * 100) / 100))
-    const scaledScore20 = safeScaled20(totalScore, maxPoints)
+    let totalScore = Math.min(maxPoints, Math.max(0, Math.round(sum * 100) / 100))
+    let scaledScore20 = safeScaled20(totalScore, maxPoints)
+
     return {
       isApproved: true,
       totalScore,
       maxPoints,
       scaledScore20,
       questionScores,
+      status: scaledScore20 >= 16 ? 'excellent' : scaledScore20 >= 12 ? 'good' : 'needs_practice',
+    }
+  }
+
+  // If approved by teacher but without explicit per-question scores
+  if (isApproved && (!isNaN(officialTeacherScaled) || !isNaN(officialTeacherTotal))) {
+    const evalResult = evaluateEntireExamSubmission(exam, sub.answers || {})
+    let scaledScore20 = !isNaN(officialTeacherScaled) && officialTeacherScaled > 0
+      ? officialTeacherScaled
+      : safeScaled20(officialTeacherTotal, maxPoints)
+    let totalScore = !isNaN(officialTeacherTotal) && officialTeacherTotal > 0
+      ? officialTeacherTotal
+      : (scaledScore20 >= 20 ? maxPoints : evalResult.earnedPoints)
+
+    // Detection: If totalScore exceeds maxPoints, it was stored on the 20-point scale!
+    if (totalScore > maxPoints) {
+      if (!scaledScore20 || scaledScore20 <= 0) scaledScore20 = Math.min(20, totalScore)
+      totalScore = Math.min(maxPoints, Math.round(((scaledScore20 / 20) * maxPoints) * 10) / 10)
+    }
+
+    // Align with evalResult if available and closer to real score
+    if (evalResult.earnedPoints > 0 && Math.abs(evalResult.earnedPoints - totalScore) < 0.5) {
+      totalScore = evalResult.earnedPoints
+    }
+
+    return {
+      isApproved: true,
+      totalScore,
+      maxPoints,
+      scaledScore20,
+      questionScores: evalResult.questionScores,
       status: scaledScore20 >= 16 ? 'excellent' : scaledScore20 >= 12 ? 'good' : 'needs_practice',
     }
   }

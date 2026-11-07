@@ -17,12 +17,14 @@ interface ExamReviewModalProps {
   exam: any
   submission: any
   onClose: () => void
+  onEdit?: () => void
 }
 
 export default function ExamReviewModal({
   exam,
   submission,
   onClose,
+  onEdit,
 }: ExamReviewModalProps) {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -111,23 +113,52 @@ export default function ExamReviewModal({
           >
             تعداد پاسخ‌های ثبت‌شده: <strong>{toPersianDigits(answeredCount)} از {toPersianDigits(totalCount)} سوال</strong>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            style={{
-              width: '100%',
-              padding: '10px 20px',
-              background: '#0F172A',
-              color: '#FFFFFF',
-              borderRadius: 12,
-              fontSize: 14,
-              fontWeight: 800,
-              border: 'none',
-              cursor: 'pointer',
-            }}
-          >
-            متوجه شدم و بازگشت
-          </button>
+          <div style={{ display: 'flex', gap: 10 }}>
+            {onEdit && (
+              <button
+                type="button"
+                onClick={() => {
+                  onClose()
+                  onEdit()
+                }}
+                style={{
+                  flex: 1,
+                  padding: '10px 16px',
+                  background: '#2563EB',
+                  color: '#FFFFFF',
+                  borderRadius: 12,
+                  fontSize: 13,
+                  fontWeight: 800,
+                  border: 'none',
+                  cursor: 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 6,
+                }}
+              >
+                <span>✏️</span>
+                <span>ویرایش پاسخ‌ها</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              style={{
+                flex: 1,
+                padding: '10px 16px',
+                background: '#0F172A',
+                color: '#FFFFFF',
+                borderRadius: 12,
+                fontSize: 13,
+                fontWeight: 800,
+                border: 'none',
+                cursor: 'pointer',
+              }}
+            >
+              متوجه شدم و بازگشت
+            </button>
+          </div>
         </div>
       </div>
     )

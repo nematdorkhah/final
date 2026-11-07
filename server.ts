@@ -233,6 +233,8 @@ async function startServer() {
   const cachedSubmissionsMap = new Map<string, any>()
   let cachedSubmissions: any[] = []
   let cachedTizhooshanProgress: Record<string, any> = {}
+  const DRAFTS_BACKUP_FILE = path.join(DATA_DIR, 'exam_drafts.json')
+  const cachedDraftsMap = new Map<string, any>()
   let isInitializedFromSupabase = false
 
   // Load from local disk immediately on startup (resilient against Supabase resets/timeouts)
@@ -275,6 +277,21 @@ async function startServer() {
     }
   } catch (e) {
     console.warn('Failed reading tizhooshan from disk backup:', e)
+  }
+
+  try {
+    if (fs.existsSync(DRAFTS_BACKUP_FILE)) {
+      const d = JSON.parse(fs.readFileSync(DRAFTS_BACKUP_FILE, 'utf-8'))
+      if (Array.isArray(d)) {
+        d.forEach((item) => {
+          if (item?.examId && item?.studentId) {
+            cachedDraftsMap.set(`${item.examId}:${item.studentId}`, item)
+          }
+        })
+      }
+    }
+  } catch (e) {
+    console.warn('Failed reading drafts from disk backup:', e)
   }
 
   function saveExamsToDisk() {
@@ -509,9 +526,12 @@ async function startServer() {
                   syncStatus: 'synced',
                   status: 'pending_approval',
                   teacherGrading: {
-                    totalScore: Number(qs.score) || 0,
-                    scaledScore20: Number(qs.score) || 0,
-                    approved: false,
+                    totalScore: Number(ans.raw_score ?? ans.totalScore ?? ans.earnedPoints ?? qs.score) || 0,
+                    scaledScore20: Number(qs.score ?? ans.score ?? ans.scaledScore20) || 0,
+                    questionScores: ans.questionScores || ans.teacherGrading?.questionScores,
+                    questionFeedbacks: ans.questionFeedbacks || ans.teacherGrading?.questionFeedbacks,
+                    teacherNotes: ans.teacherNotes || ans.teacherGrading?.teacherNotes,
+                    approved: Boolean(ans.teacher_approved || ans.approved || ans.is_released),
                   },
                 })
               }
@@ -1237,6 +1257,145 @@ async function startServer() {
     }
 
     res.json({ success: true, submissions: subs })
+  })
+
+  // --- IN-PROGRESS EXAM DRAFTS (Multi-device temporary exit persistence) ---
+  app.post('/api/exams/draft/save', async (req, res) => {
+    try {
+      const { examId, studentId, studentName, draft } = req.body
+      if (!examId || !studentId || !draft) {
+        return res.status(400).json({ success: false, error: 'examId, studentId, and draft are required' })
+      }
+      const key = `${examId}:${studentId}`
+      const draftRecord = {
+        examId,
+        studentId: String(studentId),
+        studentName: studentName || 'دانش‌آموز',
+        ...draft,
+        isDraft: true,
+        status: 'in_progress',
+        lastSavedAt: draft.lastSavedAt || Date.now(),
+      }
+      cachedDraftsMap.set(key, draftRecord)
+
+      // Disk backup
+      try {
+        const allDrafts = Array.from(cachedDraftsMap.values())
+        fs.writeFileSync(DRAFTS_BACKUP_FILE, JSON.stringify(allDrafts, null, 2), 'utf-8')
+      } catch (e) {
+        console.warn('Failed saving drafts to disk backup:', e)
+      }
+
+      // Supabase posts table sync
+      try {
+        const postTitle = `__EXAM_DRAFT__:${examId}:${studentId}`
+        const draftBody = JSON.stringify(draftRecord)
+        const { data: existingPost } = await supabase
+          .from('posts')
+          .select('id')
+          .eq('title', postTitle)
+          .maybeSingle()
+
+        if (existingPost?.id) {
+          await supabase
+            .from('posts')
+            .update({ body: draftBody, publish_at: new Date().toISOString() })
+            .eq('id', existingPost.id)
+        } else {
+          await supabase
+            .from('posts')
+            .insert({
+              title: postTitle,
+              body: draftBody,
+              type: 'announcement',
+              publish_at: new Date().toISOString(),
+            })
+        }
+      } catch (e) {
+        console.warn('Sync draft to Supabase posts failed:', e)
+      }
+
+      res.json({ success: true, draft: draftRecord })
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message })
+    }
+  })
+
+  app.get('/api/exams/draft', async (req, res) => {
+    try {
+      const { examId, studentId } = req.query
+      if (!examId || !studentId) {
+        return res.status(400).json({ success: false, error: 'examId and studentId are required' })
+      }
+      const key = `${examId}:${studentId}`
+      let draft = cachedDraftsMap.get(key)
+
+      // Fallback to Supabase if not in memory (e.g. server restart)
+      if (draft === undefined) {
+        try {
+          const postTitle = `__EXAM_DRAFT__:${examId}:${studentId}`
+          const { data: post } = await supabase
+            .from('posts')
+            .select('body')
+            .eq('title', postTitle)
+            .order('publish_at', { ascending: false })
+            .maybeSingle()
+          if (post?.body) {
+            const parsed = JSON.parse(post.body)
+            if (parsed && parsed.isDraft !== false && parsed.status === 'in_progress') {
+              draft = parsed
+              cachedDraftsMap.set(key, draft)
+            } else {
+              draft = null
+              cachedDraftsMap.set(key, null)
+            }
+          } else {
+            draft = null
+            cachedDraftsMap.set(key, null)
+          }
+        } catch (e) {
+          console.warn('Fetch draft from Supabase failed:', e)
+        }
+      }
+
+      if (draft && (draft.isDraft === false || draft.status !== 'in_progress')) {
+        draft = null
+      }
+
+      res.json({ success: true, draft: draft || null })
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message })
+    }
+  })
+
+  app.post('/api/exams/draft/delete', async (req, res) => {
+    try {
+      const { examId, studentId } = req.body
+      if (!examId || !studentId) {
+        return res.status(400).json({ success: false, error: 'examId and studentId are required' })
+      }
+      const key = `${examId}:${studentId}`
+      cachedDraftsMap.delete(key)
+      try {
+        const allDrafts = Array.from(cachedDraftsMap.values()).filter(Boolean)
+        fs.writeFileSync(DRAFTS_BACKUP_FILE, JSON.stringify(allDrafts, null, 2), 'utf-8')
+      } catch {}
+      try {
+        const postTitle = `__EXAM_DRAFT__:${examId}:${studentId}`
+        await supabase.from('posts').delete().eq('title', postTitle)
+        // Also update as cleared so even if delete RLS prevents row deletion, content is marked cleared
+        await supabase
+          .from('posts')
+          .update({
+            body: JSON.stringify({ isDraft: false, status: 'cleared', clearedAt: Date.now() }),
+            publish_at: new Date().toISOString(),
+          })
+          .eq('title', postTitle)
+      } catch {}
+      res.json({ success: true })
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message })
+    }
   })
 
   app.post('/api/exams/submit', async (req, res) => {

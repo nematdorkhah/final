@@ -27,7 +27,12 @@ export default function StudentReportCard({
   const [reviewExamData, setReviewExamData] = useState<{ exam: any; submission: any } | null>(null)
 
   // Normalize every grade to 20 (Score = (Earned / Total) * 20)
+  // Normalize every grade to 20 (Score = (Earned / Total) * 20)
   const normalizedGrades = grades.map((g: any) => {
+    const isPendingReview = g.status === 'pending_review'
+    const isPendingSubmission = g.status === 'pending_submission'
+    const isPending = isPendingReview || isPendingSubmission
+
     let rawScore = Number(g.score) || 0
     let rawMax = Number(g.max_score) || 20
 
@@ -58,7 +63,7 @@ export default function StudentReportCard({
     }
 
     const officialDbScore = Number(g.score) || 0
-    if (matchedSub && matchedExam) {
+    if (matchedSub && matchedExam && !isPending) {
       const isApprovedOrReleased = Boolean(
         matchedSub.teacherGrading?.approved ||
         matchedSub.status === 'released' ||
@@ -68,39 +73,47 @@ export default function StudentReportCard({
       )
       if (isApprovedOrReleased) {
         const eff = getSubmissionEffectiveScore(matchedExam, matchedSub)
-        if (eff.scaledScore20 >= officialDbScore || officialDbScore === 0) {
-          rawScore = eff.totalScore
-          rawMax = eff.maxPoints
-        } else {
-          if (matchedExam.totalPoints) {
-            rawScore = Math.round(((officialDbScore / 20) * matchedExam.totalPoints) * 10) / 10
-            rawMax = matchedExam.totalPoints
-          }
-        }
+        rawScore = eff.totalScore
+        rawMax = eff.maxPoints
       }
-    } else if (matchedExam && matchedExam.totalPoints && officialDbScore > 0) {
+    } else if (matchedExam && matchedExam.totalPoints && officialDbScore > 0 && !isPending) {
       rawScore = Math.round(((officialDbScore / 20) * matchedExam.totalPoints) * 10) / 10
       rawMax = matchedExam.totalPoints
     }
 
-    const scaledScore = rawMax > 0 ? Math.round(((rawScore / rawMax) * 20) * 10) / 10 : (officialDbScore || rawScore)
+    const scaledScore = isPending
+      ? null
+      : rawMax > 0
+      ? Math.round(((rawScore / rawMax) * 20) * 10) / 10
+      : (officialDbScore || rawScore)
+
     const cleanLabel = sanitizeTeacherFeedback(sanitizeExamTitle(g.skill || g.subject || 'عمومی', g.subject))
 
     let qualitativeStatus = 'خیلی خوب'
     let qualitativeColor = 'text-emerald-700 bg-emerald-50 border-emerald-200'
-    if (scaledScore < 10) {
-      qualitativeStatus = 'نیازمند تلاش'
-      qualitativeColor = 'text-rose-700 bg-rose-50 border-rose-200'
-    } else if (scaledScore < 15) {
-      qualitativeStatus = 'قابل قبول'
+
+    if (isPendingReview) {
+      qualitativeStatus = 'در انتظار تصحیح'
       qualitativeColor = 'text-amber-700 bg-amber-50 border-amber-200'
-    } else if (scaledScore < 18) {
-      qualitativeStatus = 'خوب'
-      qualitativeColor = 'text-blue-700 bg-blue-50 border-blue-200'
+    } else if (isPendingSubmission) {
+      qualitativeStatus = 'در انتظار انجام'
+      qualitativeColor = 'text-indigo-700 bg-indigo-50 border-indigo-200'
+    } else if (scaledScore !== null) {
+      if (scaledScore < 10) {
+        qualitativeStatus = 'نیازمند تلاش'
+        qualitativeColor = 'text-rose-700 bg-rose-50 border-rose-200'
+      } else if (scaledScore < 15) {
+        qualitativeStatus = 'قابل قبول'
+        qualitativeColor = 'text-amber-700 bg-amber-50 border-amber-200'
+      } else if (scaledScore < 18) {
+        qualitativeStatus = 'خوب'
+        qualitativeColor = 'text-blue-700 bg-blue-50 border-blue-200'
+      }
     }
 
     return {
       ...g,
+      status: g.status || (isPending ? (isPendingReview ? 'pending_review' : 'pending_submission') : 'graded'),
       rawScore,
       rawMax,
       scaledScore,
@@ -112,8 +125,11 @@ export default function StudentReportCard({
     }
   })
 
-  const gpaVal = normalizedGrades.length
-    ? (normalizedGrades.reduce((acc: number, g: any) => acc + g.scaledScore, 0) / normalizedGrades.length).toFixed(2)
+  const gradedList = normalizedGrades.filter(
+    (g: any) => g.status === 'graded' && g.scaledScore !== null && !isNaN(g.scaledScore)
+  )
+  const gpaVal = gradedList.length
+    ? (gradedList.reduce((acc: number, g: any) => acc + g.scaledScore, 0) / gradedList.length).toFixed(2)
     : null
 
   const presents = attendanceRows.filter((a: any) => a.status === 'present').length
@@ -323,17 +339,21 @@ export default function StudentReportCard({
                           )}
                         </td>
                         <td className="py-2.5 px-3 text-center font-black text-sm">
-                          <span
-                            className={
-                              g.scaledScore >= 16
-                                ? 'text-emerald-700'
-                                : g.scaledScore >= 12
-                                ? 'text-amber-700'
-                                : 'text-rose-700'
-                            }
-                          >
-                            {toPersianDigits(g.scaledScore)}
-                          </span>
+                          {g.scaledScore !== null ? (
+                            <span
+                              className={
+                                g.scaledScore >= 16
+                                  ? 'text-emerald-700'
+                                  : g.scaledScore >= 12
+                                  ? 'text-amber-700'
+                                  : 'text-rose-700'
+                              }
+                            >
+                              {toPersianDigits(g.scaledScore)}
+                            </span>
+                          ) : (
+                            <span className="text-slate-400 font-bold">—</span>
+                          )}
                         </td>
                         <td className="py-2.5 px-3 text-center">
                           <span

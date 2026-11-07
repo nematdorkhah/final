@@ -453,7 +453,7 @@ export default function StudentDashboard({
     if (onStudentUpdate) onStudentUpdate(data)
   }
 
-  // Combined grades merging Supabase grades with local exam scores
+  // Combined grades merging Supabase grades, local exams, homework assignments, and submissions
   const combinedGrades = useMemo(() => {
     const localExams = exams.length > 0 ? exams : getLocalExams()
     const allSubs = myExamSubs.length > 0 ? myExamSubs : getLocalSubmissions()
@@ -463,111 +463,148 @@ export default function StudentDashboard({
     const examMap = new Map(localExams.map((e) => [e.id, e]))
     const subMap = new Map(examSubs.map((s) => [s.examId, s]))
 
-    // Process existing Supabase grades with matched exams
-    const list = myGrades
-      .filter((g) => {
-        // If this grade belongs to an exam, ensure results are approved and released
-        if (g.is_exam || g.examId) {
-          const matchedExam = g.exam || (g.examId ? examMap.get(g.examId) : null)
-          const matchedSub = g.sub || (g.examId ? subMap.get(g.examId) : null)
-          if (matchedExam) {
-            const isApproved = matchedSub?.teacherGrading?.approved === true || matchedSub?.status === 'released' || matchedSub?.status === 'approved'
-            const isReleased = isExamResultsReleased(matchedExam, matchedSub)
-            if (!isApproved || !isReleased) return false
-          }
-        }
-        return true
-      })
-      .map((g) => {
-        let matchedExam = g.exam || null
-        let matchedSub = g.sub || null
+    const list: any[] = []
+    const seenExamIds = new Set<string>()
+    const seenTitles = new Set<string>()
 
-        if (!matchedExam) {
-          matchedExam =
-            localExams.find((e) => {
-              if (g.examId && e.id === g.examId) return true
-              if (g.id && (`exam_sub_${e.id}` === g.id || `exam_${e.id}` === g.id)) return true
-              const cleanE = sanitizeExamTitle(e.title, e.subject)
-              const cleanG = sanitizeExamTitle(g.skill || '', g.subject)
-              return cleanE && cleanG && (cleanE === cleanG || g.skill?.includes(cleanE))
-            }) || null
-        }
+    // 1. Process existing Supabase grades (official database records)
+    for (const g of myGrades) {
+      let matchedExam = g.exam || (g.examId ? examMap.get(g.examId) : null)
+      let matchedSub = g.sub || (g.examId ? subMap.get(g.examId) : null)
 
-        if (matchedExam && !matchedSub) {
-          matchedSub =
-            subMap.get(matchedExam.id) ||
-            allSubs.find(
-              (s) =>
-                (s.examId === matchedExam.id || s.examId === g.examId) &&
-                isSameStudent(s.studentId, student.id, s.studentName, student.full_name || (student as any).fullName)
-            ) ||
-            null
-        }
+      if (!matchedExam) {
+        matchedExam =
+          localExams.find((e) => {
+            if (g.examId && e.id === g.examId) return true
+            if (g.id && (`exam_sub_${e.id}` === g.id || `exam_${e.id}` === g.id)) return true
+            const cleanE = sanitizeExamTitle(e.title, e.subject)
+            const cleanG = sanitizeExamTitle(g.skill || '', g.subject)
+            return cleanE && cleanG && (cleanE === cleanG || g.skill?.includes(cleanE))
+          }) || null
+      }
 
-        let officialScore = Number(g.score) || 0
-        let officialMaxScore = Number(g.max_score) || 20
-        let rawEarned: number | undefined = (g as any).raw_score
-        let rawTotal: number | undefined = (g as any).raw_max
-        let officialNotes = g.notes || ''
+      if (matchedExam && !matchedSub) {
+        matchedSub =
+          subMap.get(matchedExam.id) ||
+          allSubs.find(
+            (s) =>
+              (s.examId === matchedExam.id || s.examId === g.examId) &&
+              isSameStudent(s.studentId, student.id, s.studentName, student.full_name || (student as any).fullName)
+          ) ||
+          null
+      }
 
-        if (matchedExam && matchedSub) {
-          const eff = getSubmissionEffectiveScore(matchedExam, matchedSub)
-          if (eff.isApproved) {
-            // Never downgrade an official teacher score recorded in database!
-            officialScore = Math.max(officialScore, eff.scaledScore20)
-            officialMaxScore = 20
-            rawEarned = eff.totalScore
-            rawTotal = eff.maxPoints
-            officialNotes = matchedSub.teacherGrading?.teacherNotes || officialNotes
-          }
-        }
-        
-        if (matchedExam && matchedExam.totalPoints && rawEarned === undefined) {
-          rawEarned = Math.round(((officialScore / 20) * matchedExam.totalPoints) * 10) / 10
+      let officialScore = Number(g.score) || 0
+      let officialMaxScore = Number(g.max_score) || 20
+      let rawEarned: number | undefined = (g as any).raw_score
+      let rawTotal: number | undefined = (g as any).raw_max
+      let officialNotes = g.notes || ''
+      let itemStatus: 'graded' | 'pending_review' | 'pending_submission' = 'graded'
+
+      if (matchedExam && matchedSub) {
+        const eff = getSubmissionEffectiveScore(matchedExam, matchedSub)
+        const isApproved = Boolean(
+          matchedSub.teacherGrading?.approved ||
+          matchedSub.status === 'released' ||
+          matchedSub.status === 'approved' ||
+          (matchedSub.answers as any)?.teacher_approved ||
+          (matchedSub.answers as any)?.approved ||
+          eff.isApproved
+        )
+        const isReleased = isExamResultsReleased(matchedExam, matchedSub)
+
+        if (isApproved && isReleased) {
+          officialScore = eff.scaledScore20
+          officialMaxScore = 20
+          rawEarned = eff.totalScore
+          rawTotal = eff.maxPoints
+          officialNotes = matchedSub.teacherGrading?.teacherNotes || officialNotes
+          itemStatus = 'graded'
+        } else {
+          itemStatus = 'pending_review'
+          rawEarned = undefined
           rawTotal = matchedExam.totalPoints
         }
+      }
 
-        return {
-          ...g,
-          score: officialScore,
-          max_score: officialMaxScore,
-          raw_score: rawEarned,
-          raw_max: rawTotal,
-          notes: officialNotes,
-          matchedExam,
-          matchedSub,
-        }
+      if (matchedExam && matchedExam.totalPoints && rawEarned === undefined && itemStatus === 'graded') {
+        rawEarned = Math.round(((officialScore / 20) * matchedExam.totalPoints) * 10) / 10
+        rawTotal = matchedExam.totalPoints
+      }
+
+      if (matchedExam) {
+        seenExamIds.add(matchedExam.id)
+      }
+      const cleanTitleKey = sanitizeExamTitle(g.skill || '', g.subject)
+      if (cleanTitleKey) seenTitles.add(cleanTitleKey)
+
+      list.push({
+        ...g,
+        status: itemStatus,
+        score: itemStatus === 'graded' ? officialScore : null,
+        max_score: officialMaxScore,
+        raw_score: rawEarned,
+        raw_max: rawTotal,
+        notes: officialNotes,
+        matchedExam,
+        matchedSub,
       })
+    }
 
-    // Add local exam submissions not yet in list (Priority 3: Only approved & released)
+    // 2. Process all student exam submissions not yet in list
     for (const sub of examSubs) {
       const exam = examMap.get(sub.examId)
       if (!exam) continue
+      if (seenExamIds.has(exam.id)) continue
 
-      // Security & Privacy Guard: Never expose provisional/unapproved exam scores to students or GPA!
-      const isApproved = sub.teacherGrading?.approved === true || sub.status === 'released'
-      const isReleased = isExamResultsReleased(exam, sub)
-      if (!isApproved || !isReleased) continue
+      const cleanTitle = sanitizeTeacherFeedback(sanitizeExamTitle(exam.title, exam.subject))
+      if (seenTitles.has(cleanTitle)) continue
 
       const eff = getSubmissionEffectiveScore(exam, sub)
-      const score = eff.totalScore
-      const rawMax = eff.maxPoints
-      const scaledScore = eff.scaledScore20
-      const cleanTitle = sanitizeTeacherFeedback(sanitizeExamTitle(exam.title, exam.subject))
-
-      const exists = list.some(
-        (g) => g.skill === `آزمون: ${cleanTitle}` || g.skill === cleanTitle || g.examId === exam.id || g.matchedExam?.id === exam.id
+      const isApproved = Boolean(
+        sub.teacherGrading?.approved ||
+        (sub.status as string) === 'released' ||
+        (sub.status as string) === 'approved' ||
+        sub.status === 'graded' ||
+        (sub.answers as any)?.teacher_approved ||
+        (sub.answers as any)?.approved ||
+        eff.isApproved
       )
-      if (!exists) {
+      const isReleased = isExamResultsReleased(exam, sub)
+
+      seenExamIds.add(exam.id)
+      seenTitles.add(cleanTitle)
+
+      if (isApproved && isReleased) {
         list.push({
           id: `exam_sub_${sub.id}`,
           student_id: student.id,
           subject: exam.subject || 'عمومی',
-          skill: `آزمون: ${cleanTitle}`,
-          score: scaledScore,
+          skill: exam.mode === 'assignment' ? `تکلیف: ${cleanTitle}` : `آزمون: ${cleanTitle}`,
+          status: 'graded',
+          score: eff.scaledScore20,
           max_score: 20,
-          raw_score: score,
-          raw_max: rawMax,
+          raw_score: eff.totalScore,
+          raw_max: eff.maxPoints,
+          recorded_at: sub.submittedAt || new Date().toISOString(),
+          is_exam: true,
+          examId: exam.id,
+          matchedExam: exam,
+          matchedSub: sub,
+          exam,
+          sub,
+        })
+      } else {
+        list.push({
+          id: `exam_sub_${sub.id}`,
+          student_id: student.id,
+          subject: exam.subject || 'عمومی',
+          skill: exam.mode === 'assignment' ? `تکلیف: ${cleanTitle}` : `آزمون: ${cleanTitle}`,
+          status: 'pending_review',
+          score: null,
+          max_score: 20,
+          raw_score: null,
+          raw_max: exam.totalPoints,
           recorded_at: sub.submittedAt || new Date().toISOString(),
           is_exam: true,
           examId: exam.id,
@@ -578,14 +615,89 @@ export default function StudentDashboard({
         })
       }
     }
-    const seenAssessmentKeys = new Set<string>()
-    return list.filter((g) => {
-      const key = g.matchedExam?.id || g.examId || (g.skill ? sanitizeExamTitle(g.skill, g.subject) : g.id)
-      if (seenAssessmentKeys.has(key)) return false
-      seenAssessmentKeys.add(key)
-      return true
+
+    // 3. Process all active published assignments and exams (unsubmitted by student)
+    for (const exam of localExams) {
+      if (!exam || exam.published === false) continue
+      if (seenExamIds.has(exam.id)) continue
+
+      const cleanTitle = sanitizeTeacherFeedback(sanitizeExamTitle(exam.title, exam.subject))
+      if (seenTitles.has(cleanTitle)) continue
+
+      seenExamIds.add(exam.id)
+      seenTitles.add(cleanTitle)
+
+      list.push({
+        id: `pending_exam_${exam.id}`,
+        student_id: student.id,
+        subject: exam.subject || 'عمومی',
+        skill: exam.mode === 'assignment' ? `تکلیف: ${cleanTitle}` : `آزمون: ${cleanTitle}`,
+        status: 'pending_submission',
+        score: null,
+        max_score: 20,
+        raw_score: null,
+        raw_max: exam.totalPoints,
+        recorded_at: exam.dueDate || exam.createdAt || new Date().toISOString(),
+        due_date: exam.dueDate,
+        is_exam: true,
+        examId: exam.id,
+        matchedExam: exam,
+        matchedSub: null,
+      })
+    }
+
+    // 4. Process traditional homework posts from teacher
+    const submittedHwMap = new Map<string, any>()
+    mySubmissions.forEach((s) => {
+      if (s.post_id) submittedHwMap.set(s.post_id, s)
     })
-  }, [myGrades, student.id, exams, myExamSubs])
+
+    const hwPosts = posts.filter((p) => p && p.type === 'homework' && !isSystemRecord(p))
+    for (const hw of hwPosts) {
+      if (!hw || !hw.id) continue
+      const cleanHwTitle = sanitizeTeacherFeedback(hw.title || 'تکلیف کلاسی')
+      if (seenTitles.has(cleanHwTitle)) continue
+
+      const sub = submittedHwMap.get(hw.id)
+      if (sub) {
+        list.push({
+          id: `hw_sub_${sub.id || hw.id}`,
+          student_id: student.id,
+          subject: hw.subject || 'عمومی',
+          skill: `تکلیف: ${cleanHwTitle}`,
+          status: 'pending_review',
+          score: null,
+          max_score: 20,
+          recorded_at: sub.submitted_at || hw.created_at,
+          homeworkPost: hw,
+          homeworkSubmission: sub,
+        })
+        seenTitles.add(cleanHwTitle)
+      } else {
+        list.push({
+          id: `hw_pending_${hw.id}`,
+          student_id: student.id,
+          subject: hw.subject || 'عمومی',
+          skill: `تکلیف: ${cleanHwTitle}`,
+          status: 'pending_submission',
+          score: null,
+          max_score: 20,
+          recorded_at: hw.due_date || hw.created_at,
+          due_date: hw.due_date,
+          homeworkPost: hw,
+        })
+        seenTitles.add(cleanHwTitle)
+      }
+    }
+
+    // Sort: Graded first, then pending review, then pending submission
+    return list.sort((a, b) => {
+      const priority = { graded: 1, pending_review: 2, pending_submission: 3 }
+      const pDiff = (priority[a.status as keyof typeof priority] || 9) - (priority[b.status as keyof typeof priority] || 9)
+      if (pDiff !== 0) return pDiff
+      return new Date(b.recorded_at || 0).getTime() - new Date(a.recorded_at || 0).getTime()
+    })
+  }, [myGrades, student.id, exams, myExamSubs, posts, mySubmissions])
 
   // Teacher report card recommendation note
   const reportNote = useMemo(() => {
@@ -713,13 +825,21 @@ export default function StudentDashboard({
 
   const streak = computeStreak(homeworkPosts, mySubmissions)
   const badges = computeBadges(streak, combinedGrades, myAttendance)
-  const skillGroups = groupSkillMastery(combinedGrades)
+  const gradedCombinedItems = useMemo(() => {
+    return combinedGrades.filter(
+      (g) => g.status === 'graded' && g.score !== null && g.score !== undefined && !isNaN(Number(g.score))
+    )
+  }, [combinedGrades])
+
+  const skillGroups = useMemo(() => {
+    return groupSkillMastery(gradedCombinedItems)
+  }, [gradedCombinedItems])
 
   const gpa = useMemo(() => {
-    if (!combinedGrades.length) return null
-    const total = combinedGrades.reduce((sum, g) => sum + (g.score / g.max_score) * 20, 0)
-    return (total / combinedGrades.length).toFixed(1)
-  }, [combinedGrades])
+    if (!gradedCombinedItems.length) return null
+    const total = gradedCombinedItems.reduce((sum, g) => sum + (Number(g.score) / (Number(g.max_score) || 20)) * 20, 0)
+    return (total / gradedCombinedItems.length).toFixed(1)
+  }, [gradedCombinedItems])
 
   const attendanceStats = useMemo(() => {
     const present = myAttendance.filter((a) => a.status === 'present').length
@@ -916,9 +1036,22 @@ export default function StudentDashboard({
                   {activeExams.map((exam) => {
                     const sub = getStudentExamSubmission(exam.id, student.id)
                     const isSubmitted = Boolean(sub)
-                    const isResultsReleased = sub ? isExamResultsReleased(exam, sub) : false
                     const countdown = getExamCountdownInfo(exam.scheduledStartTime)
                     const isStarted = countdown.isStarted
+
+                    // Authoritative score lookup from combinedGrades (exact same source as Report Card)
+                    const matchedGrade = combinedGrades.find(
+                      (g) => g.examId === exam.id || g.matchedExam?.id === exam.id || (g as any).sub?.id === sub?.id
+                    )
+                    const isGraded = matchedGrade?.status === 'graded' && matchedGrade.score !== null && matchedGrade.score !== undefined
+                    const isPendingReview = matchedGrade?.status === 'pending_review' || (isSubmitted && !isGraded)
+                    const isUntimedExam = exam.mode === 'assignment' || Boolean(exam.isUntimed) || !exam.durationMinutes || Number(exam.durationMinutes) <= 0
+                    const isPastDue = Boolean(exam.dueDate && new Date(exam.dueDate) < new Date())
+                    const isUntimedEditable = isUntimedExam && !isPastDue && !isGraded
+                    const hasDraft = !isSubmitted && typeof localStorage !== 'undefined' && Boolean(
+                      localStorage.getItem(`exam_draft_${exam.id}_${student.id}`) ||
+                        localStorage.getItem(`exam_draft_${exam.id}`)
+                    )
 
                     return (
                       <div
@@ -938,19 +1071,23 @@ export default function StudentDashboard({
 
                             <span
                               className={`text-[11px] font-black px-2.5 py-1 rounded-lg border whitespace-nowrap ${
-                                isResultsReleased
+                                isGraded
                                   ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                                  : isSubmitted
+                                  : isPendingReview
                                   ? 'bg-amber-50 text-amber-800 border-amber-200'
+                                  : hasDraft
+                                  ? 'bg-indigo-50 text-indigo-800 border-indigo-200'
                                   : isStarted
                                   ? 'bg-blue-50 text-blue-800 border-blue-200'
-                                  : 'bg-amber-50 text-amber-800 border-amber-200'
+                                  : 'bg-slate-100 text-slate-700 border-slate-200'
                               }`}
                             >
-                              {isResultsReleased
-                                ? `✅ نمره: ${toPersianDigits(sub?.teacherGrading?.totalScore ?? sub?.aiGrading?.totalScore ?? 0)} از ${toPersianDigits(exam.totalPoints)}`
-                                : isSubmitted
+                              {isGraded
+                                ? `✅ نمره: ${toPersianDigits(matchedGrade.score)} از ۲۰ (${toPersianDigits(matchedGrade.raw_score)} از ${toPersianDigits(matchedGrade.raw_max)} نمره)`
+                                : isPendingReview
                                 ? '⏳ در انتظار تایید معلم'
+                                : hasDraft
+                                ? '✏️ دارای پیش‌نویس (ادامه)'
                                 : isStarted
                                 ? '🟢 آماده برگزاری'
                                 : '⏰ شروع به زودی'}
@@ -958,7 +1095,7 @@ export default function StudentDashboard({
                           </div>
 
                           {/* Countdown for Upcoming Exams */}
-                          {!isStarted && !isSubmitted && (
+                          {!isStarted && !isSubmitted && !hasDraft && (
                             <div className="my-3 p-3 bg-amber-50/80 border border-amber-200 rounded-xl flex items-center justify-between gap-2.5 flex-wrap">
                               <div className="flex items-center gap-2">
                                 <span className="text-xl animate-pulse">⏳</span>
@@ -978,67 +1115,103 @@ export default function StudentDashboard({
                           )}
 
                           <p className="text-xs text-slate-500 mb-4">
-                            {toPersianDigits(exam.questions.length)} سوال ({toPersianDigits(exam.totalPoints)} نمره) · مدت آزمون: {toPersianDigits(exam.durationMinutes)} دقیقه · زمان شروع: {toPersianDigits(new Date(exam.scheduledStartTime || exam.createdAt || Date.now()).toLocaleString('fa-IR'))}
+                            {toPersianDigits(exam.questions.length)} سوال ({toPersianDigits(exam.totalPoints)} نمره) · {isUntimedExam ? 'بدون محدودیت زمانی' : `مدت: ${toPersianDigits(exam.durationMinutes)} دقیقه`} {exam.dueDate ? `· مهلت: ${toPersianDigits(new Date(exam.dueDate).toLocaleDateString('fa-IR'))}` : `· زمان شروع: ${toPersianDigits(new Date(exam.scheduledStartTime || exam.createdAt || Date.now()).toLocaleString('fa-IR'))}`}
                           </p>
                         </div>
 
                         <div className="flex items-center gap-2 pt-2 border-t border-slate-100 flex-wrap">
-                          {isSubmitted && (
+                          {isGraded ? (
                             <button
                               type="button"
-                              className="flex-1 py-2 px-3 text-xs font-black text-white bg-emerald-600 hover:bg-emerald-700 rounded-xl shadow-xs transition-colors cursor-pointer inline-flex items-center justify-center gap-1.5"
+                              className="w-full py-2.5 px-3 text-xs font-black text-white bg-emerald-600 hover:bg-emerald-700 rounded-xl shadow-xs transition-colors cursor-pointer inline-flex items-center justify-center gap-1.5"
                               onClick={() => {
                                 sessionStorage.setItem('active_taking_exam_id', exam.id)
                                 setTakingExam(exam)
                               }}
                             >
-                              <span>📋</span>
-                              <span>{isResultsReleased ? 'مشاهده کارنامه و کلید' : 'مشاهده وضعیت ثبت پاسخ'}</span>
+                              <span>📊</span>
+                              <span>مشاهده کارنامه و کلید پاسخ‌ها</span>
                             </button>
-                          )}
-                          {(() => {
-                            const hasDraft =
-                              !isSubmitted &&
-                              typeof localStorage !== 'undefined' &&
-                              Boolean(
-                                localStorage.getItem(`exam_draft_${exam.id}_${student.id}`) ||
-                                  localStorage.getItem(`exam_draft_${exam.id}`)
-                              )
-
-                            return (
+                          ) : isSubmitted ? (
+                            isUntimedEditable ? (
+                              <div className="flex items-center gap-2 w-full">
+                                <button
+                                  type="button"
+                                  className="flex-1 py-2 px-3 text-xs font-black text-white bg-blue-600 hover:bg-blue-700 rounded-xl shadow-xs transition-all cursor-pointer inline-flex items-center justify-center gap-1.5"
+                                  onClick={() => {
+                                    sessionStorage.setItem('active_taking_exam_id', exam.id)
+                                    setTakingExam(exam)
+                                  }}
+                                >
+                                  <span>✏️</span>
+                                  <span>ویرایش و تغییر پاسخ‌ها</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  className="flex-1 py-2 px-3 text-xs font-black text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-xl transition-all cursor-pointer inline-flex items-center justify-center gap-1.5"
+                                  onClick={() => {
+                                    sessionStorage.setItem('active_taking_exam_id', exam.id)
+                                    setTakingExam(exam)
+                                  }}
+                                >
+                                  <span>🔍</span>
+                                  <span>وضعیت ثبت</span>
+                                </button>
+                              </div>
+                            ) : (
                               <button
                                 type="button"
-                                disabled={!isStarted && !isSubmitted && !hasDraft}
-                                className={`py-2 px-3 text-xs font-black rounded-xl transition-all cursor-pointer inline-flex items-center justify-center gap-1.5 ${
-                                  isSubmitted ? 'flex-1' : 'w-full'
-                                } ${
-                                  isResultsReleased
-                                    ? 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs'
-                                    : isSubmitted
-                                    ? 'bg-amber-600 hover:bg-amber-700 text-white shadow-xs'
-                                    : hasDraft
-                                    ? 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-md ring-2 ring-emerald-200'
-                                    : isStarted
-                                    ? 'bg-blue-600 hover:bg-blue-700 text-white shadow-xs'
-                                    : 'bg-slate-200 text-slate-500 cursor-not-allowed'
-                                }`}
+                                className="w-full py-2.5 px-3 text-xs font-black text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-xl shadow-xs transition-colors cursor-pointer inline-flex items-center justify-center gap-1.5"
                                 onClick={() => {
                                   sessionStorage.setItem('active_taking_exam_id', exam.id)
                                   setTakingExam(exam)
                                 }}
                               >
-                                {isResultsReleased
-                                  ? '📊 مشاهده کارنامه و کلید'
-                                  : isSubmitted
-                                  ? '🔍 مشاهده وضعیت ثبت پاسخ'
-                                  : hasDraft
-                                  ? '📝 ادامه آزمون (دارای پاسخ ذخیره‌شده)'
-                                  : isStarted
-                                  ? '🚀 ورود به صفحه آزمون'
-                                  : `⏳ آغاز در ساعت ${countdown.timeLabel} (${countdown.remainingText})`}
+                                <span>🔍</span>
+                                <span>مشاهده وضعیت ثبت پاسخ (در انتظار تایید آموزگار)</span>
                               </button>
                             )
-                          })()}
+                          ) : hasDraft ? (
+                            <button
+                              type="button"
+                              className="w-full py-2.5 px-3 text-xs font-black text-white bg-emerald-600 hover:bg-emerald-700 rounded-xl shadow-md ring-2 ring-emerald-200 transition-all cursor-pointer inline-flex items-center justify-center gap-1.5"
+                              onClick={() => {
+                                sessionStorage.setItem('active_taking_exam_id', exam.id)
+                                setTakingExam(exam)
+                              }}
+                            >
+                              <span>📝</span>
+                              <span>ادامه آزمون (دارای پاسخ ذخیره‌شده)</span>
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={!isStarted}
+                              className={`w-full py-2.5 px-3 text-xs font-black rounded-xl transition-all inline-flex items-center justify-center gap-1.5 ${
+                                isStarted
+                                  ? 'bg-blue-600 hover:bg-blue-700 text-white shadow-xs cursor-pointer'
+                                  : 'bg-slate-200 text-slate-500 cursor-not-allowed'
+                              }`}
+                              onClick={() => {
+                                if (isStarted) {
+                                  sessionStorage.setItem('active_taking_exam_id', exam.id)
+                                  setTakingExam(exam)
+                                }
+                              }}
+                            >
+                              {isStarted ? (
+                                <>
+                                  <span>🚀</span>
+                                  <span>ورود به صفحه آزمون</span>
+                                </>
+                              ) : (
+                                <>
+                                  <span>⏳</span>
+                                  <span>آغاز در ساعت {countdown.timeLabel} ({countdown.remainingText})</span>
+                                </>
+                              )}
+                            </button>
+                          )}
                         </div>
                       </div>
                     )
@@ -1095,15 +1268,28 @@ export default function StudentDashboard({
                   {homeworkAssignments.map((assignment) => {
                     const sub = getStudentExamSubmission(assignment.id, student.id)
                     const isSubmitted = Boolean(sub)
-                    const isApproved = Boolean(sub?.teacherGrading?.approved || (sub as any)?.approved)
+                    const matchedGrade = combinedGrades.find(
+                      (g) => g.examId === assignment.id || g.matchedExam?.id === assignment.id || (g as any).sub?.id === sub?.id
+                    )
+                    const isGraded = matchedGrade?.status === 'graded' && matchedGrade.score !== null && matchedGrade.score !== undefined
+                    const isPendingReview = matchedGrade?.status === 'pending_review' || (isSubmitted && !isGraded)
+                    const isUntimedExam = assignment.mode === 'assignment' || Boolean(assignment.isUntimed) || !assignment.durationMinutes || Number(assignment.durationMinutes) <= 0
+                    const isPastDue = Boolean(assignment.dueDate && new Date(assignment.dueDate) < new Date())
+                    const isUntimedEditable = isUntimedExam && !isPastDue && !isGraded
+                    const hasDraft = !isSubmitted && typeof localStorage !== 'undefined' && Boolean(
+                      localStorage.getItem(`exam_draft_${assignment.id}_${student.id}`) ||
+                        localStorage.getItem(`exam_draft_${assignment.id}`)
+                    )
                     const isQuizMode = assignment.mode !== 'assignment'
                     return (
                       <div
                         key={assignment.id}
                         className={`rounded-2xl p-4.5 transition-all flex flex-col justify-between cursor-pointer group ${
-                          !isSubmitted
+                          !isSubmitted && !hasDraft
                             ? 'bg-gradient-to-br from-blue-50/80 via-white to-indigo-50/60 border-2 border-blue-400 hover:border-blue-600 shadow-sm hover:shadow-md ring-2 ring-blue-100/70'
-                            : isApproved
+                            : hasDraft
+                            ? 'bg-indigo-50/50 border-2 border-indigo-400 hover:border-indigo-600 shadow-xs'
+                            : isGraded
                             ? 'bg-white hover:bg-slate-50/60 border border-slate-200/90 hover:border-slate-300 shadow-2xs'
                             : 'bg-white hover:bg-amber-50/30 border border-amber-200 hover:border-amber-400 shadow-2xs'
                         }`}
@@ -1114,13 +1300,18 @@ export default function StudentDashboard({
                             <div>
                               <div className="flex items-center gap-1.5 flex-wrap">
                                 <span className={`text-[11px] font-black px-2.5 py-0.5 rounded-md ${
-                                  !isSubmitted ? 'bg-blue-600 text-white' : 'bg-blue-100 text-blue-800'
+                                  !isSubmitted && !hasDraft ? 'bg-blue-600 text-white' : 'bg-blue-100 text-blue-800'
                                 }`}>
                                   {assignment.subject || 'عمومی'} · {isQuizMode ? 'آزمون آنلاین' : 'تکلیف تعاملی'}
                                 </span>
-                                {!isSubmitted && (
+                                {!isSubmitted && !hasDraft && (
                                   <span className="text-[10px] font-black bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-md animate-pulse">
                                     🟢 جدید · آماده انجام
+                                  </span>
+                                )}
+                                {hasDraft && (
+                                  <span className="text-[10px] font-black bg-indigo-100 text-indigo-800 px-2 py-0.5 rounded-md">
+                                    ✏️ دارای پیش‌نویس
                                   </span>
                                 )}
                               </div>
@@ -1130,14 +1321,22 @@ export default function StudentDashboard({
                             </div>
                             <span
                               className={`text-[11px] font-black px-2.5 py-1 rounded-lg border whitespace-nowrap ${
-                                isApproved
+                                isGraded
                                   ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                                  : isSubmitted
+                                  : isPendingReview
                                   ? 'bg-amber-50 text-amber-800 border-amber-200'
+                                  : hasDraft
+                                  ? 'bg-indigo-50 text-indigo-800 border-indigo-200'
                                   : 'bg-rose-50 text-rose-700 border-rose-200 font-black'
                               }`}
                             >
-                              {isApproved ? '✅ تایید شد' : isSubmitted ? '✓ ارسال شد' : '⭕ در انتظار حل'}
+                              {isGraded
+                                ? `✅ نمره: ${toPersianDigits(matchedGrade.score)} از ۲۰ (${toPersianDigits(matchedGrade.raw_score)} از ${toPersianDigits(matchedGrade.raw_max)} نمره)`
+                                : isPendingReview
+                                ? '⏳ در انتظار تایید معلم'
+                                : hasDraft
+                                ? '✏️ دارای پیش‌نویس'
+                                : '⭕ در انتظار حل'}
                             </span>
                           </div>
 
@@ -1157,10 +1356,14 @@ export default function StudentDashboard({
                         <button
                           type="button"
                           className={`w-full py-2.5 px-3 text-xs font-black rounded-xl transition-all cursor-pointer inline-flex items-center justify-center gap-1.5 ${
-                            !isSubmitted
+                            !isSubmitted && !hasDraft
                               ? 'text-white bg-blue-600 hover:bg-blue-700 group-hover:bg-blue-700 shadow-sm'
-                              : isApproved
+                              : hasDraft
+                              ? 'text-white bg-indigo-600 hover:bg-indigo-700 shadow-sm ring-2 ring-indigo-200'
+                              : isGraded
                               ? 'text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200'
+                              : isUntimedEditable
+                              ? 'text-white bg-blue-600 hover:bg-blue-700 shadow-sm'
                               : 'text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200'
                           }`}
                           onClick={(e) => {
@@ -1168,10 +1371,14 @@ export default function StudentDashboard({
                             setTakingExam(assignment)
                           }}
                         >
-                          {isApproved
+                          {isGraded
                             ? '📊 مشاهده کارنامه و نمره'
-                            : isSubmitted
+                            : isUntimedEditable && isSubmitted
                             ? '✏️ مشاهده یا ویرایش پاسخ‌ها'
+                            : isSubmitted
+                            ? '🔍 مشاهده وضعیت ثبت پاسخ'
+                            : hasDraft
+                            ? '📝 ادامه حل تکلیف (دارای پیش‌نویس)'
                             : isQuizMode
                             ? '📝 ورود و شروع آزمون'
                             : '📝 ورود و شروع حل تکلیف تعاملی'}
@@ -1592,12 +1799,23 @@ export default function StudentDashboard({
                   </h3>
                   <div className="space-y-2.5">
                     {combinedGrades.map((g, idx) => {
+                      const isGraded = g.status === 'graded'
+                      const isPendingReview = g.status === 'pending_review'
+                      const isPendingSubmission = g.status === 'pending_submission'
+
                       const rawEarned = Number(g.score) || 0
                       const rawTotal = Number(g.max_score) || 20
-                      const normalized = rawTotal > 0 ? Math.round(((rawEarned / rawTotal) * 20) * 10) / 10 : rawEarned
+                      const normalized = isGraded && rawTotal > 0 ? Math.round(((rawEarned / rawTotal) * 20) * 10) / 10 : rawEarned
+
                       let badgeColor = 'text-emerald-700 bg-emerald-50 border-emerald-200'
                       let badgeLabel = 'خیلی خوب'
-                      if (normalized < 12) {
+                      if (isPendingReview) {
+                        badgeColor = 'text-amber-700 bg-amber-50 border-amber-200'
+                        badgeLabel = '⏳ در انتظار تصحیح معلم'
+                      } else if (isPendingSubmission) {
+                        badgeColor = 'text-indigo-700 bg-indigo-50 border-indigo-200'
+                        badgeLabel = '📝 در انتظار انجام تکلیف'
+                      } else if (normalized < 12) {
                         badgeColor = 'text-rose-700 bg-rose-50 border-rose-200'
                         badgeLabel = 'نیازمند تلاش'
                       } else if (normalized < 15) {
@@ -1608,48 +1826,61 @@ export default function StudentDashboard({
                         badgeLabel = 'خوب'
                       }
 
-                      const hasReview = Boolean(g.matchedExam)
+                      const hasReview = isGraded && Boolean(g.matchedExam)
+                      const canViewPendingAnswers = isPendingReview && Boolean(g.matchedExam && g.matchedSub)
 
                       return (
                         <div
                           key={g.id || idx}
-                          className={`bg-white border rounded-2xl p-3.5 sm:p-4 transition-all flex items-center justify-between gap-3 ${
-                            hasReview
+                          className={`bg-white border rounded-2xl p-3 sm:p-4 transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                            hasReview || canViewPendingAnswers
                               ? 'border-blue-200 hover:border-blue-400 hover:shadow-xs cursor-pointer'
+                              : isPendingSubmission
+                              ? 'border-indigo-200/90 hover:border-indigo-300 hover:shadow-xs'
                               : 'border-slate-200/80'
                           }`}
                           onClick={() => {
-                            if (g.matchedExam) {
+                            if (hasReview || canViewPendingAnswers) {
                               const sub =
                                 g.matchedSub ||
                                 (myExamSubs.length > 0 ? myExamSubs : getLocalSubmissions()).find(
                                   (s) =>
-                                    (s.examId === g.matchedExam.id || s.examId === g.examId) &&
+                                    (s.examId === g.matchedExam?.id || s.examId === g.examId) &&
                                     isSameStudent(s.studentId, student.id, s.studentName, student.full_name || (student as any).fullName)
                                 ) ||
                                 null
-                              if (sub) {
+                              if (sub && g.matchedExam) {
                                 setReviewExamData({
                                   exam: g.matchedExam,
                                   submission: sub,
                                 })
                               }
+                            } else if (isPendingSubmission) {
+                              if (g.matchedExam) {
+                                setTakingExam(g.matchedExam)
+                              } else {
+                                setActiveTab('homework')
+                              }
                             }
                           }}
                         >
-                          <div className="flex items-center gap-3 min-w-0">
+                          <div className="flex items-start sm:items-center gap-3 min-w-0 flex-1">
                             <div
-                              className={`w-9 h-9 sm:w-10 sm:h-10 rounded-xl flex items-center justify-center shrink-0 text-base ${
+                              className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 text-base ${
                                 hasReview
                                   ? 'bg-blue-50 text-blue-700 border border-blue-200'
+                                  : isPendingSubmission
+                                  ? 'bg-indigo-50 text-indigo-700 border border-indigo-200'
+                                  : isPendingReview
+                                  ? 'bg-amber-50 text-amber-700 border border-amber-200'
                                   : 'bg-slate-50 text-slate-600 border border-slate-200'
                               }`}
                             >
-                              {hasReview ? '📋' : '📝'}
+                              {hasReview ? '📋' : isPendingSubmission ? '✏️' : isPendingReview ? '⏳' : '📝'}
                             </div>
 
-                            <div className="min-w-0">
-                              <div className="flex items-center gap-2 flex-wrap mb-0.5">
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-2 flex-wrap mb-1">
                                 <span className="font-black text-sm text-slate-900">
                                   {g.subject || 'عمومی'}
                                 </span>
@@ -1657,37 +1888,76 @@ export default function StudentDashboard({
                                   {badgeLabel}
                                 </span>
                               </div>
-                              <div className="text-xs text-slate-500 truncate max-w-sm">
-                                {sanitizeTeacherFeedback(g.skill || g.notes || 'ارزیابی مستمر و فعالیت کلاسی')}
+                              <div className="text-xs text-slate-600 font-medium truncate max-w-md">
+                                {sanitizeTeacherFeedback(g.skill || g.notes || 'تکلیف و ارزیابی کلاسی')}
                               </div>
                               {hasReview && (
                                 <div className="text-[11px] text-blue-600 font-black mt-1">
                                   🔍 برای مشاهده سوالات و پاسخ‌نامه کلیک کنید
                                 </div>
                               )}
+                              {canViewPendingAnswers && (
+                                <div className="text-[11px] text-amber-600 font-bold mt-1">
+                                  👁️ پاسخ شما ثبت شده و در انتظار تایید آموزگار است (برای مشاهده کلیک کنید)
+                                </div>
+                              )}
+                              {isPendingSubmission && (
+                                <div className="text-[11px] text-indigo-600 font-bold mt-1">
+                                  {g.due_date
+                                    ? `مهلت انجام: ${toPersianDigits(new Date(g.due_date).toLocaleDateString('fa-IR'))}`
+                                    : 'تکلیف فعال کلاس — برای شروع کلیک کنید'}
+                                </div>
+                              )}
                             </div>
                           </div>
 
-                          <div className="text-left shrink-0">
-                            <div className="text-base sm:text-lg font-black text-slate-900">
-                              <span
-                                className={
-                                  normalized >= 16
-                                    ? 'text-emerald-700'
-                                    : normalized >= 12
-                                    ? 'text-amber-700'
-                                    : 'text-rose-700'
-                                }
-                              >
-                                {toPersianDigits(normalized)}
-                              </span>
-                              <span className="text-xs text-slate-400 mr-1 font-bold">از ۲۰</span>
-                              {(g as any).raw_score !== undefined && (g as any).raw_max !== undefined && (
-                                <span className="text-[11px] text-slate-500 font-bold block mt-0.5">
-                                  ({toPersianDigits((g as any).raw_score)} از {toPersianDigits((g as any).raw_max)} نمره)
+                          <div className="flex sm:flex-col items-center sm:items-end justify-between sm:justify-center shrink-0 pt-2 sm:pt-0 border-t sm:border-t-0 border-slate-100">
+                            {isGraded ? (
+                              <div className="text-left">
+                                <div className="text-base sm:text-lg font-black text-slate-900">
+                                  <span
+                                    className={
+                                      normalized >= 16
+                                        ? 'text-emerald-700'
+                                        : normalized >= 12
+                                        ? 'text-amber-700'
+                                        : 'text-rose-700'
+                                    }
+                                  >
+                                    {toPersianDigits(normalized)}
+                                  </span>
+                                  <span className="text-xs text-slate-400 mr-1 font-bold">از ۲۰</span>
+                                </div>
+                                {(g as any).raw_score !== undefined && (g as any).raw_max !== undefined && (
+                                  <span className="text-[11px] text-slate-500 font-bold block mt-0.5">
+                                    ({toPersianDigits((g as any).raw_score)} از {toPersianDigits((g as any).raw_max)} نمره)
+                                  </span>
+                                )}
+                              </div>
+                            ) : isPendingReview ? (
+                              <div className="text-left">
+                                <span className="inline-flex items-center gap-1 text-xs font-bold text-amber-700 bg-amber-50 border border-amber-200/90 px-3 py-1.5 rounded-xl">
+                                  <span>⏳</span>
+                                  <span>در انتظار تصحیح</span>
                                 </span>
-                              )}
-                            </div>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  if (g.matchedExam) {
+                                    setTakingExam(g.matchedExam)
+                                  } else {
+                                    setActiveTab('homework')
+                                  }
+                                }}
+                                className="px-4 py-2 text-xs font-black text-white bg-indigo-600 hover:bg-indigo-700 active:scale-95 rounded-xl shadow-xs transition-all flex items-center gap-1.5 cursor-pointer min-h-[44px]"
+                              >
+                                <span>✏️</span>
+                                <span>حل تکلیف</span>
+                              </button>
+                            )}
                           </div>
                         </div>
                       )
@@ -1917,6 +2187,12 @@ export default function StudentDashboard({
           exam={reviewExamData.exam}
           submission={reviewExamData.submission}
           onClose={() => setReviewExamData(null)}
+          onEdit={() => {
+            const targetExam = reviewExamData.exam
+            setReviewExamData(null)
+            sessionStorage.setItem('active_taking_exam_id', targetExam.id)
+            setTakingExam(targetExam)
+          }}
         />
       )}
     </div>
