@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { supabase } from '../supabaseClient'
 import { sanitizeFileName } from '../useJalaliDate'
+import { realtimeSync } from '../services/realtimeSync'
 
 const SUBJECT_TAGS = ['ریاضی', 'فارسی', 'علوم تجربی', 'هدیه‌های آسمان', 'مطالعات اجتماعی', 'عمومی']
 
@@ -25,7 +26,7 @@ export default function NewPostForm({
   const [title, setTitle] = useState('')
   const [body, setBody] = useState('')
   const [duePresetIndex, setDuePresetIndex] = useState(0)
-  const [customDueDays, setCustomDueDays] = useState(3)
+  const [customDueDays, setCustomDueDays] = useState(1)
   const [customDueTime, setCustomDueTime] = useState('20:00')
   const [publishLater, setPublishLater] = useState(false)
   const [publishInDays, setPublishInDays] = useState(1)
@@ -49,7 +50,10 @@ export default function NewPostForm({
 
   function computePublishDate(): Date {
     const now = new Date()
-    if (!publishLater) return now
+    if (!publishLater) {
+      // Backdate by 5 minutes to defeat any DB clock skew/latency, guaranteeing publish_at <= now() immediately
+      return new Date(now.getTime() - 5 * 60 * 1000)
+    }
     const [h, m] = publishTime.split(':').map(Number)
     const target = new Date(now)
     target.setDate(target.getDate() + Number(publishInDays || 0))
@@ -83,7 +87,7 @@ export default function NewPostForm({
         ? `[${selectedSubject}] ${title.trim()}`
         : title.trim()
 
-      const { error } = await supabase.rpc('teacher_create_post', {
+      const { data: createdPost, error } = await supabase.rpc('teacher_create_post', {
         p_password: teacherPassword,
         p_type: postType,
         p_title: fullTitle,
@@ -94,6 +98,26 @@ export default function NewPostForm({
       })
 
       if (error) throw error
+
+      // Instant Realtime Broadcast (<50ms) to all connected student devices
+      const finalPost = createdPost || {
+        id: String(Date.now()),
+        type: postType,
+        title: fullTitle,
+        body: body.trim(),
+        due_at: dueDate ? dueDate.toISOString() : null,
+        publish_at: publishDate.toISOString(),
+        attachment_path: attachmentPath,
+        created_at: new Date().toISOString(),
+      }
+
+      await realtimeSync.broadcast({
+        type: 'post',
+        action: 'create',
+        item: finalPost,
+        id: finalPost.id,
+      })
+
       onDone()
     } catch (error: any) {
       setErr('خطا در ثبت: ' + (error.message || 'لطفاً دوباره تلاش کنید.'))

@@ -29,6 +29,7 @@ import { sanitizeTeacherFeedback } from '../utils/cleanFeedback'
 import { toPersianDigits } from '../utils/persianNumbers'
 import { getSubmissionEffectiveScore } from '../utils/persianSemanticGrader'
 import { resolveCanonicalStudent, isSameStudent } from '../classStudents'
+import { realtimeSync } from '../services/realtimeSync'
 
 
 type StudentTab = 'home' | 'tizhooshan' | 'homework' | 'grades' | 'profile'
@@ -284,37 +285,37 @@ export default function StudentDashboard({
       return
     }
 
-    // 2. Fast-Path HTTP Server Sync (< 25ms response time on mobile)
+    // 2. High-Speed Bundled Sync (< 25ms response time on mobile)
     try {
-      const [fastPostsRes, fastExamsRes, fastSubsRes] = await Promise.allSettled([
-        fetch('/api/posts/published').then((r) => r.ok ? r.json() : null),
-        fetch('/api/exams?role=student').then((r) => r.ok ? r.json() : null),
-        fetch('/api/exams/submissions').then((r) => r.ok ? r.json() : null),
-      ])
+      const bundleRes = await fetch(`/api/classroom/bundle?studentId=${encodeURIComponent(canonicalStudentId)}`)
+        .then((r) => r.ok ? r.json() : null)
+        .catch(() => null)
 
-      if (fastPostsRes.status === 'fulfilled' && fastPostsRes.value?.posts) {
-        const cleanPosts = fastPostsRes.value.posts.filter((p: any) => !isSystemRecord(p))
-        if (cleanPosts.length > 0) {
-          setPosts(cleanPosts)
-          try {
-            localStorage.setItem('cached_published_posts', JSON.stringify(cleanPosts))
-          } catch {}
+      if (bundleRes?.success) {
+        if (Array.isArray(bundleRes.posts)) {
+          const cleanPosts = bundleRes.posts.filter((p: any) => !isSystemRecord(p))
+          if (cleanPosts.length > 0) {
+            setPosts(cleanPosts)
+            try {
+              localStorage.setItem('cached_published_posts', JSON.stringify(cleanPosts))
+            } catch {}
+          }
         }
-      }
 
-      if (fastExamsRes.status === 'fulfilled' && fastExamsRes.value?.exams) {
-        const validExams = fastExamsRes.value.exams.filter((e: Exam) => e && e.published !== false)
-        if (validExams.length > 0) {
-          setExams(validExams)
+        if (Array.isArray(bundleRes.exams)) {
+          const validExams = bundleRes.exams.filter((e: Exam) => e && e.published !== false)
+          if (validExams.length > 0) {
+            setExams(validExams)
+          }
         }
-      }
 
-      if (fastSubsRes.status === 'fulfilled' && fastSubsRes.value?.submissions) {
-        const mySubs = fastSubsRes.value.submissions.filter((s: StudentExamSubmission) =>
-          isSameStudent(s.studentId, canonicalStudentId, s.studentName, student?.full_name)
-        )
-        if (mySubs.length > 0) {
-          setMyExamSubs(mySubs)
+        if (Array.isArray(bundleRes.examSubmissions)) {
+          const mySubs = bundleRes.examSubmissions.filter((s: StudentExamSubmission) =>
+            isSameStudent(s.studentId, canonicalStudentId, s.studentName, student?.full_name)
+          )
+          if (mySubs.length > 0) {
+            setMyExamSubs(mySubs)
+          }
         }
       }
 
@@ -322,7 +323,7 @@ export default function StudentDashboard({
       setLoading(false)
       hasLoadedOnce.current = true
     } catch (e) {
-      console.warn('[StudentDashboard] Fast path sync warning:', e)
+      console.warn('[StudentDashboard] Fast bundle sync warning:', e)
     }
 
     // 3. Resilient Background Cloud Synchronization (Non-blocking with individual timeouts)
@@ -409,6 +410,73 @@ export default function StudentDashboard({
   useEffect(() => {
     loadAll()
     flushPendingExamSyncQueue().catch(() => {})
+
+    realtimeSync.init()
+    const unsubscribe = realtimeSync.subscribe((event) => {
+      if (event.type === 'post') {
+        if (event.action === 'create' && event.item && !isSystemRecord(event.item)) {
+          // Guard against scheduled future posts appearing early
+          const isFuture = event.item.publish_at && new Date(event.item.publish_at).getTime() > Date.now()
+          if (!isFuture) {
+            setPosts((prev) => {
+              const exists = prev.some((p) => p.id === event.item.id)
+              if (exists) return prev.map((p) => (p.id === event.item.id ? { ...p, ...event.item } : p))
+              const updated = [event.item, ...prev]
+              try {
+                localStorage.setItem('cached_published_posts', JSON.stringify(updated))
+              } catch {}
+              return updated
+            })
+          }
+        } else if (event.action === 'update' && event.item) {
+          setPosts((prev) => {
+            const updated = prev.map((p) =>
+              p.id === event.id || p.id === event.item.id ? { ...p, ...event.item } : p
+            )
+            try {
+              localStorage.setItem('cached_published_posts', JSON.stringify(updated))
+            } catch {}
+            return updated
+          })
+        } else if (event.action === 'delete' && event.id) {
+          setPosts((prev) => {
+            const updated = prev.filter((p) => p.id !== event.id)
+            try {
+              localStorage.setItem('cached_published_posts', JSON.stringify(updated))
+            } catch {}
+            return updated
+          })
+        }
+      } else if (event.type === 'exam') {
+        if (event.action === 'create' || event.action === 'update') {
+          if (event.item && event.item.published !== false) {
+            setExams((prev) => {
+              const exists = prev.some((e) => e.id === event.item.id)
+              return exists
+                ? prev.map((e) => (e.id === event.item.id ? { ...e, ...event.item } : e))
+                : [event.item, ...prev]
+            })
+          }
+        } else if (event.action === 'delete' && event.id) {
+          setExams((prev) => prev.filter((e) => e.id !== event.id))
+        }
+      } else if (event.type === 'grade' || event.type === 'submission') {
+        // Silently reload grades and submissions without blocking screen
+        loadAll()
+      }
+    })
+
+    const handleReconnect = () => {
+      loadAll()
+    }
+    window.addEventListener('classroom_network_reconnected', handleReconnect)
+    window.addEventListener('classroom_tab_activated', handleReconnect)
+
+    return () => {
+      unsubscribe()
+      window.removeEventListener('classroom_network_reconnected', handleReconnect)
+      window.removeEventListener('classroom_tab_activated', handleReconnect)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -1479,7 +1547,21 @@ export default function StudentDashboard({
               </div>
             )}
 
-            {homeworkPosts.length === 0 && homeworkAssignments.length === 0 && (
+            {loading && homeworkPosts.length === 0 && homeworkAssignments.length === 0 && (
+              <div className="bg-white border border-slate-200/80 rounded-2xl p-8 text-center shadow-xs animate-pulse">
+                <div className="w-12 h-12 mx-auto mb-3 rounded-2xl bg-blue-50 text-blue-500 flex items-center justify-center text-xl">
+                  ⏳
+                </div>
+                <h4 className="text-sm font-black text-slate-800 mb-1">
+                  در حال بارگذاری تکالیف کلاس...
+                </h4>
+                <p className="text-xs text-slate-500 max-w-sm mx-auto">
+                  ارتباط امن با سرور برقرار شد، دریافت جدیدترین اطلاعات در چند ثانیه...
+                </p>
+              </div>
+            )}
+
+            {!loading && homeworkPosts.length === 0 && homeworkAssignments.length === 0 && (
               <div className="bg-white border border-slate-200/80 rounded-2xl p-8 text-center shadow-xs">
                 <div className="w-14 h-14 mx-auto mb-3 rounded-2xl bg-slate-50 text-slate-400 flex items-center justify-center text-2xl shadow-2xs">
                   📝

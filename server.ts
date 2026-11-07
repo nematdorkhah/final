@@ -640,6 +640,10 @@ async function startServer() {
           cachedExams = Array.from(loadedExamsMap.values())
           saveExamsToDisk()
         }
+        const cleanPosts = (posts || []).filter((post: any) => !isSystemRecord(post))
+        if (cleanPosts.length > 0) {
+          cachedPublishedPosts = cleanPosts
+        }
         saveSubmissionsToDisk()
         saveTizhooshanToDisk()
       }
@@ -886,38 +890,134 @@ async function startServer() {
     }
   })
 
-  // Published classroom announcements & homework for students (Cleaned of system JSON dumps)
-  app.get('/api/posts/published', async (_req, res) => {
-    // 1. Instant Cache Return (Zero mobile latency)
-    if (cachedPublishedPosts.length > 0) {
-      res.json({ success: true, posts: cachedPublishedPosts })
-      // Revalidate in background asynchronously
-      withSupabaseTimeout(supabase.rpc('list_published_posts'), 4000, { data: [] })
-        .then(({ data }) => {
-          if (Array.isArray(data) && data.length > 0) {
-            cachedPublishedPosts = data.filter((post: any) => !isSystemRecord(post))
-          }
-        })
-        .catch(() => {})
-      return
-    }
-
+  async function refreshPublishedPosts(force = false): Promise<any[]> {
     try {
-      const { data: posts, error } = await withSupabaseTimeout(
+      const { data, error } = await withSupabaseTimeout(
         supabase.rpc('list_published_posts'),
         3500,
         { data: [] }
       )
-      if (error && cachedPublishedPosts.length === 0) {
-        return res.status(500).json({ success: false, error: error.message })
+      if (!error && Array.isArray(data)) {
+        const clean = data.filter((post: any) => !isSystemRecord(post))
+        if (clean.length > 0 || force) {
+          cachedPublishedPosts = clean
+        }
       }
-      const cleanPosts = (posts || []).filter((post: any) => !isSystemRecord(post))
-      cachedPublishedPosts = cleanPosts
-      res.json({ success: true, posts: cleanPosts })
-    } catch (err: any) {
-      console.warn('Failed fetching published posts:', err)
-      res.json({ success: true, posts: cachedPublishedPosts })
+    } catch (e) {
+      console.warn('refreshPublishedPosts warning:', e)
     }
+    return cachedPublishedPosts
+  }
+
+  // Instant notification endpoint called when teacher creates/updates/deletes posts, exams, or grades
+  app.post('/api/sync/notify', async (req, res) => {
+    const { type, action, item, id } = req.body || {}
+    try {
+      if (type === 'post') {
+        if (action === 'create' && item && !isSystemRecord(item)) {
+          // If scheduled for the future, DO NOT add to cachedPublishedPosts!
+          const isFuture = item.publish_at && new Date(item.publish_at).getTime() > Date.now()
+          if (!isFuture) {
+            const exists = cachedPublishedPosts.some((p: any) => p.id === item.id)
+            if (!exists) {
+              cachedPublishedPosts = [item, ...cachedPublishedPosts]
+            }
+          }
+        } else if (action === 'update' && item) {
+          cachedPublishedPosts = cachedPublishedPosts.map((p: any) => (p.id === item.id ? { ...p, ...item } : p))
+        } else if (action === 'delete' && id) {
+          cachedPublishedPosts = cachedPublishedPosts.filter((p: any) => p.id !== id)
+        }
+        // Background revalidation
+        refreshPublishedPosts().catch(() => {})
+      } else if (type === 'exam') {
+        if (action === 'delete' && id) {
+          cachedExams = cachedExams.filter((e: any) => e.id !== id)
+          saveExamsToDisk()
+        }
+      }
+      res.json({ success: true, timestamp: Date.now() })
+    } catch (e: any) {
+      res.status(500).json({ success: false, error: e?.message })
+    }
+  })
+
+  // Published classroom announcements & homework for students (Cleaned of system JSON dumps)
+  app.get('/api/posts/published', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+    const fresh = req.query.fresh === '1'
+
+    if (fresh || cachedPublishedPosts.length === 0) {
+      const freshPosts = await refreshPublishedPosts(true)
+      const nowMs = Date.now()
+      const readyPosts = freshPosts.filter((p: any) => !p.publish_at || new Date(p.publish_at).getTime() <= nowMs)
+      return res.json({ success: true, posts: readyPosts })
+    }
+
+    // Instant return of warm cache + background refresh
+    const nowMs = Date.now()
+    const readyPosts = cachedPublishedPosts.filter((p: any) => !p.publish_at || new Date(p.publish_at).getTime() <= nowMs)
+    res.json({ success: true, posts: readyPosts })
+    refreshPublishedPosts().catch(() => {})
+  })
+
+  // BUNDLED CLASSROOM DATA ENDPOINT: Combines posts, exams, and student submissions in ONE <25ms response
+  app.get('/api/classroom/bundle', async (req, res) => {
+    await ensureDataInitialized()
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+
+    const rawStudentId = (req.query.studentId as string) || ''
+    const canon = resolveCanonicalStudent(rawStudentId)
+    const canonicalStudentId = canon?.id || rawStudentId
+
+    // 1. Strict answer key and hint stripping for student security
+    const sanitizedExams = cachedExams
+      .filter((e) => Boolean(e && e.published !== false))
+      .map((exam) => {
+        const resultsReleased = Boolean(exam.resultsReleased)
+        return {
+          ...exam,
+          questions: (exam.questions || []).map((q: any) => {
+            if (resultsReleased) return q
+            // Strip ALL possible teacher keys, hints, notes, explanations and correct answers
+            const {
+              correctAnswer,
+              rubricOrHint,
+              gradingNotes,
+              explanation,
+              solution,
+              teacherNotes,
+              ...safeQ
+            } = q
+            return safeQ
+          }),
+        }
+      })
+
+    // 2. Student submissions
+    const studentSubs = canonicalStudentId
+      ? cachedSubmissions.filter((s) => isSameStudent(s.studentId, canonicalStudentId, s.studentName, canon?.fullName))
+      : []
+
+    // 3. Return warm cached posts (excluding any future scheduled posts)
+    if (cachedPublishedPosts.length === 0) {
+      await refreshPublishedPosts(true)
+    }
+
+    const nowMs = Date.now()
+    const studentEligiblePosts = cachedPublishedPosts.filter((p: any) => {
+      if (isSystemRecord(p)) return false
+      if (p.publish_at && new Date(p.publish_at).getTime() > nowMs) return false
+      return true
+    })
+
+    res.json({
+      success: true,
+      timestamp: Date.now(),
+      posts: studentEligiblePosts,
+      exams: sanitizedExams,
+      examSubmissions: studentSubs,
+    })
   })
 
   // Uniformly enforce teacher authentication across ALL /api/ai/* endpoints to prevent unauthorized quota consumption

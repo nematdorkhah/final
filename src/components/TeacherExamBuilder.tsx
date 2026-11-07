@@ -28,6 +28,7 @@ import {
 import { CLASS_STUDENTS_ROSTER } from '../classStudents'
 import { sortByLastName } from '../utils/persianSort'
 import { toPersianDigits } from '../utils/persianNumbers'
+import { realtimeSync } from '../services/realtimeSync'
 import WhatsappPosterModal from './WhatsappPosterModal'
 import { WhatsappPosterData } from '../types/whatsappPoster'
 import {
@@ -708,6 +709,12 @@ export default function TeacherExamBuilder({
       }
 
       await saveExam(readyExam, teacherPassword)
+      realtimeSync.broadcast({
+        type: 'exam',
+        action: isEditingExisting ? 'update' : 'create',
+        item: readyExam,
+        id: readyExam.id,
+      }).catch(() => {})
       await loadExams()
       setDraftExam(null)
       setIsEditingExisting(false)
@@ -805,6 +812,12 @@ export default function TeacherExamBuilder({
         teacherNotes: teacherNoteDraft,
         teacherPassword,
       })
+      realtimeSync.broadcast({
+        type: 'grade',
+        action: 'update',
+        studentId: selectedSubForGrading.studentId,
+        id: selectedExamForSubs.id,
+      }).catch(() => {})
       setGradingSuccessMsg('نمره با موفقیت تایید و در کارنامه دانش‌آموز ثبت شد ✓')
       setSubsRefreshKey((k) => k + 1)
       // Update local state

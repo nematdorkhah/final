@@ -7,6 +7,7 @@ import AttachmentViewerModal from './AttachmentViewerModal'
 import WhatsappPosterModal from './WhatsappPosterModal'
 import { WhatsappPosterData } from '../types/whatsappPoster'
 import { deleteExam, getLocalExams } from '../utils/examStore'
+import { realtimeSync } from '../services/realtimeSync'
 
 export default function PostsBoard({
   posts,
@@ -108,6 +109,14 @@ export default function PostsBoard({
         })
       }
 
+      // Broadcast update to all connected students and tabs
+      realtimeSync.broadcast({
+        type: 'post',
+        action: 'update',
+        item: { id: postId, title: titleDraft, body: bodyDraft, due_at: isoDue },
+        id: postId,
+      }).catch(() => {})
+
       setEditingId(null)
       if (onChanged) onChanged()
     } catch (err: any) {
@@ -131,6 +140,7 @@ export default function PostsBoard({
       const isExam = getLocalExams().some((e) => e.id === postId) || postId.startsWith('exam_')
       if (isExam) {
         await deleteExam(postId, teacherPassword)
+        realtimeSync.broadcast({ type: 'exam', action: 'delete', id: postId }).catch(() => {})
         setDeleteConfirmTarget(null)
         if (expandedPostId === postId) setExpandedPostId(null)
         if (editingId === postId) setEditingId(null)
@@ -175,6 +185,13 @@ export default function PostsBoard({
           }
         }
       }
+
+      // Broadcast delete to all connected students
+      realtimeSync.broadcast({
+        type: 'post',
+        action: 'delete',
+        id: postId,
+      }).catch(() => {})
 
       // 3. Immediately refresh page state
       setDeleteConfirmTarget(null)

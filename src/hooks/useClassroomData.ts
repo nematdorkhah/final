@@ -3,6 +3,7 @@ import { supabase } from '../supabaseClient'
 import { todayISO } from '../useJalaliDate'
 import { sortByLastName } from '../utils/persianSort'
 import { CLASS_STUDENTS_ROSTER } from '../classStudents'
+import { realtimeSync } from '../services/realtimeSync'
 
 export function useClassroomData(teacherPassword: string) {
   // Safe initial state from roster so UI is never stuck on empty
@@ -157,6 +158,48 @@ export function useClassroomData(teacherPassword: string) {
 
   useEffect(() => {
     loadAll()
+
+    realtimeSync.init()
+    const unsubscribe = realtimeSync.subscribe((event) => {
+      if (event.type === 'post') {
+        if (event.action === 'create' && event.item) {
+          const title = String(event.item.title || '')
+          if (!title.startsWith('__') && !title.includes('__SYSTEM_') && !title.includes('__EXAM_SUB__')) {
+            setPosts((prev) => {
+              const exists = prev.some((p) => p.id === event.item.id)
+              const updated = exists ? prev.map((p) => (p.id === event.item.id ? { ...p, ...event.item } : p)) : [event.item, ...prev]
+              try {
+                localStorage.setItem('cached_teacher_posts_v2', JSON.stringify(updated))
+              } catch {}
+              return updated
+            })
+          }
+        } else if (event.action === 'update' && event.item) {
+          setPosts((prev) => {
+            const updated = prev.map((p) => (p.id === event.id || p.id === event.item.id ? { ...p, ...event.item } : p))
+            try {
+              localStorage.setItem('cached_teacher_posts_v2', JSON.stringify(updated))
+            } catch {}
+            return updated
+          })
+        } else if (event.action === 'delete' && event.id) {
+          setPosts((prev) => {
+            const updated = prev.filter((p) => p.id !== event.id)
+            try {
+              localStorage.setItem('cached_teacher_posts_v2', JSON.stringify(updated))
+            } catch {}
+            return updated
+          })
+        }
+      } else if (event.type === 'submission' || event.type === 'grade' || event.type === 'attendance') {
+        // Silently refresh teacher data when students submit or grades change
+        loadAll()
+      }
+    })
+
+    return () => {
+      unsubscribe()
+    }
   }, [loadAll])
 
   return {
