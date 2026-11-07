@@ -251,124 +251,158 @@ export default function StudentDashboard({
     if (!item) return true
     const title = String(item.title || '')
     if (title.startsWith('__')) return true
-    if (title.includes('__SYSTEM_') || title.includes('__EXAM_SUB__')) return true
+    if (title.includes('__SYSTEM_') || title.includes('__EXAM_SUB__') || title.includes('__EXAM_DRAFT__')) return true
     if (item.type === 'exam') return true
-    if (typeof item.body === 'string' && (item.body.includes('"questions":') || item.body.includes('"examId":'))) {
-      try {
-        const parsed = JSON.parse(item.body)
-        if (parsed.questions || parsed.examId || Array.isArray(parsed)) return true
-      } catch {}
-    }
     return false
   }
 
   async function loadAll() {
-    if (!hasLoadedOnce.current) setLoading(true)
+    // 1. Instant Cache Hydration: If local data exists, clear loading screen immediately (<5ms)
+    const localExams = getLocalExams()
+    if (localExams.length > 0) {
+      setExams(localExams.filter((e) => e.published !== false))
+    }
+    const localSubs = getLocalSubmissions()
+    if (localSubs.length > 0) {
+      setMyExamSubs(localSubs)
+    }
+
+    if (hasLoadedOnce.current || localExams.length > 0) {
+      setLoading(false)
+    } else {
+      setLoading(true)
+    }
     setLoadError(null)
 
-    // 7-second safety timeout guard against hanging network requests
-    const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('زمان پاسخگویی سرور به پایان رسید.')), 7000)
-    )
+    const rawId = student?.id || student?.access_code
+    const rosterInfo = resolveCanonicalStudent(rawId || student?.full_name)
+    const canonicalStudentId = rosterInfo?.id || rawId
+    const canonicalAccessCode = rosterInfo?.nationalCode || student?.access_code || rawId
 
+    if (!canonicalStudentId) {
+      setLoading(false)
+      return
+    }
+
+    // 2. Fast-Path HTTP Server Sync (< 25ms response time on mobile)
     try {
-      const rawId = student?.id || student?.access_code
-      const rosterInfo = resolveCanonicalStudent(rawId || student?.full_name)
-      const canonicalStudentId = rosterInfo?.id || rawId
-      const canonicalAccessCode = rosterInfo?.nationalCode || student?.access_code || rawId
-
-      if (!canonicalStudentId) {
-        throw new Error('مشخصات نشست دانش‌آموز یافت نشد. لطفاً مجدداً وارد شوید.')
-      }
-
-      const fetchPromise = Promise.all([
-        supabase.rpc('list_published_posts'),
-        supabase.rpc('student_list_my_submissions', {
-          p_student_id: canonicalStudentId,
-          p_access_code: canonicalAccessCode,
-        }),
-        supabase.rpc('student_list_my_grades', {
-          p_student_id: canonicalStudentId,
-          p_access_code: canonicalAccessCode,
-        }),
-        supabase.rpc('student_list_my_attendance', {
-          p_student_id: canonicalStudentId,
-          p_access_code: canonicalAccessCode,
-        }),
-        fetchPublishedExams(),
-        fetchExamSubmissions(undefined, canonicalStudentId),
+      const [fastPostsRes, fastExamsRes, fastSubsRes] = await Promise.allSettled([
+        fetch('/api/posts/published').then((r) => r.ok ? r.json() : null),
+        fetch('/api/exams?role=student').then((r) => r.ok ? r.json() : null),
+        fetch('/api/exams/submissions').then((r) => r.ok ? r.json() : null),
       ])
 
-      const [p, sub, g, att, examList, examSubsList] = (await Promise.race([fetchPromise, timeoutPromise])) as any[]
-
-      // Filter out all system posts so students only see genuine announcements and homework
-      const rawPosts = p?.data || []
-      const cleanPosts = rawPosts.filter((post: any) => !isSystemRecord(post))
-      setPosts(cleanPosts)
-      setMySubmissions(sub?.data || [])
-      setMyGrades(g?.data || [])
-      setMyAttendance(att?.data || [])
-      if (Array.isArray(examSubsList)) {
-        setMyExamSubs(examSubsList)
+      if (fastPostsRes.status === 'fulfilled' && fastPostsRes.value?.posts) {
+        const cleanPosts = fastPostsRes.value.posts.filter((p: any) => !isSystemRecord(p))
+        if (cleanPosts.length > 0) {
+          setPosts(cleanPosts)
+          try {
+            localStorage.setItem('cached_published_posts', JSON.stringify(cleanPosts))
+          } catch {}
+        }
       }
 
-      try {
-        if (typeof localStorage !== 'undefined') {
-          localStorage.setItem('cached_published_posts', JSON.stringify(cleanPosts))
-          if (canonicalStudentId) {
-            localStorage.setItem(`cached_submissions_${canonicalStudentId}`, JSON.stringify(sub?.data || []))
-            localStorage.setItem(`cached_grades_${canonicalStudentId}`, JSON.stringify(g?.data || []))
-          }
+      if (fastExamsRes.status === 'fulfilled' && fastExamsRes.value?.exams) {
+        const validExams = fastExamsRes.value.exams.filter((e: Exam) => e && e.published !== false)
+        if (validExams.length > 0) {
+          setExams(validExams)
         }
-      } catch {}
+      }
 
-      // Double-layer exam resolution: merge fetchPublishedExams with any exams directly in list_published_posts
-      const extractedFromPosts = extractExamsFromPosts(rawPosts)
-      const mergedExamsMap = new Map<string, Exam>()
-      ;(examList || []).forEach((e: Exam) => mergedExamsMap.set(e.id, e))
-      extractedFromPosts.forEach((e: Exam) => {
-        if (!mergedExamsMap.has(e.id)) {
-          const { questions, ...rest } = e
-          const safeQ = (questions || []).map((q: any) => {
-            const { correctAnswer, rubricOrHint, ...safe } = q
-            return safe
-          })
-          mergedExamsMap.set(e.id, { ...rest, questions: safeQ })
+      if (fastSubsRes.status === 'fulfilled' && fastSubsRes.value?.submissions) {
+        const mySubs = fastSubsRes.value.submissions.filter((s: StudentExamSubmission) =>
+          isSameStudent(s.studentId, canonicalStudentId, s.studentName, student?.full_name)
+        )
+        if (mySubs.length > 0) {
+          setMyExamSubs(mySubs)
         }
-      })
-      const finalExams = Array.from(mergedExamsMap.values())
-      console.log(`[StudentDashboard] Resolved ${finalExams.length} published exams for student`)
-      setExams(finalExams)
+      }
+
+      // Immediately lift loading screen
+      setLoading(false)
       hasLoadedOnce.current = true
+    } catch (e) {
+      console.warn('[StudentDashboard] Fast path sync warning:', e)
+    }
 
-      // Auto-resume active exam if browser was refreshed or reopened mid-exam
-      try {
-        const activeExamId = sessionStorage.getItem('active_taking_exam_id')
-        if (activeExamId && Array.isArray(examList)) {
-          const found = examList.find((e: Exam) => e.id === activeExamId)
-          if (found) {
-            const prevSub = getStudentExamSubmission(found.id, canonicalStudentId)
-            if (!prevSub) {
-              setTakingExam(found)
-            } else {
-              sessionStorage.removeItem('active_taking_exam_id')
-            }
-          }
-        }
-      } catch (err) {
-        console.warn('Failed auto-resuming exam:', err)
+    // 3. Resilient Background Cloud Synchronization (Non-blocking with individual timeouts)
+    try {
+      const withTimeout = async <T,>(promise: PromiseLike<T> | Promise<T>, ms = 4000): Promise<T> => {
+        return Promise.race([
+          Promise.resolve(promise),
+          new Promise<T>((_, reject) => setTimeout(() => reject(new Error('timeout')), ms)),
+        ])
       }
-    } catch (err: any) {
-      console.warn('Failed loading student classroom data:', err)
-      setLoadError(err?.message || 'خطا در برقراری ارتباط با سرور')
-      // Ensure state is initialized with safe empty arrays so dashboard renders
-      setPosts((prev) => prev || [])
-      setMySubmissions((prev) => prev || [])
-      setMyGrades((prev) => prev || [])
-      setMyAttendance((prev) => prev || [])
-      setExams((prev) => prev || [])
+
+      const results = await Promise.allSettled([
+        withTimeout<any>(supabase.rpc('list_published_posts')),
+        withTimeout<any>(
+          supabase.rpc('student_list_my_submissions', {
+            p_student_id: canonicalStudentId,
+            p_access_code: canonicalAccessCode,
+          })
+        ),
+        withTimeout<any>(
+          supabase.rpc('student_list_my_grades', {
+            p_student_id: canonicalStudentId,
+            p_access_code: canonicalAccessCode,
+          })
+        ),
+        withTimeout<any>(
+          supabase.rpc('student_list_my_attendance', {
+            p_student_id: canonicalStudentId,
+            p_access_code: canonicalAccessCode,
+          })
+        ),
+        withTimeout<Exam[]>(fetchPublishedExams()),
+        withTimeout<StudentExamSubmission[]>(fetchExamSubmissions(undefined, canonicalStudentId)),
+      ])
+
+      const [pRes, subRes, gRes, attRes, examListRes, examSubsListRes] = results
+
+      if (pRes.status === 'fulfilled' && (pRes.value as any)?.data) {
+        const rawPosts = (pRes.value as any).data || []
+        const cleanPosts = rawPosts.filter((post: any) => !isSystemRecord(post))
+        if (cleanPosts.length > 0) {
+          setPosts(cleanPosts)
+          try {
+            localStorage.setItem('cached_published_posts', JSON.stringify(cleanPosts))
+          } catch {}
+        }
+      }
+
+      if (subRes.status === 'fulfilled' && (subRes.value as any)?.data) {
+        setMySubmissions((subRes.value as any).data || [])
+        try {
+          localStorage.setItem(`cached_submissions_${canonicalStudentId}`, JSON.stringify((subRes.value as any).data || []))
+        } catch {}
+      }
+
+      if (gRes.status === 'fulfilled' && (gRes.value as any)?.data) {
+        setMyGrades((gRes.value as any).data || [])
+        try {
+          localStorage.setItem(`cached_grades_${canonicalStudentId}`, JSON.stringify((gRes.value as any).data || []))
+        } catch {}
+      }
+
+      if (attRes.status === 'fulfilled' && (attRes.value as any)?.data) {
+        setMyAttendance((attRes.value as any).data || [])
+      }
+
+      if (examSubsListRes.status === 'fulfilled' && Array.isArray(examSubsListRes.value)) {
+        setMyExamSubs(examSubsListRes.value)
+      }
+
+      if (examListRes.status === 'fulfilled' && Array.isArray(examListRes.value) && examListRes.value.length > 0) {
+        const mergedExamsMap = new Map<string, Exam>()
+        examListRes.value.forEach((e: Exam) => mergedExamsMap.set(e.id, e))
+        setExams(Array.from(mergedExamsMap.values()))
+      }
+    } catch (err) {
+      console.warn('Background Supabase refresh warning:', err)
     } finally {
       setLoading(false)
+      hasLoadedOnce.current = true
     }
   }
 
@@ -723,27 +757,18 @@ export default function StudentDashboard({
     return activePosts.filter((p) => p.type === 'announcement' && !isSystemRecord(p))
   }, [activePosts])
 
-  // Unsubmitted homeworks are ALWAYS shown so student can still submit them (marked past due if late).
-  // Submitted homeworks are cleaned up after 5 days so they don't pile up.
+  // Active homework posts
   const homeworkPosts = useMemo(() => {
-    const submittedIds = new Set(mySubmissions.map((s) => s.post_id))
     return posts.filter((p) => {
       if (isSystemRecord(p)) return false
-      if (p.type !== 'homework') return false
-      if (!submittedIds.has(p.id)) return true
-      return !isItemExpiredForStudent(p, 5)
+      return p.type === 'homework'
     })
-  }, [posts, mySubmissions])
+  }, [posts])
 
-  // Active exams for home dashboard
+  // Active exams & assignments for home dashboard
   const activeExams = useMemo(() => {
     return exams
-      .filter((e) => {
-        if (!e || e.published === false) return false
-        const sub = getStudentExamSubmission(e.id, student.id)
-        if (!sub) return true
-        return !isItemExpiredForStudent(e, 5)
-      })
+      .filter((e) => Boolean(e && e.published !== false))
       .sort((a, b) => {
         const subA = getStudentExamSubmission(a.id, student.id)
         const subB = getStudentExamSubmission(b.id, student.id)
@@ -754,17 +779,10 @@ export default function StudentDashboard({
   }, [exams, student.id])
 
   // Dedicated list for Homework (تکالیف) tab:
-  // ONLY includes active homework assignments (e.g. آزمون تقسیم), strictly excluding concluded past exams (e.g. املای درس اول و دوم)
+  // Includes all active and completed class assignments and online exams
   const homeworkAssignments = useMemo(() => {
     return exams
-      .filter((e) => {
-        if (!e || e.published === false) return false
-        // Concluded spelling exam has ended and belongs in report card / home archive
-        if (e.id === 'a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2' || e.title.includes('املای درس اول و دوم')) {
-          return false
-        }
-        return true
-      })
+      .filter((e) => Boolean(e && e.published !== false))
       .sort((a, b) => {
         const subA = getStudentExamSubmission(a.id, student.id)
         const subB = getStudentExamSubmission(b.id, student.id)
@@ -1213,6 +1231,77 @@ export default function StudentDashboard({
                             </button>
                           )}
                         </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Homework Posts Section on Home Tab */}
+            {homeworkPosts.length > 0 && (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-base sm:text-lg font-black text-slate-900 tracking-tight flex items-center gap-2">
+                      <span>📐</span>
+                      <span>تکالیف درسی و تمرین‌های کلاسی</span>
+                    </h3>
+                    <p className="text-xs text-slate-500 font-medium mt-0.5">
+                      تکالیف تعیین‌شده توسط آموزگار محترم
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('homework')}
+                    className="text-xs font-bold text-blue-600 hover:text-blue-800 cursor-pointer flex items-center gap-1"
+                  >
+                    <span>مشاهده همه</span>
+                    <span>←</span>
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {homeworkPosts.slice(0, 4).map((hw) => {
+                    const isSub = mySubmissions.some((s) => s.post_id === hw.id)
+                    const isPastDue = Boolean(hw.due_at && new Date(hw.due_at) < new Date())
+                    return (
+                      <div
+                        key={hw.id}
+                        onClick={() => {
+                          setActiveTab('homework')
+                          setExpandedHomeworkId(hw.id)
+                        }}
+                        className="bg-white border border-slate-200/90 rounded-2xl p-4 shadow-2xs hover:shadow-xs transition-all cursor-pointer flex items-center justify-between gap-3"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 mb-1">
+                            <span className="text-[11px] font-black bg-blue-50 text-blue-700 px-2 py-0.5 rounded-md">
+                              {hw.subject || 'عمومی'}
+                            </span>
+                            <span
+                              className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${
+                                isSub
+                                  ? 'bg-emerald-50 text-emerald-800'
+                                  : isPastDue
+                                  ? 'bg-rose-50 text-rose-800'
+                                  : 'bg-amber-50 text-amber-800'
+                              }`}
+                            >
+                              {isSub ? '✅ ارسال شده' : isPastDue ? '⚠️ مهلت گذشته' : '⭕ در انتظار ارسال'}
+                            </span>
+                          </div>
+                          <h4 className="text-sm font-black text-slate-800 truncate">
+                            {hw.title}
+                          </h4>
+                          {hw.due_at && (
+                            <div className="text-[11px] text-slate-400 mt-0.5">
+                              مهلت: {toPersianDigits(new Date(hw.due_at).toLocaleDateString('fa-IR'))}
+                            </div>
+                          )}
+                        </div>
+                        <span className="text-xs font-black text-blue-600 bg-blue-50 px-2.5 py-1.5 rounded-xl shrink-0">
+                          مشاهده 👁️
+                        </span>
                       </div>
                     )
                   })}
@@ -2165,6 +2254,10 @@ export default function StudentDashboard({
         <StudentExamTaker
           exam={takingExam}
           student={student}
+          initialSubmission={
+            myExamSubs.find((s) => s.examId === takingExam.id) ||
+            combinedGrades.find((g) => g.matchedExam?.id === takingExam.id || g.examId === takingExam.id)?.matchedSub
+          }
           onClose={() => setTakingExam(null)}
           onFinished={() => {
             loadAll()

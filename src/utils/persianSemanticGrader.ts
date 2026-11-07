@@ -2110,6 +2110,7 @@ export function getSubmissionEffectiveScore(
     (sub.answers as any)?.raw_score
   )
 
+  // 1. If approved with explicit per-question scores, calculate authoritative sum
   if (isApproved && sub.teacherGrading?.questionScores) {
     const questionScores: Record<string, number> = {}
     let sum = 0
@@ -2135,15 +2136,17 @@ export function getSubmissionEffectiveScore(
     }
   }
 
-  // If approved by teacher but without explicit per-question scores
+  // 2. Evaluate from student actual answers against rubrics
+  const evalResult = evaluateEntireExamSubmission(exam, sub.answers || {})
+
+  // 3. If approved by teacher without per-question scores, or using stored scalar scores:
   if (isApproved && (!isNaN(officialTeacherScaled) || !isNaN(officialTeacherTotal))) {
-    const evalResult = evaluateEntireExamSubmission(exam, sub.answers || {})
     let scaledScore20 = !isNaN(officialTeacherScaled) && officialTeacherScaled > 0
       ? officialTeacherScaled
       : safeScaled20(officialTeacherTotal, maxPoints)
     let totalScore = !isNaN(officialTeacherTotal) && officialTeacherTotal > 0
       ? officialTeacherTotal
-      : (scaledScore20 >= 20 ? maxPoints : evalResult.earnedPoints)
+      : safeScore(Math.round(((scaledScore20 / 20) * maxPoints) * 10) / 10, maxPoints)
 
     // Detection: If totalScore exceeds maxPoints, it was stored on the 20-point scale!
     if (totalScore > maxPoints) {
@@ -2151,9 +2154,14 @@ export function getSubmissionEffectiveScore(
       totalScore = Math.min(maxPoints, Math.round(((scaledScore20 / 20) * maxPoints) * 10) / 10)
     }
 
-    // Align with evalResult if available and closer to real score
-    if (evalResult.earnedPoints > 0 && Math.abs(evalResult.earnedPoints - totalScore) < 0.5) {
+    // Critical Sanity Check: If student had wrong answers in actual submitted answers (e.g. wrongCount > 0),
+    // but stored score was an old stale 20/20 from previous universal bonus, use evalResult!
+    if (evalResult.wrongCount > 0 && scaledScore20 >= 20 && evalResult.scaledScore20 < 20) {
+      scaledScore20 = evalResult.scaledScore20
       totalScore = evalResult.earnedPoints
+    } else if (evalResult.earnedPoints > 0 && Math.abs(evalResult.earnedPoints - totalScore) < 0.5) {
+      totalScore = evalResult.earnedPoints
+      scaledScore20 = evalResult.scaledScore20
     }
 
     return {
@@ -2166,7 +2174,6 @@ export function getSubmissionEffectiveScore(
     }
   }
 
-  const evalResult = evaluateEntireExamSubmission(exam, sub.answers || {})
   return {
     isApproved: false,
     totalScore: evalResult.earnedPoints,

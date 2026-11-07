@@ -206,14 +206,8 @@ async function startServer() {
     if (!post) return true
     const title = String(post.title || '')
     if (title.startsWith('__')) return true
-    if (title.includes('__SYSTEM_') || title.includes('__EXAM_SUB__')) return true
+    if (title.includes('__SYSTEM_') || title.includes('__EXAM_SUB__') || title.includes('__EXAM_DRAFT__')) return true
     if (post.type === 'exam') return true
-    if (typeof post.body === 'string' && (post.body.includes('"questions":') || post.body.includes('"examId":'))) {
-      try {
-        const parsed = JSON.parse(post.body)
-        if (parsed.questions || parsed.examId || Array.isArray(parsed)) return true
-      } catch {}
-    }
     return false
   }
 
@@ -233,6 +227,7 @@ async function startServer() {
   const cachedSubmissionsMap = new Map<string, any>()
   let cachedSubmissions: any[] = []
   let cachedTizhooshanProgress: Record<string, any> = {}
+  let cachedPublishedPosts: any[] = []
   const DRAFTS_BACKUP_FILE = path.join(DATA_DIR, 'exam_drafts.json')
   const cachedDraftsMap = new Map<string, any>()
   let isInitializedFromSupabase = false
@@ -893,20 +888,35 @@ async function startServer() {
 
   // Published classroom announcements & homework for students (Cleaned of system JSON dumps)
   app.get('/api/posts/published', async (_req, res) => {
+    // 1. Instant Cache Return (Zero mobile latency)
+    if (cachedPublishedPosts.length > 0) {
+      res.json({ success: true, posts: cachedPublishedPosts })
+      // Revalidate in background asynchronously
+      withSupabaseTimeout(supabase.rpc('list_published_posts'), 4000, { data: [] })
+        .then(({ data }) => {
+          if (Array.isArray(data) && data.length > 0) {
+            cachedPublishedPosts = data.filter((post: any) => !isSystemRecord(post))
+          }
+        })
+        .catch(() => {})
+      return
+    }
+
     try {
       const { data: posts, error } = await withSupabaseTimeout(
         supabase.rpc('list_published_posts'),
-        SUPABASE_TIMEOUT_MS,
+        3500,
         { data: [] }
       )
-      if (error) {
+      if (error && cachedPublishedPosts.length === 0) {
         return res.status(500).json({ success: false, error: error.message })
       }
       const cleanPosts = (posts || []).filter((post: any) => !isSystemRecord(post))
+      cachedPublishedPosts = cleanPosts
       res.json({ success: true, posts: cleanPosts })
     } catch (err: any) {
       console.warn('Failed fetching published posts:', err)
-      res.status(500).json({ success: false, error: 'خطا در واکشی اعلامیه‌ها' })
+      res.json({ success: true, posts: cachedPublishedPosts })
     }
   })
 

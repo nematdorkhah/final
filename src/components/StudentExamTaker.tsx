@@ -30,15 +30,17 @@ interface StudentExamDraft {
 export default function StudentExamTaker({
   exam,
   student,
+  initialSubmission,
   onClose,
   onFinished,
 }: {
   exam: Exam
   student: any
+  initialSubmission?: StudentExamSubmission
   onClose: () => void
   onFinished?: () => void
 }) {
-  const [existingSubmission, setExistingSubmission] = useState<StudentExamSubmission | undefined>(undefined)
+  const [existingSubmission, setExistingSubmission] = useState<StudentExamSubmission | undefined>(initialSubmission)
   const [currentQIndex, setCurrentQIndex] = useState(0)
   const [answers, setAnswers] = useState<Record<string, StudentExamAnswer>>({})
   const [timeLeftSeconds, setTimeLeftSeconds] = useState((Number(exam.durationMinutes) || 30) * 60)
@@ -154,8 +156,9 @@ export default function StudentExamTaker({
 
   // 1. Restore previous submission or saved draft on component mount with anti-tamper logic
   useEffect(() => {
-    // Check if exam already submitted
-    const prevSub = getStudentExamSubmission(exam.id, student.id)
+    // Check if exam already submitted or passed via initialSubmission prop
+    const localSub = getStudentExamSubmission(exam.id, student.id)
+    const prevSub = initialSubmission || localSub
     const isApprovedOrReleased = Boolean(
       prevSub?.teacherGrading?.approved ||
       (prevSub && isExamResultsReleased(exam, prevSub))
@@ -536,11 +539,11 @@ export default function StudentExamTaker({
       sub.instantStats || computeInstantExamResult(exam, sub.answers || {})
 
     const maxPts = eff.maxPoints || safeNumber(stats.maxPoints || exam.totalPoints, 20) || 20
-    const finalScore = isApproved
+    const finalScore = eff.totalScore !== undefined && eff.totalScore !== null
       ? eff.totalScore
       : safeScore(sub.aiGrading?.totalScore ?? stats.earnedPoints, maxPts)
 
-    const finalScaled20 = isApproved
+    const finalScaled20 = eff.scaledScore20 !== undefined && eff.scaledScore20 !== null
       ? eff.scaledScore20
       : safeScaled20(finalScore, maxPts)
 
