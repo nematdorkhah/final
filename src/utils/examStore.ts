@@ -263,11 +263,20 @@ export interface PublishedExamsResult {
   fromCacheOnly: boolean
 }
 
+const inFlightPublishedExams = new Map<string, Promise<PublishedExamsResult>>()
+
 export async function fetchPublishedExamsWithDiagnostics(
   forStudent = true,
   forceFresh = false,
   options: { skipBackendApi?: boolean } = {}
 ): Promise<PublishedExamsResult> {
+  const dedupeKey = `${forStudent ? '1' : '0'}:${forceFresh ? '1' : '0'}:${options.skipBackendApi ? '1' : '0'}`
+  const existingFlight = inFlightPublishedExams.get(dedupeKey)
+  if (existingFlight) {
+    return existingFlight
+  }
+
+  const runPromise = (async (): Promise<PublishedExamsResult> => {
   const local = getLocalExams()
   const remoteMap = new Map<string, Exam>()
   const start = Date.now()
@@ -444,6 +453,12 @@ export async function fetchPublishedExamsWithDiagnostics(
     error: remoteOk ? null : (lastErrorMsg || 'خطا در دریافت آزمون‌ها از سرور'),
     fromCacheOnly: !remoteOk,
   }
+  })().finally(() => {
+    inFlightPublishedExams.delete(dedupeKey)
+  })
+
+  inFlightPublishedExams.set(dedupeKey, runPromise)
+  return runPromise
 }
 
 export async function fetchPublishedExams(forStudent = true): Promise<Exam[]> {
@@ -550,19 +565,21 @@ export async function saveExam(exam: Exam, teacherPassword?: string): Promise<vo
         { maxRetries: 1, baseDelayMs: 300, stage: 'save_exam_quizzes', examId: exam.id }
       ),
 
-      // 2. Backend server /api/exams/save
-      fetchWithTimeout(
-        '/api/exams/save',
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(teacherPass ? { 'x-teacher-password': teacherPass, 'Authorization': `Bearer ${teacherPass}` } : {}),
-          },
-          body: JSON.stringify({ exam, teacherPassword: teacherPass }),
-        },
-        6000
-      ).then((r) => r.json()),
+      // 2. Backend server /api/exams/save (skipped when static-only Netlify host detected)
+      isBackendStaticOnly()
+        ? Promise.resolve({ success: false, skipped: true })
+        : fetchApiJson<any>(
+            '/api/exams/save',
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                ...(teacherPass ? { 'x-teacher-password': teacherPass, 'Authorization': `Bearer ${teacherPass}` } : {}),
+              },
+              body: JSON.stringify({ exam, teacherPassword: teacherPass }),
+            },
+            6000
+          ),
 
       // 3. Sync to Supabase Posts __SYSTEM_EXAMS__ row for cross-device redundancy
       syncExamsToSupabaseSystemRow(current, teacherPass),
@@ -812,27 +829,54 @@ export async function saveExamSubmissionDirectToSupabase(
     clientSubject: exam.subject,
   })
 
-  // 1. Direct Supabase posts table: Save individual submission post
+  // 1. Direct Supabase posts table: Upsert/Insert individual student submission post (__EXAM_SUB__:${exam.id}:${studentId})
   try {
     const postTitle = `__EXAM_SUB__:${exam.id}:${submission.studentId}`
-    const { error: postErr } = await supabase.from('posts').insert({
-      title: postTitle,
-      body: syncBody,
-      type: 'announcement', // Allowed by posts_type_check!
-      publish_at: new Date().toISOString(),
-    })
+    const { data: existingPost } = await supabase
+      .from('posts')
+      .select('id')
+      .eq('title', postTitle)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+
+    let postErr: any = null
+    if (existingPost?.id) {
+      const upd = await supabase
+        .from('posts')
+        .update({ body: syncBody, publish_at: new Date().toISOString() })
+        .eq('id', existingPost.id)
+      postErr = upd.error
+      if (postErr) {
+        const ins = await supabase.from('posts').insert({
+          title: postTitle,
+          body: syncBody,
+          type: 'announcement',
+          publish_at: new Date().toISOString(),
+        })
+        postErr = ins.error
+      }
+    } else {
+      const ins = await supabase.from('posts').insert({
+        title: postTitle,
+        body: syncBody,
+        type: 'announcement',
+        publish_at: new Date().toISOString(),
+      })
+      postErr = ins.error
+    }
 
     if (!postErr) {
       console.log('[ExamStore:saveExamSubmissionDirectToSupabase] Saved individual post to Supabase:', postTitle)
       success = true
     } else {
-      console.warn('[ExamStore:saveExamSubmissionDirectToSupabase] Individual post insert error:', postErr)
+      console.warn('[ExamStore:saveExamSubmissionDirectToSupabase] Individual post save error:', postErr)
     }
   } catch (err) {
     console.warn('[ExamStore:saveExamSubmissionDirectToSupabase] Error saving individual post:', err)
   }
 
-  // 2. Direct Supabase posts table: Update __SYSTEM_EXAM_SUBMISSIONS__ container
+  // 2. Update local submissions cache ONLY (never overwrite class-wide __SYSTEM_EXAM_SUBMISSIONS__ from student client!)
   try {
     const allSubs = getLocalSubmissions()
     const idx = allSubs.findIndex((s) => s.id === submission.id || (s.examId === submission.examId && String(s.studentId) === String(submission.studentId)))
@@ -842,10 +886,8 @@ export async function saveExamSubmissionDirectToSupabase(
       allSubs.push(submission)
     }
     saveLocalSubmissions(allSubs)
-    await syncExamSubmissionsToSupabase(allSubs, teacherPassword)
-    success = true
   } catch (err) {
-    console.warn('[ExamStore:saveExamSubmissionDirectToSupabase] Error updating __SYSTEM_EXAM_SUBMISSIONS__:', err)
+    console.warn('[ExamStore:saveExamSubmissionDirectToSupabase] Error updating local submissions:', err)
   }
 
   // 3. Direct Supabase quiz_submissions table: Insert row with student foreign key resolution
@@ -855,21 +897,24 @@ export async function saveExamSubmissionDirectToSupabase(
     if (isValidStudentUuid) {
       studentUUID = submission.studentId
     } else {
-      // 1. Try public student list RPC (unrestricted by RLS)
-      try {
-        const { data: pubStudents } = await supabase.rpc('list_students_public')
-        if (Array.isArray(pubStudents) && pubStudents.length > 0) {
-          const rosterMatch = CLASS_STUDENTS_ROSTER.find(
-            (c: ClassStudentInfo) => c.nationalCode === submission.studentId || c.fullName === submission.studentName
-          )
-          const matchedPub = pubStudents.find(
-            (ps: any) =>
-              ps.full_name === submission.studentName ||
-              (rosterMatch && ps.full_name === rosterMatch.fullName)
-          )
-          if (matchedPub?.id) studentUUID = matchedPub.id
-        }
-      } catch {}
+      // 1. Try canonical roster or public student list RPC
+      const rosterMatch = resolveCanonicalStudent(submission.studentId || submission.studentName)
+      if (rosterMatch?.id && isValidUuid(rosterMatch.id)) {
+        studentUUID = rosterMatch.id
+      }
+      if (!studentUUID) {
+        try {
+          const { data: pubStudents } = await supabase.rpc('list_students_public')
+          if (Array.isArray(pubStudents) && pubStudents.length > 0) {
+            const matchedPub = pubStudents.find(
+              (ps: any) =>
+                ps.full_name === submission.studentName ||
+                (rosterMatch && ps.full_name === rosterMatch.fullName)
+            )
+            if (matchedPub?.id) studentUUID = matchedPub.id
+          }
+        } catch {}
+      }
 
       // 2. Direct students table lookup by access_code
       if (!studentUUID) {
@@ -878,6 +923,8 @@ export async function saveExamSubmissionDirectToSupabase(
             .from('students')
             .select('id')
             .eq('access_code', String(submission.studentId))
+            .order('created_at', { ascending: false })
+            .limit(1)
             .maybeSingle()
           if (stRow?.id) {
             studentUUID = stRow.id
@@ -1205,47 +1252,65 @@ export async function fetchExamSubmissions(
       }
     }
 
-    // Build targeted Supabase queries in parallel (never download redundant blobs if backend succeeded & filtered)
-    const individualPattern = examId
+    // Build targeted Supabase queries in parallel (never pull 200KB class-wide blob unless teacher view or pending fallback)
+    const canonStudent = studentId ? resolveCanonicalStudent(studentId) : undefined
+    const targetStudentUuid = canonStudent?.id && isValidUuid(canonStudent.id)
+      ? canonStudent.id
+      : (studentId && isValidUuid(studentId) ? studentId : null)
+
+    const individualPattern = examId && studentId
+      ? `__EXAM_SUB__:${examId}:${studentId}%`
+      : examId
       ? `__EXAM_SUB__:${examId}:%`
       : studentId
       ? `__EXAM_SUB__:%:${studentId}%`
       : '__EXAM_SUB__:%'
 
-    const [indRes, qSubsRes, sysRes] = await Promise.allSettled([
-      supabase
-        .from('posts')
-        .select('id, title, body')
-        .like('title', individualPattern)
-        .order('created_at', { ascending: false })
-        .limit(studentId ? 30 : 100),
-      supabase
-        .from('quiz_submissions')
-        .select('*')
-        .order('submitted_at', { ascending: false }),
-      // Only fetch the 200KB __SYSTEM_EXAM_SUBMISSIONS__ snapshot when querying teacher/all OR if student had 0 rows in primary sources
-      supabase
-        .from('posts')
-        .select('id, title, body')
-        .eq('title', '__SYSTEM_EXAM_SUBMISSIONS__')
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .maybeSingle(),
+    const qSubsQuery = targetStudentUuid
+      ? supabase
+          .from('quiz_submissions')
+          .select('id, quiz_id, student_id, score, submitted_at, answers')
+          .eq('student_id', targetStudentUuid)
+          .order('submitted_at', { ascending: false })
+      : supabase
+          .from('quiz_submissions')
+          .select('id, quiz_id, student_id, score, submitted_at, answers')
+          .order('submitted_at', { ascending: false })
+
+    const indQuery = supabase
+      .from('posts')
+      .select('id, title, body')
+      .like('title', individualPattern)
+      .order('created_at', { ascending: false })
+      .limit(studentId ? 25 : 100)
+
+    const altNationalPattern =
+      studentId && canonStudent?.nationalCode && canonStudent.nationalCode !== studentId
+        ? (examId ? `__EXAM_SUB__:${examId}:${canonStudent.nationalCode}%` : `__EXAM_SUB__:%:${canonStudent.nationalCode}%`)
+        : null
+
+    const [indRes, altIndRes, qSubsRes] = await Promise.allSettled([
+      indQuery,
+      altNationalPattern
+        ? supabase
+            .from('posts')
+            .select('id, title, body')
+            .like('title', altNationalPattern)
+            .order('created_at', { ascending: false })
+            .limit(25)
+        : Promise.resolve({ data: [], error: null }),
+      qSubsQuery,
     ])
 
-    // 1. __SYSTEM_EXAM_SUBMISSIONS__ latest row
-    if (sysRes.status === 'fulfilled' && !sysRes.value.error && sysRes.value.data?.body) {
-      try {
-        const parsed =
-          typeof sysRes.value.data.body === 'string'
-            ? JSON.parse(sysRes.value.data.body)
-            : sysRes.value.data.body
-        if (Array.isArray(parsed)) {
-          parsed.forEach((s: StudentExamSubmission) => {
-            if (s && s.examId && s.studentId) fetchedList.push(s)
-          })
+    if (altIndRes.status === 'fulfilled' && !altIndRes.value.error && Array.isArray(altIndRes.value.data)) {
+      altIndRes.value.data.forEach((row: any) => {
+        if (row?.body) {
+          try {
+            const parsed = typeof row.body === 'string' ? JSON.parse(row.body) : row.body
+            if (parsed && parsed.examId && parsed.studentId) fetchedList.push(parsed)
+          } catch {}
         }
-      } catch {}
+      })
     }
 
     // 2. Individual submissions __EXAM_SUB__:%
@@ -1342,6 +1407,36 @@ export async function fetchExamSubmissions(
           })
         }
       })
+    }
+
+    // 4. Only pull 200KB __SYSTEM_EXAM_SUBMISSIONS__ snapshot for teacher views (!studentId) OR when student has submissions needing teacher-approved metadata not yet reflected in quiz_submissions
+    const hasUnapprovedStudentSub =
+      Boolean(studentId) &&
+      fetchedList.some((s) => !s.teacherGrading?.approved && s.status !== 'graded' && !s.isReleased)
+
+    if (!studentId || hasUnapprovedStudentSub) {
+      try {
+        const { data: sysRow, error: sysErr } = await supabase
+          .from('posts')
+          .select('id, title, body')
+          .eq('title', '__SYSTEM_EXAM_SUBMISSIONS__')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle()
+
+        if (!sysErr && sysRow?.body) {
+          const parsed = typeof sysRow.body === 'string' ? JSON.parse(sysRow.body) : sysRow.body
+          if (Array.isArray(parsed)) {
+            parsed.forEach((s: StudentExamSubmission) => {
+              if (s && s.examId && s.studentId) {
+                if (!studentId || isSameStudent(s.studentId, studentId, s.studentName)) {
+                  fetchedList.push(s)
+                }
+              }
+            })
+          }
+        }
+      } catch {}
     }
 
     const deduplicated = mergeSubmissionsDeduplicated(local, fetchedList)
@@ -2240,7 +2335,10 @@ export async function runBackgroundExamSync(
 ): Promise<void> {
   try {
     // A. Direct Supabase Persistence: quiz_submissions table + posts table (no backend server required)
-    await saveExamSubmissionDirectToSupabase(submission, exam)
+    const syncedOk = await saveExamSubmissionDirectToSupabase(submission, exam)
+    if (!syncedOk) {
+      throw new Error('Supabase direct persistence returned false')
+    }
 
     // B. Mark as synced locally
     const syncedSub: StudentExamSubmission = {
@@ -2637,7 +2735,7 @@ export async function saveExamDraftToCloud(
   try {
     const postTitle = `__EXAM_DRAFT__:${examId}:${studentId}`
     const draftBody = JSON.stringify(normalizedDraft)
-    const { data: existing } = await supabase
+    const { data: existing, error: selErr } = await supabase
       .from('posts')
       .select('id')
       .eq('title', postTitle)
@@ -2645,13 +2743,15 @@ export async function saveExamDraftToCloud(
       .limit(1)
       .maybeSingle()
 
-    if (existing?.id) {
-      await supabase
+    if (!selErr && existing?.id) {
+      const { data: updRows, error: updErr } = await supabase
         .from('posts')
         .update({ body: draftBody, publish_at: new Date().toISOString() })
         .eq('id', existing.id)
-    } else {
-      await supabase
+        .select('id')
+      if (!updErr && Array.isArray(updRows) && updRows.length > 0) return true
+      // Fallback insert if update blocked by RLS
+      const { error: insErr } = await supabase
         .from('posts')
         .insert({
           title: postTitle,
@@ -2659,8 +2759,18 @@ export async function saveExamDraftToCloud(
           type: 'announcement',
           publish_at: new Date().toISOString(),
         })
+      if (!insErr) return true
+    } else if (!selErr) {
+      const { error: insErr } = await supabase
+        .from('posts')
+        .insert({
+          title: postTitle,
+          body: draftBody,
+          type: 'announcement',
+          publish_at: new Date().toISOString(),
+        })
+      if (!insErr) return true
     }
-    return true
   } catch (e) {
     console.warn('[ExamStore] Direct Supabase draft sync failed:', e)
   }
@@ -2738,14 +2848,36 @@ export async function deleteExamDraftFromCloud(
 
   try {
     const postTitle = `__EXAM_DRAFT__:${examId}:${studentId}`
-    await supabase.from('posts').delete().eq('title', postTitle)
-    await supabase
+    const { data: delRows, error: delErr } = await supabase
+      .from('posts')
+      .delete()
+      .eq('title', postTitle)
+      .select('id')
+
+    if (!delErr && Array.isArray(delRows) && delRows.length > 0) {
+      return
+    }
+
+    const clearedBody = JSON.stringify({ isDraft: false, status: 'cleared', clearedAt: Date.now() })
+    const { data: updRows, error: updErr } = await supabase
       .from('posts')
       .update({
-        body: JSON.stringify({ isDraft: false, status: 'cleared', clearedAt: Date.now() }),
+        body: clearedBody,
         publish_at: new Date().toISOString(),
       })
       .eq('title', postTitle)
+      .select('id')
+
+    // If anon RLS blocks both DELETE and UPDATE (0 rows affected), append a cleared tombstone so latest draft lookup returns null
+    const updatedAny = !updErr && Array.isArray(updRows) && updRows.length > 0
+    if (!updatedAny) {
+      await supabase.from('posts').insert({
+        title: postTitle,
+        body: clearedBody,
+        type: 'announcement',
+        publish_at: new Date().toISOString(),
+      })
+    }
   } catch {}
 }
 

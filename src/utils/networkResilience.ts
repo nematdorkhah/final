@@ -23,9 +23,10 @@ export interface FetchDiagnosticEntry {
 const MAX_DIAGNOSTICS_LOG = 100
 const diagnosticsBuffer: FetchDiagnosticEntry[] = []
 
-// Tracks whether the current deployment origin serves static SPA HTML for /api/* (e.g. Cloudflare Pages without proxy)
+// Tracks whether the current deployment origin serves static SPA HTML / Netlify 404 HTML for /api/*
 let backendStaticOnlyUntil = 0
-const STATIC_ONLY_TTL_MS = 60_000
+const STATIC_ONLY_TTL_MS = 300_000
+const STATIC_ONLY_STORAGE_KEY = 'classroom_backend_static_only_until'
 
 export function resolveApiUrl(path: string): string {
   if (!path) return path
@@ -43,15 +44,37 @@ export function resolveApiUrl(path: string): string {
 }
 
 export function isBackendStaticOnly(): boolean {
-  return Date.now() < backendStaticOnlyUntil
+  const now = Date.now()
+  if (now < backendStaticOnlyUntil) return true
+  try {
+    if (typeof sessionStorage !== 'undefined') {
+      const stored = Number(sessionStorage.getItem(STATIC_ONLY_STORAGE_KEY) || '0')
+      if (stored > now) {
+        backendStaticOnlyUntil = stored
+        return true
+      }
+    }
+  } catch {}
+  return false
 }
 
 export function markBackendStaticOnly(ttlMs = STATIC_ONLY_TTL_MS): void {
-  backendStaticOnlyUntil = Date.now() + ttlMs
+  const until = Date.now() + ttlMs
+  backendStaticOnlyUntil = until
+  try {
+    if (typeof sessionStorage !== 'undefined') {
+      sessionStorage.setItem(STATIC_ONLY_STORAGE_KEY, String(until))
+    }
+  } catch {}
 }
 
 export function markBackendAvailable(): void {
   backendStaticOnlyUntil = 0
+  try {
+    if (typeof sessionStorage !== 'undefined') {
+      sessionStorage.removeItem(STATIC_ONLY_STORAGE_KEY)
+    }
+  } catch {}
 }
 
 export function recordFetchDiagnostic(entry: FetchDiagnosticEntry): void {
@@ -124,23 +147,25 @@ export async function fetchWithTimeout(
       signal: controller ? controller.signal : init.signal,
     })
 
+    const contentType = (res.headers.get('content-type') || '').toLowerCase()
+
+    // CRITICAL STATIC HOSTING GUARD (Netlify 404 HTML & Cloudflare Pages 200 HTML):
+    // Static hosts return text/html (HTTP 404 on Netlify, HTTP 200 on Cloudflare Pages) for /api/* paths.
+    if (isApiRequest && contentType.includes('text/html') && (res.status === 404 || res.ok)) {
+      markBackendStaticOnly()
+      const err: any = new Error('HTML_SPA_FALLBACK_ON_API_ROUTE')
+      err.status = 404
+      err.isHtmlFallback = true
+      throw err
+    }
+
     if (!res.ok) {
       const err: any = new Error(`HTTP ${res.status}`)
       err.status = res.status
       throw err
     }
 
-    // CRITICAL CLOUDFLARE PAGES / STATIC SPA GUARD:
-    // Cloudflare Pages serves index.html with HTTP 200 OK for unknown /api/* paths!
     if (isApiRequest) {
-      const contentType = (res.headers.get('content-type') || '').toLowerCase()
-      if (contentType.includes('text/html')) {
-        markBackendStaticOnly()
-        const err: any = new Error('HTML_SPA_FALLBACK_ON_API_ROUTE')
-        err.status = 404
-        err.isHtmlFallback = true
-        throw err
-      }
       markBackendAvailable()
     }
 

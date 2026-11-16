@@ -1,10 +1,10 @@
-# HTML & Service routes must come first so Cloudflare Pages does NOT override hashed /assets/* caching
+# Security & non-cached fallback for SPA routes (Netlify applies later matching rules on top of earlier ones)
 /*
+  X-Content-Type-Options: nosniff
   Cache-Control: no-cache, no-store, must-revalidate
   CDN-Cache-Control: no-store
   Cloudflare-CDN-Cache-Control: no-store
   Pragma: no-cache
-  X-Content-Type-Options: nosniff
 
 /
   Cache-Control: no-cache, no-store, must-revalidate
@@ -18,7 +18,7 @@
   Cloudflare-CDN-Cache-Control: no-store
   Pragma: no-cache
 
-# API responses (if proxied through Cloudflare Workers / Origin) must never be cached at edge
+# API routes must never be cached at edge
 /api/*
   Cache-Control: private, no-store, no-cache, must-revalidate, proxy-revalidate
   CDN-Cache-Control: no-store
@@ -26,10 +26,14 @@
   Pragma: no-cache
   Expires: 0
 
-# Hashed Vite static assets are safe to cache long-term
+# Hashed Vite static assets are safe to cache long-term at browser & CDN edge
 /assets/*
   Cache-Control: public, max-age=31536000, immutable
+  CDN-Cache-Control: public, max-age=31536000, immutable
+  Cloudflare-CDN-Cache-Control: public, max-age=31536000, immutable
 
 # Static icons and images
 /icons/*
   Cache-Control: public, max-age=2592000
+  CDN-Cache-Control: public, max-age=2592000
+

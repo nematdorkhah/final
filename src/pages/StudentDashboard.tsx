@@ -120,6 +120,15 @@ export default function StudentDashboard({
     } catch {}
     return 'loading'
   })
+  const [postsFetchStatus, setPostsFetchStatus] = useState<'loading' | 'ready' | 'error'>(() => {
+    try {
+      const rawPosts = typeof localStorage !== 'undefined' ? localStorage.getItem('cached_published_posts') : null
+      if (rawPosts && JSON.parse(rawPosts).length > 0) return 'ready'
+    } catch {}
+    return 'loading'
+  })
+  const [gradesFetchStatus, setGradesFetchStatus] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [submissionsFetchStatus, setSubmissionsFetchStatus] = useState<'loading' | 'ready' | 'error'>('loading')
   const [loading, setLoading] = useState(() => {
     try {
       const hasCachedExams = getLocalExams().some((e) => e && e.published !== false)
@@ -338,14 +347,20 @@ export default function StudentDashboard({
         return
       }
 
-      const withTimeout = async <T,>(promise: PromiseLike<T> | Promise<T>, ms = 8000): Promise<T> => {
+      const withTimeout = async <T,>(promise: PromiseLike<T> | Promise<T>, ms = 10000): Promise<T> => {
         return Promise.race([
           Promise.resolve(promise),
           new Promise<T>((_, reject) => setTimeout(() => reject(new Error('timeout')), ms)),
         ])
       }
 
-      // 2. Execute Bundle Fetch (with HTML-fallback short-circuit) + Lightweight Direct Supabase Fallbacks IN PARALLEL
+      let bundleOk = false
+      let postsRemoteOk = false
+      let examsRemoteOk = false
+      let gradesRemoteOk = false
+      let subsRemoteOk = false
+
+      // 2. Execute Bundle Fetch (skipped immediately when static-only Netlify host detected) + Independent Parallel Direct Supabase Calls
       const bundlePromise = isBackendStaticOnly()
         ? Promise.reject(Object.assign(new Error('HTML_SPA_FALLBACK_ON_API_ROUTE'), { isHtmlFallback: true, status: 404 }))
         : retryWithBackoff(
@@ -361,143 +376,164 @@ export default function StudentDashboard({
               return json
             },
             { maxRetries: 2, baseDelayMs: 300, stage: 'classroom_bundle' }
-          )
+          ).then((bundleOutcome) => {
+            if (seq !== requestSeqRef.current) return bundleOutcome
+            const bundleRes = bundleOutcome.data
+            bundleOk = true
+            postsRemoteOk = true
+            examsRemoteOk = true
 
-      const supabaseResultsPromise = Promise.allSettled([
-        withTimeout<any[]>(fetchFilteredPublishedPosts(supabase, { includeScheduledFuture: false }), 7000),
-        withTimeout<any>(
-          supabase.rpc('student_list_my_submissions', {
-            p_student_id: canonicalStudentId,
-            p_access_code: canonicalAccessCode,
-          }),
-          7000
-        ),
-        withTimeout<any>(
-          supabase.rpc('student_list_my_grades', {
-            p_student_id: canonicalStudentId,
-            p_access_code: canonicalAccessCode,
-          }),
-          7000
-        ),
-        withTimeout<any>(
-          supabase.rpc('student_list_my_attendance', {
-            p_student_id: canonicalStudentId,
-            p_access_code: canonicalAccessCode,
-          }),
-          7000
-        ),
-        fetchPublishedExamsWithDiagnostics(true, force, { skipBackendApi: true }),
-        withTimeout<StudentExamSubmission[]>(fetchExamSubmissions(undefined, canonicalStudentId, force), 7000),
-      ])
+            if (typeof bundleRes.serverTime === 'number' && !isNaN(bundleRes.serverTime)) {
+              serverTimeOffsetRef.current = bundleRes.serverTime - Date.now()
+            }
 
-      let bundleOk = false
-      let postsRemoteOk = false
-      let examsRemoteOk = false
+            if (Array.isArray(bundleRes.posts)) {
+              const cleanPosts = bundleRes.posts.filter((p: any) => !isSystemRecord(p))
+              setPosts(cleanPosts)
+              setPostsFetchStatus('ready')
+              try {
+                localStorage.setItem('cached_published_posts', JSON.stringify(cleanPosts))
+              } catch {}
+            }
 
-      // Process whichever completes first cleanly, starting by awaiting bundle so valid serverTime & instant posts arrive ASAP
-      try {
-        const bundleOutcome = await bundlePromise
-        if (seq !== requestSeqRef.current) return
-        const bundleRes = bundleOutcome.data
-        bundleOk = true
+            if (Array.isArray(bundleRes.exams)) {
+              const validExams = bundleRes.exams
+                .filter((e: Exam) => e && e.published !== false)
+                .map(sanitizeExamForStudent)
+              setExams(validExams)
+              if (validExams.length > 0) {
+                saveLocalExams(validExams)
+              }
+              setFetchStatus('ready')
+              setExamsFetchStatus('ready')
+              setLoading(false)
+              hasLoadedOnce.current = true
+            }
+
+            if (Array.isArray(bundleRes.examSubmissions)) {
+              const mySubs = bundleRes.examSubmissions.filter((s: StudentExamSubmission) =>
+                isSameStudent(s.studentId, canonicalStudentId, s.studentName, student?.full_name)
+              )
+              if (mySubs.length > 0) {
+                setMyExamSubs(mySubs)
+              }
+            }
+            return bundleOutcome
+          })
+
+      // Each Supabase stream resolves and updates UI independently — no single timeout can break the others
+      const postsPromise = withTimeout<any[]>(
+        fetchFilteredPublishedPosts(supabase, { includeScheduledFuture: false }),
+        10000
+      ).then((rows) => {
+        if (seq !== requestSeqRef.current || !Array.isArray(rows)) return
         postsRemoteOk = true
-        examsRemoteOk = true
-
-        if (typeof bundleRes.serverTime === 'number' && !isNaN(bundleRes.serverTime)) {
-          serverTimeOffsetRef.current = bundleRes.serverTime - Date.now()
-        }
-
-        if (Array.isArray(bundleRes.posts)) {
-          const cleanPosts = bundleRes.posts.filter((p: any) => !isSystemRecord(p))
+        const cleanPosts = rows.filter((post: any) => !isSystemRecord(post))
+        if (cleanPosts.length > 0 || !bundleOk) {
           setPosts(cleanPosts)
           try {
             localStorage.setItem('cached_published_posts', JSON.stringify(cleanPosts))
           } catch {}
         }
+        setPostsFetchStatus('ready')
+        setLoading(false)
+      })
 
-        if (Array.isArray(bundleRes.exams)) {
-          const validExams = bundleRes.exams
-            .filter((e: Exam) => e && e.published !== false)
-            .map(sanitizeExamForStudent)
-          setExams(validExams)
-          if (validExams.length > 0) {
-            saveLocalExams(validExams)
-          }
-          setFetchStatus('ready')
+      const examsPromise = fetchPublishedExamsWithDiagnostics(true, force, { skipBackendApi: true }).then((diag) => {
+        if (seq !== requestSeqRef.current) return
+        if (diag.remoteOk) {
+          examsRemoteOk = true
+          setExams(diag.exams)
           setExamsFetchStatus('ready')
+          setFetchStatus('ready')
           setLoading(false)
           hasLoadedOnce.current = true
         }
+      })
 
-        if (Array.isArray(bundleRes.examSubmissions)) {
-          const mySubs = bundleRes.examSubmissions.filter((s: StudentExamSubmission) =>
-            isSameStudent(s.studentId, canonicalStudentId, s.studentName, student?.full_name)
-          )
-          if (mySubs.length > 0) {
-            setMyExamSubs(mySubs)
-          }
-        }
-      } catch (e: any) {
-        if (!e?.isHtmlFallback) {
-          console.warn('[StudentDashboard] Bundle sync failed, awaiting direct Supabase sync...', e)
-        }
-      }
-
-      // Now inspect parallel direct Supabase results
-      try {
-        const results = await supabaseResultsPromise
+      const subsPromise = withTimeout<any>(
+        supabase.rpc('student_list_my_submissions', {
+          p_student_id: canonicalStudentId,
+          p_access_code: canonicalAccessCode,
+        }),
+        10000
+      ).then((res) => {
         if (seq !== requestSeqRef.current) return
-
-        const [pRes, subRes, gRes, attRes, examDiagRes, examSubsListRes] = results
-
-        if (pRes.status === 'fulfilled' && Array.isArray(pRes.value)) {
-          postsRemoteOk = true
-          const cleanPosts = pRes.value.filter((post: any) => !isSystemRecord(post))
-          if (cleanPosts.length > 0 || !bundleOk) {
-            setPosts(cleanPosts)
-            try {
-              localStorage.setItem('cached_published_posts', JSON.stringify(cleanPosts))
-            } catch {}
-          }
-        }
-
-        if (subRes.status === 'fulfilled' && !(subRes.value as any)?.error && Array.isArray((subRes.value as any)?.data)) {
-          setMySubmissions((subRes.value as any).data || [])
+        if (!res?.error && Array.isArray(res?.data)) {
+          subsRemoteOk = true
+          setMySubmissions(res.data || [])
+          setSubmissionsFetchStatus('ready')
           try {
-            localStorage.setItem(`cached_submissions_${canonicalStudentId}`, JSON.stringify((subRes.value as any).data || []))
+            localStorage.setItem(`cached_submissions_${canonicalStudentId}`, JSON.stringify(res.data || []))
           } catch {}
         }
+      })
 
-        if (gRes.status === 'fulfilled' && !(gRes.value as any)?.error && Array.isArray((gRes.value as any)?.data)) {
-          setMyGrades((gRes.value as any).data || [])
+      const gradesPromise = withTimeout<any>(
+        supabase.rpc('student_list_my_grades', {
+          p_student_id: canonicalStudentId,
+          p_access_code: canonicalAccessCode,
+        }),
+        10000
+      ).then((res) => {
+        if (seq !== requestSeqRef.current) return
+        if (!res?.error && Array.isArray(res?.data)) {
+          gradesRemoteOk = true
+          setMyGrades(res.data || [])
+          setGradesFetchStatus('ready')
           try {
-            localStorage.setItem(`cached_grades_${canonicalStudentId}`, JSON.stringify((gRes.value as any).data || []))
+            localStorage.setItem(`cached_grades_${canonicalStudentId}`, JSON.stringify(res.data || []))
           } catch {}
         }
+      })
 
-        if (attRes.status === 'fulfilled' && !(attRes.value as any)?.error && Array.isArray((attRes.value as any)?.data)) {
-          setMyAttendance((attRes.value as any).data || [])
+      const attPromise = withTimeout<any>(
+        supabase.rpc('student_list_my_attendance', {
+          p_student_id: canonicalStudentId,
+          p_access_code: canonicalAccessCode,
+        }),
+        10000
+      ).then((res) => {
+        if (seq !== requestSeqRef.current) return
+        if (!res?.error && Array.isArray(res?.data)) {
+          setMyAttendance(res.data || [])
         }
+      })
 
-        if (examSubsListRes.status === 'fulfilled' && Array.isArray(examSubsListRes.value)) {
-          setMyExamSubs(examSubsListRes.value)
+      const examSubsPromise = withTimeout<StudentExamSubmission[]>(
+        fetchExamSubmissions(undefined, canonicalStudentId, force),
+        10000
+      ).then((list) => {
+        if (seq !== requestSeqRef.current) return
+        if (Array.isArray(list)) {
+          subsRemoteOk = true
+          setMyExamSubs(list)
+          setSubmissionsFetchStatus('ready')
         }
+      })
 
-        if (examDiagRes.status === 'fulfilled') {
-          const diag = examDiagRes.value
-          if (diag.remoteOk) {
-            examsRemoteOk = true
-            setExams(diag.exams)
+      await Promise.allSettled([
+        bundlePromise.catch((e: any) => {
+          if (!e?.isHtmlFallback) {
+            console.warn('[StudentDashboard] Bundle sync skipped/failed, relying on direct Supabase:', e)
           }
-        }
-      } catch (err) {
-        console.warn('Direct Supabase refresh warning:', err)
-      }
+        }),
+        postsPromise,
+        examsPromise,
+        subsPromise,
+        gradesPromise,
+        attPromise,
+        examSubsPromise,
+      ])
 
       if (seq !== requestSeqRef.current) return
 
       setLoading(false)
       hasLoadedOnce.current = true
+
+      if (!postsRemoteOk && localPosts.length === 0) setPostsFetchStatus('error')
+      if (!gradesRemoteOk) setGradesFetchStatus(myGrades.length > 0 ? 'ready' : 'error')
+      if (!subsRemoteOk) setSubmissionsFetchStatus(myExamSubs.length > 0 ? 'ready' : 'error')
 
       // STRICT 3-STATE EVALUATION FOR EXAMS & POSTS:
       // Never mark examsFetchStatus as 'ready' simply because grades/attendance loaded if exam sources actually failed!
@@ -507,7 +543,7 @@ export default function StudentDashboard({
         setLoadError(null)
         setSyncWarning(null)
       } else if (examsRemoteOk || postsRemoteOk) {
-        setFetchStatus('ready')
+        setFetchStatus(postsRemoteOk || localPosts.length > 0 ? 'ready' : 'error')
         setExamsFetchStatus(examsRemoteOk ? 'ready' : (localExams.length > 0 ? 'ready' : 'error'))
         if (!examsRemoteOk) {
           setSyncWarning('ارتباط برای دریافت جدیدترین آزمون‌ها برقرار نشد؛ لطفاً اتصال اینترنت را بررسی کرده و دوباره تلاش کنید.')
@@ -518,7 +554,7 @@ export default function StudentDashboard({
         }
       } else if (hasCachedData) {
         // Keep cached exams/posts visible, warn clearly instead of pretending server is empty
-        setFetchStatus('ready')
+        setFetchStatus(localPosts.length > 0 || localExams.length > 0 ? 'ready' : 'error')
         setExamsFetchStatus(localExams.length > 0 ? 'ready' : 'error')
         setSyncWarning('اتصال به سرور با خطا مواجه شد؛ اطلاعات ذخیره‌شده قبلی نمایش داده می‌شود. برای دریافت جدیدترین آزمون‌ها دوباره تلاش کنید.')
         setLoadError('اختلال در دریافت اطلاعات جدید از سرور.')
@@ -625,6 +661,7 @@ export default function StudentDashboard({
 
     const handleReconnect = () => {
       realtimeSync.init()
+      flushPendingExamSyncQueue().catch(() => {})
       loadAll(true)
     }
     window.addEventListener('classroom_network_reconnected', handleReconnect)
