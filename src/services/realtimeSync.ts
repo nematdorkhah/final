@@ -1,5 +1,11 @@
 import { supabase } from '../supabaseClient'
 import { Exam, StudentExamSubmission } from '../types/examTypes'
+import {
+  fetchWithTimeout,
+  isBackendStaticOnly,
+  normalizeQuizRowToExam,
+  sanitizeExamForStudent,
+} from '../utils/networkResilience'
 
 export type ClassroomEventType = 'post' | 'exam' | 'grade' | 'submission' | 'attendance'
 export type ClassroomActionType = 'create' | 'update' | 'delete'
@@ -56,13 +62,26 @@ class RealtimeSyncManager {
       })
 
       // 2. Direct PostgreSQL Change Listeners
-      // Posts table (homework & announcements)
+      // Posts table (homework, announcements & __SYSTEM_EXAMS__)
       this.channel.on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'posts' },
         (payload: any) => {
           const action = payload.eventType === 'INSERT' ? 'create' : payload.eventType === 'DELETE' ? 'delete' : 'update'
           const item = payload.new || payload.old
+
+          // If __SYSTEM_EXAMS__ changed in posts, notify exam listeners cleanly
+          if (item?.title === '__SYSTEM_EXAMS__') {
+            const examSignal: RealtimeBroadcastPayload = {
+              type: 'exam',
+              action: 'update',
+              timestamp: Date.now(),
+            }
+            this.notifyListeners(examSignal)
+            this.dispatchCustomWindowEvents(examSignal)
+            return
+          }
+
           const broadcastPayload: RealtimeBroadcastPayload = {
             type: 'post',
             action,
@@ -81,12 +100,14 @@ class RealtimeSyncManager {
         { event: '*', schema: 'public', table: 'quizzes' },
         (payload: any) => {
           const action = payload.eventType === 'INSERT' ? 'create' : payload.eventType === 'DELETE' ? 'delete' : 'update'
-          const item = payload.new || payload.old
+          const rawItem = payload.new || payload.old
+          const normalized = payload.new ? normalizeQuizRowToExam(payload.new) : null
+          const safeExam = normalized ? sanitizeExamForStudent(normalized) : undefined
           const broadcastPayload: RealtimeBroadcastPayload = {
             type: 'exam',
             action,
-            item: payload.new,
-            id: item?.id,
+            item: safeExam,
+            id: rawItem?.id,
             timestamp: Date.now(),
           }
           this.notifyListeners(broadcastPayload)
@@ -288,18 +309,36 @@ class RealtimeSyncManager {
     }
   }
 
+  public getIsSubscribed(): boolean {
+    return this.isSubscribed
+  }
+
   /**
    * Broadcast an instantaneous notification to all connected clients & tabs (<50ms)
    */
   public async broadcast(payload: Omit<RealtimeBroadcastPayload, 'timestamp'>): Promise<void> {
+    // Strip answer keys before broadcasting exams over public channel
+    const safeItem =
+      payload.type === 'exam' && payload.item ? sanitizeExamForStudent(payload.item as Exam) : payload.item
+
     const fullPayload: RealtimeBroadcastPayload = {
       ...payload,
+      item: safeItem,
       timestamp: Date.now(),
     }
 
     // 1. Immediately notify local listeners on this client
     this.notifyListeners(fullPayload)
     this.dispatchCustomWindowEvents(fullPayload)
+
+    // Ensure channel exists before attempting broadcast
+    if (!this.channel) {
+      this.init()
+      // Give WebSocket up to 1200ms to reach SUBSCRIBED on cold start
+      for (let i = 0; i < 12 && !this.isSubscribed; i++) {
+        await new Promise((r) => setTimeout(r, 100))
+      }
+    }
 
     // 2. Broadcast via Supabase Realtime channel to other clients
     if (this.channel) {
@@ -315,13 +354,19 @@ class RealtimeSyncManager {
     }
 
     // 3. Notify backend server to invalidate caches immediately
-    try {
-      fetch('/api/sync/notify', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(fullPayload),
-      }).catch(() => {})
-    } catch {}
+    if (!isBackendStaticOnly()) {
+      try {
+        await fetchWithTimeout(
+          '/api/sync/notify',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(fullPayload),
+          },
+          2000
+        ).catch(() => {})
+      } catch {}
+    }
   }
 
   public destroy() {

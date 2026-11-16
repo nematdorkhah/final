@@ -4887,5 +4887,2284 @@
     "earnedPoints": 9,
     "totalScore": 9,
     "scaledScore20": 18.9
+  },
+  {
+    "id": "sub_4da6dd51-1fec-44ff-9e2e-b009722dac96_0712fefd-cabc-454a-b10e-2e9ece9aa66b_1794354119241",
+    "examId": "4da6dd51-1fec-44ff-9e2e-b009722dac96",
+    "studentId": "0712fefd-cabc-454a-b10e-2e9ece9aa66b",
+    "studentName": "ویهان پرده یاقوت",
+    "submittedAt": "2026-11-10T23:41:59.241Z",
+    "answers": {
+      "q1": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "8"
+      },
+      "q2": {
+        "textAnswer": "6"
+      },
+      "q3": {
+        "textAnswer": "4\n—\n۵"
+      },
+      "q4": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "11"
+      },
+      "q5": {
+        "textAnswer": "۱۲"
+      },
+      "q6": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "12"
+      },
+      "q7": {
+        "textAnswer": "۳۶ را تقسیم بر ۶ می‌کنیم \n۶x۶=۳۶\nپس ۳۶ تقسیم بر ۶ ۶ چون ۶ ضرب ۶ ۳۶"
+      },
+      "q8": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "7"
+      },
+      "q9": {
+        "textAnswer": "۱۲"
+      },
+      "q10": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "6"
+      },
+      "q11": {
+        "textAnswer": "۱۲ ضرب در ۱۱ می‌شود ۱۳۲ پس ۱۳۲ تقسیم بر ۱۲ می‌شود ۱۱"
+      },
+      "q12": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "9"
+      },
+      "q13": {
+        "textAnswer": "۷"
+      },
+      "q14": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "12"
+      },
+      "q15": {
+        "textAnswer": "۹ ضرب در ۹ می‌شود ۸۱ \nپس ۸۱ را بر۹ تقسیم کنیم می‌شود ۹"
+      },
+      "q16": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "7"
+      },
+      "q17": {
+        "textAnswer": "۷"
+      },
+      "q18": {
+        "selectedOption": 0,
+        "selectedOptionIndex": 0,
+        "selectedOptionText": "7"
+      },
+      "q19": {
+        "textAnswer": "۱۲ ضرب در ۱۲ ۱۴۴ پس ۱۴۴ تقسیم بر ۱۲ می‌شود ۱۲"
+      },
+      "q20": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "4"
+      },
+      "q21": {
+        "textAnswer": "۱۱"
+      },
+      "q22": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "5"
+      },
+      "q23": {
+        "textAnswer": "۱۲ تقسیم بر ۲ می‌شود ۶ "
+      },
+      "q24": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "5"
+      },
+      "q25": {
+        "textAnswer": "۲"
+      }
+    },
+    "syncStatus": "synced",
+    "isOptimistic": true,
+    "isReleased": false,
+    "is_released": false,
+    "status": "pending_approval",
+    "instantStats": {
+      "totalQuestions": 25,
+      "answeredCount": 25,
+      "unansweredCount": 0,
+      "correctCount": 0,
+      "wrongCount": 0,
+      "percentage": 0,
+      "scaledScore20": 0,
+      "earnedPoints": 0,
+      "maxPoints": 52,
+      "status": "good"
+    },
+    "aiGrading": {
+      "questionScores": {},
+      "questionFeedbacks": {},
+      "totalScore": 0,
+      "scaledScore20": 0,
+      "gradedAt": "2026-11-10T23:41:59.241Z",
+      "summary": "پاسخ‌های شما با موفقیت دریافت شد و پس از بررسی و تایید آموزگار در کارنامه درج خواهد شد."
+    },
+    "teacherGrading": {
+      "approved": false,
+      "questionScores": {},
+      "questionFeedbacks": {},
+      "totalScore": 0,
+      "scaledScore20": 0,
+      "teacherNotes": "پاسخ‌های ویهان پرده یاقوت دریافت و در صف بازبینی آموزگار قرار گرفت."
+    },
+    "clientExamTitle": "آزمون تقسیم",
+    "clientSubject": "ریاضی"
+  },
+  {
+    "id": "sub_4da6dd51-1fec-44ff-9e2e-b009722dac96_83256419-fea7-4c90-8884-cd45b9aebeb7_1794315199943",
+    "examId": "4da6dd51-1fec-44ff-9e2e-b009722dac96",
+    "studentId": "83256419-fea7-4c90-8884-cd45b9aebeb7",
+    "studentName": "حسان حاجی نژاد بحرپیما",
+    "submittedAt": "2026-11-10T12:53:19.943Z",
+    "answers": {
+      "q1": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "8"
+      },
+      "q2": {
+        "textAnswer": "6"
+      },
+      "q4": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "11"
+      },
+      "q5": {
+        "textAnswer": "12"
+      },
+      "q6": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "12"
+      },
+      "q7": {
+        "textAnswer": "6"
+      },
+      "q8": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "7"
+      },
+      "q9": {
+        "textAnswer": "12"
+      },
+      "q10": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "6"
+      },
+      "q11": {
+        "textAnswer": "11"
+      },
+      "q12": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "9"
+      },
+      "q13": {
+        "textAnswer": "7"
+      },
+      "q14": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "12"
+      },
+      "q15": {
+        "textAnswer": "9"
+      },
+      "q16": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "7"
+      },
+      "q17": {
+        "textAnswer": "7"
+      },
+      "q18": {
+        "selectedOption": 0,
+        "selectedOptionIndex": 0,
+        "selectedOptionText": "7"
+      },
+      "q19": {
+        "textAnswer": "12"
+      },
+      "q20": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "4"
+      },
+      "q21": {
+        "textAnswer": "11"
+      },
+      "q22": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "5"
+      },
+      "q23": {
+        "textAnswer": "6"
+      },
+      "q24": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "5"
+      },
+      "q25": {
+        "textAnswer": "2"
+      }
+    },
+    "syncStatus": "synced",
+    "isOptimistic": true,
+    "isReleased": false,
+    "is_released": false,
+    "status": "pending_approval",
+    "instantStats": {
+      "totalQuestions": 25,
+      "answeredCount": 24,
+      "unansweredCount": 1,
+      "correctCount": 0,
+      "wrongCount": 0,
+      "percentage": 0,
+      "scaledScore20": 0,
+      "earnedPoints": 0,
+      "maxPoints": 52,
+      "status": "good"
+    },
+    "aiGrading": {
+      "questionScores": {},
+      "questionFeedbacks": {},
+      "totalScore": 0,
+      "scaledScore20": 0,
+      "gradedAt": "2026-11-10T12:53:19.955Z",
+      "summary": "پاسخ‌های شما با موفقیت دریافت شد و پس از بررسی و تایید آموزگار در کارنامه درج خواهد شد."
+    },
+    "teacherGrading": {
+      "approved": false,
+      "questionScores": {},
+      "questionFeedbacks": {},
+      "totalScore": 0,
+      "scaledScore20": 0,
+      "teacherNotes": "پاسخ‌های حسان حاجی نژاد بحرپیما دریافت و در صف بازبینی آموزگار قرار گرفت."
+    },
+    "clientExamTitle": "آزمون تقسیم",
+    "clientSubject": "ریاضی"
+  },
+  {
+    "id": "sub_4da6dd51-1fec-44ff-9e2e-b009722dac96_913cdd14-b896-46aa-addb-acb41f861289_1794250153583",
+    "examId": "4da6dd51-1fec-44ff-9e2e-b009722dac96",
+    "studentId": "913cdd14-b896-46aa-addb-acb41f861289",
+    "studentName": "صدرا قمرانی",
+    "submittedAt": "2026-11-09T18:49:13.583Z",
+    "answers": {
+      "q1": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "8"
+      },
+      "q2": {
+        "textAnswer": "۶"
+      },
+      "q3": {
+        "textAnswer": "چهار پنجم"
+      },
+      "q4": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "11"
+      },
+      "q5": {
+        "textAnswer": "۱۲"
+      },
+      "q6": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "12"
+      },
+      "q7": {
+        "textAnswer": "۶"
+      },
+      "q8": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "7"
+      },
+      "q9": {
+        "textAnswer": "۱۲"
+      },
+      "q10": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "6"
+      },
+      "q11": {
+        "textAnswer": "۱۱"
+      },
+      "q12": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "9"
+      },
+      "q13": {
+        "textAnswer": "۷"
+      },
+      "q14": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "12"
+      },
+      "q15": {
+        "textAnswer": "۹"
+      },
+      "q16": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "7"
+      },
+      "q17": {
+        "textAnswer": "۷"
+      },
+      "q18": {
+        "selectedOption": 0,
+        "selectedOptionIndex": 0,
+        "selectedOptionText": "7"
+      },
+      "q19": {
+        "textAnswer": "۱۲"
+      },
+      "q20": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "4"
+      },
+      "q21": {
+        "textAnswer": "۱۱"
+      },
+      "q22": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "5"
+      },
+      "q23": {
+        "textAnswer": "۶"
+      },
+      "q24": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "5"
+      },
+      "q25": {
+        "textAnswer": "۲"
+      }
+    },
+    "syncStatus": "synced",
+    "isOptimistic": true,
+    "isReleased": false,
+    "is_released": false,
+    "status": "pending_approval",
+    "instantStats": {
+      "totalQuestions": 25,
+      "answeredCount": 25,
+      "unansweredCount": 0,
+      "correctCount": 0,
+      "wrongCount": 0,
+      "percentage": 0,
+      "scaledScore20": 0,
+      "earnedPoints": 0,
+      "maxPoints": 52,
+      "status": "good"
+    },
+    "aiGrading": {
+      "questionScores": {},
+      "questionFeedbacks": {},
+      "totalScore": 0,
+      "scaledScore20": 0,
+      "gradedAt": "2026-11-09T18:49:13.587Z",
+      "summary": "پاسخ‌های شما با موفقیت دریافت شد و پس از بررسی و تایید آموزگار در کارنامه درج خواهد شد."
+    },
+    "teacherGrading": {
+      "approved": false,
+      "questionScores": {},
+      "questionFeedbacks": {},
+      "totalScore": 0,
+      "scaledScore20": 0,
+      "teacherNotes": "پاسخ‌های صدرا قمرانی دریافت و در صف بازبینی آموزگار قرار گرفت."
+    },
+    "clientExamTitle": "آزمون تقسیم",
+    "clientSubject": "ریاضی"
+  },
+  {
+    "id": "sub_4da6dd51-1fec-44ff-9e2e-b009722dac96_6027a812-1591-4918-9c23-6b2c45d1c75a_1794243479793",
+    "examId": "4da6dd51-1fec-44ff-9e2e-b009722dac96",
+    "studentId": "6027a812-1591-4918-9c23-6b2c45d1c75a",
+    "studentName": "احمدرضا فرج زاده",
+    "submittedAt": "2026-11-09T16:57:59.793Z",
+    "answers": {
+      "q6": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "12"
+      },
+      "q7": {
+        "textAnswer": "6"
+      },
+      "q8": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "7"
+      },
+      "q9": {
+        "textAnswer": "12"
+      },
+      "q10": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "6"
+      },
+      "q11": {
+        "textAnswer": "11"
+      },
+      "q12": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "9"
+      },
+      "q13": {
+        "textAnswer": "7"
+      },
+      "q14": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "12"
+      },
+      "q15": {
+        "textAnswer": "9"
+      },
+      "q16": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "7"
+      },
+      "q17": {
+        "textAnswer": "7"
+      },
+      "q18": {
+        "selectedOption": 0,
+        "selectedOptionIndex": 0,
+        "selectedOptionText": "7"
+      },
+      "q19": {
+        "textAnswer": "12"
+      },
+      "q20": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "4"
+      },
+      "q21": {
+        "textAnswer": "11"
+      },
+      "q22": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "5"
+      },
+      "q23": {
+        "textAnswer": "6"
+      },
+      "q24": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "5"
+      },
+      "q25": {
+        "textAnswer": "2"
+      },
+      "q1": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "8"
+      },
+      "q2": {
+        "textAnswer": "6"
+      },
+      "q3": {
+        "textAnswer": "4\n_\n5"
+      },
+      "q4": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "11"
+      },
+      "q5": {
+        "textAnswer": "12"
+      }
+    },
+    "syncStatus": "synced",
+    "isOptimistic": true,
+    "isReleased": false,
+    "is_released": false,
+    "status": "pending_approval",
+    "instantStats": {
+      "totalQuestions": 25,
+      "answeredCount": 25,
+      "unansweredCount": 0,
+      "correctCount": 0,
+      "wrongCount": 0,
+      "percentage": 0,
+      "scaledScore20": 0,
+      "earnedPoints": 0,
+      "maxPoints": 52,
+      "status": "good"
+    },
+    "aiGrading": {
+      "questionScores": {},
+      "questionFeedbacks": {},
+      "totalScore": 0,
+      "scaledScore20": 0,
+      "gradedAt": "2026-11-09T16:57:59.821Z",
+      "summary": "پاسخ‌های شما با موفقیت دریافت شد و پس از بررسی و تایید آموزگار در کارنامه درج خواهد شد."
+    },
+    "teacherGrading": {
+      "approved": false,
+      "questionScores": {},
+      "questionFeedbacks": {},
+      "totalScore": 0,
+      "scaledScore20": 0,
+      "teacherNotes": "پاسخ‌های احمدرضا فرج زاده دریافت و در صف بازبینی آموزگار قرار گرفت."
+    },
+    "clientExamTitle": "آزمون تقسیم",
+    "clientSubject": "ریاضی"
+  },
+  {
+    "id": "sub_4da6dd51-1fec-44ff-9e2e-b009722dac96_02876a8b-8bb2-4b3b-ba4c-0f62b632ab1d_1794239404915",
+    "examId": "4da6dd51-1fec-44ff-9e2e-b009722dac96",
+    "studentId": "02876a8b-8bb2-4b3b-ba4c-0f62b632ab1d",
+    "studentName": "یزدان زاهدی",
+    "submittedAt": "2026-11-09T15:50:04.915Z",
+    "answers": {
+      "q1": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "8"
+      },
+      "q2": {
+        "textAnswer": "6"
+      },
+      "q3": {
+        "textAnswer": "۴\n_\n5"
+      },
+      "q4": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "11"
+      },
+      "q5": {
+        "textAnswer": "12"
+      },
+      "q6": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "12"
+      },
+      "q7": {
+        "textAnswer": "6"
+      },
+      "q8": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "7"
+      },
+      "q9": {
+        "textAnswer": "12"
+      },
+      "q10": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "6"
+      },
+      "q11": {
+        "textAnswer": "11"
+      },
+      "q12": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "9"
+      },
+      "q13": {
+        "textAnswer": "7"
+      },
+      "q14": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "12"
+      },
+      "q15": {
+        "textAnswer": "9"
+      },
+      "q16": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "7"
+      },
+      "q17": {
+        "textAnswer": "7"
+      },
+      "q18": {
+        "selectedOption": 3,
+        "selectedOptionIndex": 3,
+        "selectedOptionText": "9"
+      },
+      "q19": {
+        "textAnswer": "12"
+      },
+      "q20": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "4"
+      },
+      "q21": {
+        "textAnswer": "11"
+      },
+      "q22": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "5"
+      },
+      "q23": {
+        "textAnswer": "6"
+      },
+      "q24": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "5"
+      },
+      "q25": {
+        "textAnswer": "2"
+      }
+    },
+    "syncStatus": "synced",
+    "isOptimistic": true,
+    "isReleased": false,
+    "is_released": false,
+    "status": "pending_approval",
+    "instantStats": {
+      "totalQuestions": 25,
+      "answeredCount": 25,
+      "unansweredCount": 0,
+      "correctCount": 0,
+      "wrongCount": 0,
+      "percentage": 0,
+      "scaledScore20": 0,
+      "earnedPoints": 0,
+      "maxPoints": 52,
+      "status": "good"
+    },
+    "aiGrading": {
+      "questionScores": {},
+      "questionFeedbacks": {},
+      "totalScore": 0,
+      "scaledScore20": 0,
+      "gradedAt": "2026-11-09T15:50:04.918Z",
+      "summary": "پاسخ‌های شما با موفقیت دریافت شد و پس از بررسی و تایید آموزگار در کارنامه درج خواهد شد."
+    },
+    "teacherGrading": {
+      "approved": false,
+      "questionScores": {},
+      "questionFeedbacks": {},
+      "totalScore": 0,
+      "scaledScore20": 0,
+      "teacherNotes": "پاسخ‌های یزدان زاهدی دریافت و در صف بازبینی آموزگار قرار گرفت."
+    },
+    "clientExamTitle": "آزمون تقسیم",
+    "clientSubject": "ریاضی"
+  },
+  {
+    "id": "sub_4da6dd51-1fec-44ff-9e2e-b009722dac96_37bd6f50-e136-4d36-80ec-8684452a2aa8_1794232363560",
+    "examId": "4da6dd51-1fec-44ff-9e2e-b009722dac96",
+    "studentId": "37bd6f50-e136-4d36-80ec-8684452a2aa8",
+    "studentName": "محب محمدی لشتغانی",
+    "submittedAt": "2026-11-09T13:52:43.560Z",
+    "answers": {
+      "q1": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "8"
+      },
+      "q2": {
+        "textAnswer": "۶"
+      },
+      "q3": {
+        "textAnswer": "چهار پنچم"
+      },
+      "q4": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "11"
+      },
+      "q5": {
+        "textAnswer": "۱۲"
+      },
+      "q6": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "12"
+      },
+      "q7": {
+        "textAnswer": "۶"
+      },
+      "q8": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "7"
+      },
+      "q9": {
+        "textAnswer": "۱۲"
+      },
+      "q10": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "6"
+      },
+      "q11": {
+        "textAnswer": "۱۱"
+      },
+      "q12": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "9"
+      },
+      "q13": {
+        "textAnswer": "۷"
+      },
+      "q14": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "12"
+      },
+      "q15": {
+        "textAnswer": "۹"
+      },
+      "q16": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "7"
+      },
+      "q17": {
+        "textAnswer": "۷"
+      },
+      "q18": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "8"
+      },
+      "q19": {
+        "textAnswer": "۱۲"
+      },
+      "q20": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "4"
+      },
+      "q21": {
+        "textAnswer": "۱۱"
+      },
+      "q22": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "5"
+      },
+      "q23": {
+        "textAnswer": "۶"
+      },
+      "q24": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "5"
+      },
+      "q25": {
+        "textAnswer": "۲"
+      }
+    },
+    "syncStatus": "synced",
+    "isOptimistic": true,
+    "isReleased": false,
+    "is_released": false,
+    "status": "pending_approval",
+    "instantStats": {
+      "totalQuestions": 25,
+      "answeredCount": 25,
+      "unansweredCount": 0,
+      "correctCount": 0,
+      "wrongCount": 0,
+      "percentage": 0,
+      "scaledScore20": 0,
+      "earnedPoints": 0,
+      "maxPoints": 52,
+      "status": "good"
+    },
+    "aiGrading": {
+      "questionScores": {},
+      "questionFeedbacks": {},
+      "totalScore": 0,
+      "scaledScore20": 0,
+      "gradedAt": "2026-11-09T13:52:43.563Z",
+      "summary": "پاسخ‌های شما با موفقیت دریافت شد و پس از بررسی و تایید آموزگار در کارنامه درج خواهد شد."
+    },
+    "teacherGrading": {
+      "approved": false,
+      "questionScores": {},
+      "questionFeedbacks": {},
+      "totalScore": 0,
+      "scaledScore20": 0,
+      "teacherNotes": "پاسخ‌های محب محمدی لشتغانی دریافت و در صف بازبینی آموزگار قرار گرفت."
+    },
+    "clientExamTitle": "آزمون تقسیم",
+    "clientSubject": "ریاضی"
+  },
+  {
+    "id": "sub_4da6dd51-1fec-44ff-9e2e-b009722dac96_6266c46b-c186-41c0-abb8-346f41c284a0_1794221994795",
+    "examId": "4da6dd51-1fec-44ff-9e2e-b009722dac96",
+    "studentId": "6266c46b-c186-41c0-abb8-346f41c284a0",
+    "studentName": "ریان ساختمان",
+    "submittedAt": "2026-11-09T10:59:54.795Z",
+    "answers": {
+      "q1": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "8"
+      },
+      "q2": {
+        "textAnswer": "6"
+      },
+      "q3": {
+        "textAnswer": "چهارپنجم"
+      },
+      "q4": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "11"
+      },
+      "q5": {
+        "textAnswer": "12"
+      },
+      "q6": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "12"
+      },
+      "q7": {
+        "textAnswer": "6"
+      },
+      "q8": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "7"
+      },
+      "q9": {
+        "textAnswer": "12"
+      },
+      "q10": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "6"
+      },
+      "q11": {
+        "textAnswer": "یازده"
+      },
+      "q12": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "9"
+      },
+      "q13": {
+        "textAnswer": "7"
+      },
+      "q14": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "12"
+      },
+      "q15": {
+        "textAnswer": "9"
+      },
+      "q16": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "7"
+      },
+      "q17": {
+        "textAnswer": "7"
+      },
+      "q18": {
+        "selectedOption": 0,
+        "selectedOptionIndex": 0,
+        "selectedOptionText": "7"
+      },
+      "q19": {
+        "textAnswer": "دوازده "
+      },
+      "q20": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "4"
+      },
+      "q21": {
+        "textAnswer": "11"
+      },
+      "q22": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "5"
+      },
+      "q23": {
+        "textAnswer": "شش"
+      },
+      "q24": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "5"
+      },
+      "q25": {
+        "textAnswer": "2"
+      }
+    },
+    "syncStatus": "synced",
+    "isOptimistic": true,
+    "isReleased": false,
+    "is_released": false,
+    "status": "pending_approval",
+    "instantStats": {
+      "totalQuestions": 25,
+      "answeredCount": 25,
+      "unansweredCount": 0,
+      "correctCount": 0,
+      "wrongCount": 0,
+      "percentage": 0,
+      "scaledScore20": 0,
+      "earnedPoints": 0,
+      "maxPoints": 52,
+      "status": "good"
+    },
+    "aiGrading": {
+      "questionScores": {},
+      "questionFeedbacks": {},
+      "totalScore": 0,
+      "scaledScore20": 0,
+      "gradedAt": "2026-11-09T10:59:54.803Z",
+      "summary": "پاسخ‌های شما با موفقیت دریافت شد و پس از بررسی و تایید آموزگار در کارنامه درج خواهد شد."
+    },
+    "teacherGrading": {
+      "approved": false,
+      "questionScores": {},
+      "questionFeedbacks": {},
+      "totalScore": 0,
+      "scaledScore20": 0,
+      "teacherNotes": "پاسخ‌های ریان ساختمان دریافت و در صف بازبینی آموزگار قرار گرفت."
+    },
+    "clientExamTitle": "آزمون تقسیم",
+    "clientSubject": "ریاضی"
+  },
+  {
+    "id": "sub_4da6dd51-1fec-44ff-9e2e-b009722dac96_278f2a05-3818-40e0-b3a9-178287fcccab_1794215076181",
+    "examId": "4da6dd51-1fec-44ff-9e2e-b009722dac96",
+    "studentId": "278f2a05-3818-40e0-b3a9-178287fcccab",
+    "studentName": "رایان سنگرزاده خمیری",
+    "submittedAt": "2026-11-09T09:04:36.181Z",
+    "answers": {
+      "q1": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "8"
+      },
+      "q2": {
+        "textAnswer": "6"
+      },
+      "q3": {
+        "textAnswer": "4/5\nچهار پنجم"
+      },
+      "q4": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "11"
+      },
+      "q5": {
+        "textAnswer": "12"
+      },
+      "q6": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "12"
+      },
+      "q7": {
+        "textAnswer": "6"
+      },
+      "q8": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "7"
+      },
+      "q9": {
+        "textAnswer": "12"
+      },
+      "q10": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "6"
+      },
+      "q11": {
+        "textAnswer": "11"
+      },
+      "q12": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "9"
+      },
+      "q13": {
+        "textAnswer": "7"
+      },
+      "q14": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "12"
+      },
+      "q15": {
+        "textAnswer": "9"
+      },
+      "q16": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "7"
+      },
+      "q17": {
+        "textAnswer": "7"
+      },
+      "q18": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "8"
+      },
+      "q19": {
+        "textAnswer": "12"
+      },
+      "q20": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "4"
+      },
+      "q21": {
+        "textAnswer": "11"
+      },
+      "q22": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "5"
+      },
+      "q23": {
+        "textAnswer": "6"
+      },
+      "q24": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "5"
+      },
+      "q25": {
+        "textAnswer": "2"
+      }
+    },
+    "syncStatus": "synced",
+    "isOptimistic": true,
+    "isReleased": false,
+    "is_released": false,
+    "status": "pending_approval",
+    "instantStats": {
+      "totalQuestions": 25,
+      "answeredCount": 25,
+      "unansweredCount": 0,
+      "correctCount": 0,
+      "wrongCount": 0,
+      "percentage": 0,
+      "scaledScore20": 0,
+      "earnedPoints": 0,
+      "maxPoints": 52,
+      "status": "good"
+    },
+    "aiGrading": {
+      "questionScores": {},
+      "questionFeedbacks": {},
+      "totalScore": 0,
+      "scaledScore20": 0,
+      "gradedAt": "2026-11-09T09:04:36.181Z",
+      "summary": "پاسخ‌های شما با موفقیت دریافت شد و پس از بررسی و تایید آموزگار در کارنامه درج خواهد شد."
+    },
+    "teacherGrading": {
+      "approved": false,
+      "questionScores": {},
+      "questionFeedbacks": {},
+      "totalScore": 0,
+      "scaledScore20": 0,
+      "teacherNotes": "پاسخ‌های رایان سنگرزاده خمیری دریافت و در صف بازبینی آموزگار قرار گرفت."
+    },
+    "clientExamTitle": "آزمون تقسیم",
+    "clientSubject": "ریاضی"
+  },
+  {
+    "id": "sub_4da6dd51-1fec-44ff-9e2e-b009722dac96_25f4765b-eb19-4899-9da6-4f24d9a4708e_1794214124825",
+    "examId": "4da6dd51-1fec-44ff-9e2e-b009722dac96",
+    "studentId": "25f4765b-eb19-4899-9da6-4f24d9a4708e",
+    "studentName": "محمدپارسا زینلی",
+    "submittedAt": "2026-11-09T08:48:44.825Z",
+    "answers": {
+      "q1": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "8"
+      },
+      "q2": {
+        "textAnswer": "6"
+      },
+      "q3": {
+        "textAnswer": "۲۴/۳۰"
+      },
+      "q4": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "11"
+      },
+      "q5": {
+        "textAnswer": "۱۲"
+      },
+      "q6": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "12"
+      },
+      "q7": {
+        "textAnswer": "۶"
+      },
+      "q8": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "7"
+      },
+      "q9": {
+        "textAnswer": "۱۲"
+      },
+      "q10": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "6"
+      },
+      "q11": {
+        "textAnswer": "۱۱"
+      },
+      "q12": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "9"
+      },
+      "q13": {
+        "textAnswer": "۷"
+      },
+      "q14": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "12"
+      },
+      "q15": {
+        "textAnswer": "۹"
+      },
+      "q16": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "7"
+      },
+      "q17": {
+        "textAnswer": "۷"
+      },
+      "q18": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "8"
+      },
+      "q19": {
+        "textAnswer": "۱۲"
+      },
+      "q20": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "4"
+      },
+      "q21": {
+        "textAnswer": "۱۱"
+      },
+      "q22": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "5"
+      },
+      "q23": {
+        "textAnswer": "۶"
+      },
+      "q24": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "5"
+      },
+      "q25": {
+        "textAnswer": "۲"
+      }
+    },
+    "syncStatus": "synced",
+    "isOptimistic": true,
+    "isReleased": false,
+    "is_released": false,
+    "status": "pending_approval",
+    "instantStats": {
+      "totalQuestions": 25,
+      "answeredCount": 25,
+      "unansweredCount": 0,
+      "correctCount": 0,
+      "wrongCount": 0,
+      "percentage": 0,
+      "scaledScore20": 0,
+      "earnedPoints": 0,
+      "maxPoints": 52,
+      "status": "good"
+    },
+    "aiGrading": {
+      "questionScores": {},
+      "questionFeedbacks": {},
+      "totalScore": 0,
+      "scaledScore20": 0,
+      "gradedAt": "2026-11-09T08:48:44.841Z",
+      "summary": "پاسخ‌های شما با موفقیت دریافت شد و پس از بررسی و تایید آموزگار در کارنامه درج خواهد شد."
+    },
+    "teacherGrading": {
+      "approved": false,
+      "questionScores": {},
+      "questionFeedbacks": {},
+      "totalScore": 0,
+      "scaledScore20": 0,
+      "teacherNotes": "پاسخ‌های محمدپارسا زینلی دریافت و در صف بازبینی آموزگار قرار گرفت."
+    },
+    "clientExamTitle": "آزمون تقسیم",
+    "clientSubject": "ریاضی"
+  },
+  {
+    "id": "sub_4da6dd51-1fec-44ff-9e2e-b009722dac96_d0ff7639-7ef7-46a5-8499-abaea43fa73e_1794193311301",
+    "examId": "4da6dd51-1fec-44ff-9e2e-b009722dac96",
+    "studentId": "d0ff7639-7ef7-46a5-8499-abaea43fa73e",
+    "studentName": "محمد سلیمانی نژاد",
+    "submittedAt": "2026-11-09T03:01:51.301Z",
+    "answers": {
+      "q1": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "8"
+      },
+      "q2": {
+        "textAnswer": "۶"
+      },
+      "q3": {
+        "textAnswer": "۴\n_\n5"
+      },
+      "q4": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "11"
+      },
+      "q5": {
+        "textAnswer": "1"
+      },
+      "q6": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "12"
+      },
+      "q7": {
+        "textAnswer": "6.   "
+      },
+      "q8": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "7"
+      },
+      "q9": {
+        "textAnswer": "۱۲"
+      },
+      "q10": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "6"
+      },
+      "q11": {
+        "textAnswer": "۱۱"
+      },
+      "q12": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "9"
+      },
+      "q13": {
+        "textAnswer": "۷"
+      },
+      "q14": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "12"
+      },
+      "q15": {
+        "textAnswer": "۹"
+      },
+      "q16": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "7"
+      },
+      "q17": {
+        "textAnswer": "۷"
+      },
+      "q18": {
+        "selectedOption": 0,
+        "selectedOptionIndex": 0,
+        "selectedOptionText": "7"
+      },
+      "q19": {
+        "textAnswer": "۱۲"
+      },
+      "q20": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "4"
+      },
+      "q21": {
+        "textAnswer": "۱۱"
+      },
+      "q22": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "5"
+      },
+      "q23": {
+        "textAnswer": "۶"
+      },
+      "q24": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "5"
+      },
+      "q25": {
+        "textAnswer": "۲"
+      }
+    },
+    "syncStatus": "synced",
+    "isOptimistic": true,
+    "isReleased": false,
+    "is_released": false,
+    "status": "pending_approval",
+    "instantStats": {
+      "totalQuestions": 25,
+      "answeredCount": 25,
+      "unansweredCount": 0,
+      "correctCount": 0,
+      "wrongCount": 0,
+      "percentage": 0,
+      "scaledScore20": 0,
+      "earnedPoints": 0,
+      "maxPoints": 52,
+      "status": "good"
+    },
+    "aiGrading": {
+      "questionScores": {},
+      "questionFeedbacks": {},
+      "totalScore": 0,
+      "scaledScore20": 0,
+      "gradedAt": "2026-11-09T03:01:51.303Z",
+      "summary": "پاسخ‌های شما با موفقیت دریافت شد و پس از بررسی و تایید آموزگار در کارنامه درج خواهد شد."
+    },
+    "teacherGrading": {
+      "approved": false,
+      "questionScores": {},
+      "questionFeedbacks": {},
+      "totalScore": 0,
+      "scaledScore20": 0,
+      "teacherNotes": "پاسخ‌های محمد سلیمانی نژاد دریافت و در صف بازبینی آموزگار قرار گرفت."
+    },
+    "clientExamTitle": "آزمون تقسیم",
+    "clientSubject": "ریاضی"
+  },
+  {
+    "id": "sub_4da6dd51-1fec-44ff-9e2e-b009722dac96_72b77226-0011-4482-84b0-de411b40d284_1794161045998",
+    "examId": "4da6dd51-1fec-44ff-9e2e-b009722dac96",
+    "studentId": "72b77226-0011-4482-84b0-de411b40d284",
+    "studentName": "ماهان کارگر",
+    "submittedAt": "2026-11-08T18:04:05.998Z",
+    "answers": {
+      "q1": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "8"
+      },
+      "q2": {
+        "textAnswer": "6"
+      },
+      "q3": {
+        "textAnswer": "دوازده ضرب در 4میشود 48و دوازده ضرب در 5میشود 60\n4/5"
+      },
+      "q4": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "11"
+      },
+      "q5": {
+        "textAnswer": "12/7که میشود 12"
+      },
+      "q6": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "12"
+      },
+      "q7": {
+        "textAnswer": "36/6=6"
+      },
+      "q8": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "7"
+      },
+      "q9": {
+        "textAnswer": "12میشود"
+      },
+      "q10": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "6"
+      },
+      "q11": {
+        "textAnswer": "132/12= 11"
+      },
+      "q12": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "9"
+      },
+      "q13": {
+        "textAnswer": "7"
+      },
+      "q14": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "12"
+      },
+      "q15": {
+        "textAnswer": "81/9=9"
+      },
+      "q16": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "7"
+      },
+      "q17": {
+        "textAnswer": "7"
+      },
+      "q18": {
+        "selectedOption": 0,
+        "selectedOptionIndex": 0,
+        "selectedOptionText": "7"
+      },
+      "q19": {
+        "textAnswer": "144÷12=12\n"
+      },
+      "q20": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "4"
+      },
+      "q21": {
+        "textAnswer": "11"
+      },
+      "q22": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "5"
+      },
+      "q23": {
+        "textAnswer": "6"
+      },
+      "q24": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "5"
+      },
+      "q25": {
+        "textAnswer": "2"
+      }
+    },
+    "syncStatus": "synced",
+    "isOptimistic": true,
+    "isReleased": false,
+    "is_released": false,
+    "status": "pending_approval",
+    "instantStats": {
+      "totalQuestions": 25,
+      "answeredCount": 25,
+      "unansweredCount": 0,
+      "correctCount": 0,
+      "wrongCount": 0,
+      "percentage": 0,
+      "scaledScore20": 0,
+      "earnedPoints": 0,
+      "maxPoints": 52,
+      "status": "good"
+    },
+    "aiGrading": {
+      "questionScores": {},
+      "questionFeedbacks": {},
+      "totalScore": 0,
+      "scaledScore20": 0,
+      "gradedAt": "2026-11-08T18:04:05.998Z",
+      "summary": "پاسخ‌های شما با موفقیت دریافت شد و پس از بررسی و تایید آموزگار در کارنامه درج خواهد شد."
+    },
+    "teacherGrading": {
+      "approved": false,
+      "questionScores": {},
+      "questionFeedbacks": {},
+      "totalScore": 0,
+      "scaledScore20": 0,
+      "teacherNotes": "پاسخ‌های ماهان کارگر دریافت و در صف بازبینی آموزگار قرار گرفت."
+    },
+    "clientExamTitle": "آزمون تقسیم",
+    "clientSubject": "ریاضی"
+  },
+  {
+    "id": "sub_4da6dd51-1fec-44ff-9e2e-b009722dac96_d3bab054-f083-44b6-a923-a6cf1f9b9559_1794160488241",
+    "examId": "4da6dd51-1fec-44ff-9e2e-b009722dac96",
+    "studentId": "d3bab054-f083-44b6-a923-a6cf1f9b9559",
+    "studentName": "هوراد جاشونی دریائی",
+    "submittedAt": "2026-11-08T17:54:48.241Z",
+    "answers": {
+      "q1": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "8"
+      },
+      "q2": {
+        "textAnswer": "۶"
+      },
+      "q3": {
+        "textAnswer": "۴پنجم"
+      },
+      "q4": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "11"
+      },
+      "q6": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "12"
+      },
+      "q7": {
+        "textAnswer": "۶"
+      },
+      "q8": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "7"
+      },
+      "q9": {
+        "textAnswer": "۱۲"
+      },
+      "q10": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "6"
+      },
+      "q11": {
+        "textAnswer": "۱۱"
+      },
+      "q12": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "9"
+      },
+      "q13": {
+        "textAnswer": "۷"
+      },
+      "q14": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "12"
+      },
+      "q15": {
+        "textAnswer": "۹"
+      },
+      "q16": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "7"
+      },
+      "q17": {
+        "textAnswer": "۷"
+      },
+      "q18": {
+        "selectedOption": 0,
+        "selectedOptionIndex": 0,
+        "selectedOptionText": "7"
+      },
+      "q19": {
+        "textAnswer": "۱۲"
+      },
+      "q20": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "4"
+      },
+      "q21": {
+        "textAnswer": "۱۱"
+      },
+      "q22": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "5"
+      },
+      "q23": {
+        "textAnswer": "۶"
+      },
+      "q24": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "5"
+      },
+      "q25": {
+        "textAnswer": "۲"
+      }
+    },
+    "syncStatus": "synced",
+    "isOptimistic": true,
+    "isReleased": false,
+    "is_released": false,
+    "status": "pending_approval",
+    "instantStats": {
+      "totalQuestions": 25,
+      "answeredCount": 24,
+      "unansweredCount": 1,
+      "correctCount": 0,
+      "wrongCount": 0,
+      "percentage": 0,
+      "scaledScore20": 0,
+      "earnedPoints": 0,
+      "maxPoints": 52,
+      "status": "good"
+    },
+    "aiGrading": {
+      "questionScores": {},
+      "questionFeedbacks": {},
+      "totalScore": 0,
+      "scaledScore20": 0,
+      "gradedAt": "2026-11-08T17:54:48.241Z",
+      "summary": "پاسخ‌های شما با موفقیت دریافت شد و پس از بررسی و تایید آموزگار در کارنامه درج خواهد شد."
+    },
+    "teacherGrading": {
+      "approved": false,
+      "questionScores": {},
+      "questionFeedbacks": {},
+      "totalScore": 0,
+      "scaledScore20": 0,
+      "teacherNotes": "پاسخ‌های هوراد جاشونی دریائی دریافت و در صف بازبینی آموزگار قرار گرفت."
+    },
+    "clientExamTitle": "آزمون تقسیم",
+    "clientSubject": "ریاضی"
+  },
+  {
+    "id": "sub_4da6dd51-1fec-44ff-9e2e-b009722dac96_448a6f44-42a2-4878-aafa-f1a927c688ff_1794154951047",
+    "examId": "4da6dd51-1fec-44ff-9e2e-b009722dac96",
+    "studentId": "448a6f44-42a2-4878-aafa-f1a927c688ff",
+    "studentName": "محمد براه",
+    "submittedAt": "2026-11-08T16:22:31.047Z",
+    "answers": {
+      "q1": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "8"
+      },
+      "q2": {
+        "textAnswer": "6"
+      },
+      "q3": {
+        "textAnswer": "4\n_\n5"
+      },
+      "q4": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "11"
+      },
+      "q5": {
+        "textAnswer": "12"
+      },
+      "q6": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "12"
+      },
+      "q7": {
+        "textAnswer": "6*6=36"
+      },
+      "q8": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "7"
+      },
+      "q9": {
+        "textAnswer": "12"
+      },
+      "q10": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "6"
+      },
+      "q11": {
+        "textAnswer": "132تقسیم بر ۱۲=۱۱"
+      },
+      "q12": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "9"
+      },
+      "q13": {
+        "textAnswer": "۷"
+      },
+      "q14": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "12"
+      },
+      "q15": {
+        "textAnswer": "۹"
+      },
+      "q16": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "7"
+      },
+      "q17": {
+        "textAnswer": "۷"
+      },
+      "q18": {
+        "selectedOption": 0,
+        "selectedOptionIndex": 0,
+        "selectedOptionText": "7"
+      },
+      "q19": {
+        "textAnswer": "۱۲ضرب در ۱۲=۱۴۴"
+      },
+      "q20": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "4"
+      },
+      "q21": {
+        "textAnswer": "۱۱"
+      },
+      "q22": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "5"
+      },
+      "q23": {
+        "textAnswer": "۲ضرب ۶=۱۲"
+      },
+      "q24": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "5"
+      },
+      "q25": {
+        "textAnswer": "۲"
+      }
+    },
+    "syncStatus": "synced",
+    "isOptimistic": true,
+    "isReleased": false,
+    "is_released": false,
+    "status": "pending_approval",
+    "instantStats": {
+      "totalQuestions": 25,
+      "answeredCount": 25,
+      "unansweredCount": 0,
+      "correctCount": 0,
+      "wrongCount": 0,
+      "percentage": 0,
+      "scaledScore20": 0,
+      "earnedPoints": 0,
+      "maxPoints": 52,
+      "status": "good"
+    },
+    "aiGrading": {
+      "questionScores": {},
+      "questionFeedbacks": {},
+      "totalScore": 0,
+      "scaledScore20": 0,
+      "gradedAt": "2026-11-08T16:22:31.047Z",
+      "summary": "پاسخ‌های شما با موفقیت دریافت شد و پس از بررسی و تایید آموزگار در کارنامه درج خواهد شد."
+    },
+    "teacherGrading": {
+      "approved": false,
+      "questionScores": {},
+      "questionFeedbacks": {},
+      "totalScore": 0,
+      "scaledScore20": 0,
+      "teacherNotes": "پاسخ‌های محمد براه دریافت و در صف بازبینی آموزگار قرار گرفت."
+    },
+    "clientExamTitle": "آزمون تقسیم",
+    "clientSubject": "ریاضی"
+  },
+  {
+    "id": "sub_4da6dd51-1fec-44ff-9e2e-b009722dac96_47d00c57-9684-406e-b150-6a843c57fd0f_1794141703198",
+    "examId": "4da6dd51-1fec-44ff-9e2e-b009722dac96",
+    "studentId": "47d00c57-9684-406e-b150-6a843c57fd0f",
+    "studentName": "محمد احمدی ( بهنام )",
+    "submittedAt": "2026-11-08T12:41:43.198Z",
+    "answers": {
+      "q1": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "8"
+      },
+      "q2": {
+        "textAnswer": "۶"
+      },
+      "q4": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "11"
+      },
+      "q5": {
+        "textAnswer": "۱۲"
+      },
+      "q6": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "12"
+      },
+      "q7": {
+        "textAnswer": "۶"
+      },
+      "q8": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "8"
+      },
+      "q9": {
+        "textAnswer": "۱۲"
+      },
+      "q10": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "6"
+      },
+      "q11": {
+        "textAnswer": "۱۱"
+      },
+      "q12": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "9"
+      },
+      "q13": {
+        "textAnswer": "۷"
+      },
+      "q14": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "12"
+      },
+      "q15": {
+        "textAnswer": "۹"
+      },
+      "q16": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "7"
+      },
+      "q17": {
+        "textAnswer": "۷"
+      },
+      "q18": {
+        "selectedOption": 0,
+        "selectedOptionIndex": 0,
+        "selectedOptionText": "7"
+      },
+      "q19": {
+        "textAnswer": "۱۲"
+      },
+      "q20": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "4"
+      },
+      "q21": {
+        "textAnswer": "۱۱"
+      },
+      "q22": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "5"
+      },
+      "q23": {
+        "textAnswer": "۶"
+      },
+      "q24": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "5"
+      },
+      "q25": {
+        "textAnswer": "۲"
+      }
+    },
+    "syncStatus": "synced",
+    "isOptimistic": true,
+    "isReleased": false,
+    "is_released": false,
+    "status": "pending_approval",
+    "instantStats": {
+      "totalQuestions": 25,
+      "answeredCount": 24,
+      "unansweredCount": 1,
+      "correctCount": 0,
+      "wrongCount": 0,
+      "percentage": 0,
+      "scaledScore20": 0,
+      "earnedPoints": 0,
+      "maxPoints": 52,
+      "status": "good"
+    },
+    "aiGrading": {
+      "questionScores": {},
+      "questionFeedbacks": {},
+      "totalScore": 0,
+      "scaledScore20": 0,
+      "gradedAt": "2026-11-08T12:41:43.206Z",
+      "summary": "پاسخ‌های شما با موفقیت دریافت شد و پس از بررسی و تایید آموزگار در کارنامه درج خواهد شد."
+    },
+    "teacherGrading": {
+      "approved": false,
+      "questionScores": {},
+      "questionFeedbacks": {},
+      "totalScore": 0,
+      "scaledScore20": 0,
+      "teacherNotes": "پاسخ‌های محمد احمدی ( بهنام ) دریافت و در صف بازبینی آموزگار قرار گرفت."
+    },
+    "clientExamTitle": "آزمون تقسیم",
+    "clientSubject": "ریاضی"
+  },
+  {
+    "id": "sub_4da6dd51-1fec-44ff-9e2e-b009722dac96_ae8a3716-683e-498c-9b47-570fcd83befd_1794139437624",
+    "examId": "4da6dd51-1fec-44ff-9e2e-b009722dac96",
+    "studentId": "ae8a3716-683e-498c-9b47-570fcd83befd",
+    "studentName": "فرهام فرهمند",
+    "submittedAt": "2026-11-08T12:03:57.624Z",
+    "answers": {
+      "q1": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "8"
+      },
+      "q2": {
+        "textAnswer": "۶"
+      },
+      "q3": {
+        "textAnswer": "دوازده را ضرب پنج میکنیم مساوی با شصت و دوازده را ضرب چهار کنیم می‌شود چهل و هشت و جواب مساوی با چهار پنجم"
+      },
+      "q4": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "11"
+      },
+      "q5": {
+        "textAnswer": "۱۲"
+      },
+      "q6": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "12"
+      },
+      "q7": {
+        "textAnswer": "۶"
+      },
+      "q8": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "7"
+      },
+      "q9": {
+        "textAnswer": "۱۲"
+      },
+      "q10": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "6"
+      },
+      "q11": {
+        "textAnswer": "۱۱"
+      },
+      "q12": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "9"
+      },
+      "q13": {
+        "textAnswer": "۷"
+      },
+      "q14": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "12"
+      },
+      "q15": {
+        "textAnswer": "۹"
+      },
+      "q16": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "7"
+      },
+      "q17": {
+        "textAnswer": "۷"
+      },
+      "q18": {
+        "selectedOption": 0,
+        "selectedOptionIndex": 0,
+        "selectedOptionText": "7"
+      },
+      "q19": {
+        "textAnswer": "۱۲"
+      },
+      "q20": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "4"
+      },
+      "q21": {
+        "textAnswer": "۱۱"
+      },
+      "q22": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "5"
+      },
+      "q23": {
+        "textAnswer": "۶"
+      },
+      "q24": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "5"
+      },
+      "q25": {
+        "textAnswer": "۲"
+      }
+    },
+    "syncStatus": "synced",
+    "isOptimistic": true,
+    "isReleased": false,
+    "is_released": false,
+    "status": "pending_approval",
+    "instantStats": {
+      "totalQuestions": 25,
+      "answeredCount": 25,
+      "unansweredCount": 0,
+      "correctCount": 0,
+      "wrongCount": 0,
+      "percentage": 0,
+      "scaledScore20": 0,
+      "earnedPoints": 0,
+      "maxPoints": 52,
+      "status": "good"
+    },
+    "aiGrading": {
+      "questionScores": {},
+      "questionFeedbacks": {},
+      "totalScore": 0,
+      "scaledScore20": 0,
+      "gradedAt": "2026-11-08T12:03:57.628Z",
+      "summary": "پاسخ‌های شما با موفقیت دریافت شد و پس از بررسی و تایید آموزگار در کارنامه درج خواهد شد."
+    },
+    "teacherGrading": {
+      "approved": false,
+      "questionScores": {},
+      "questionFeedbacks": {},
+      "totalScore": 0,
+      "scaledScore20": 0,
+      "teacherNotes": "پاسخ‌های فرهام فرهمند دریافت و در صف بازبینی آموزگار قرار گرفت."
+    },
+    "clientExamTitle": "آزمون تقسیم",
+    "clientSubject": "ریاضی"
+  },
+  {
+    "id": "sub_4da6dd51-1fec-44ff-9e2e-b009722dac96_c84b2c9c-f8dd-4116-8f66-47d12aa110eb_1794169209549",
+    "examId": "4da6dd51-1fec-44ff-9e2e-b009722dac96",
+    "studentId": "c84b2c9c-f8dd-4116-8f66-47d12aa110eb",
+    "studentName": "محمد قاسمی گوربندی",
+    "submittedAt": "2026-11-08T20:20:09.549Z",
+    "answers": {
+      "q1": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "8"
+      },
+      "q2": {
+        "textAnswer": "۱۲ضرب 6"
+      },
+      "q3": {
+        "textAnswer": "12 ضرب 4 مساویه 48\n30 ضرب2 مساویه 60"
+      },
+      "q4": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "11"
+      },
+      "q5": {
+        "textAnswer": "12 ضرب 7 مساوی 84"
+      },
+      "q6": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "12"
+      },
+      "q7": {
+        "textAnswer": "36 تقسیم بر 6 مساویه 6"
+      },
+      "q8": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "7"
+      },
+      "q9": {
+        "textAnswer": "12"
+      },
+      "q10": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "6"
+      },
+      "q11": {
+        "textAnswer": "132 تقسیم بر 12 مساوی 11"
+      },
+      "q12": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "9"
+      },
+      "q13": {
+        "textAnswer": "7"
+      },
+      "q14": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "12"
+      },
+      "q15": {
+        "textAnswer": "81 تقسیم بر 9 مساوی 9"
+      },
+      "q16": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "7"
+      },
+      "q17": {
+        "textAnswer": "42 تقسیم بر 6 مساوی 7"
+      },
+      "q18": {
+        "selectedOption": 0,
+        "selectedOptionIndex": 0,
+        "selectedOptionText": "7"
+      },
+      "q19": {
+        "textAnswer": "144 تقسیم بر 12 مساوی 12"
+      },
+      "q20": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "4"
+      },
+      "q21": {
+        "textAnswer": "55 تقسیم بر 5 مساوی 11"
+      },
+      "q22": {
+        "selectedOption": 2,
+        "selectedOptionIndex": 2,
+        "selectedOptionText": "5"
+      },
+      "q23": {
+        "textAnswer": "12 تقسیم بر 2 مساوی 6"
+      },
+      "q24": {
+        "selectedOption": 1,
+        "selectedOptionIndex": 1,
+        "selectedOptionText": "5"
+      },
+      "q25": {
+        "textAnswer": "18 تقسیم بر 9 مساوی 2"
+      }
+    },
+    "syncStatus": "synced",
+    "isOptimistic": true,
+    "isReleased": false,
+    "is_released": false,
+    "status": "pending_approval",
+    "instantStats": {
+      "totalQuestions": 25,
+      "answeredCount": 25,
+      "unansweredCount": 0,
+      "correctCount": 0,
+      "wrongCount": 0,
+      "percentage": 0,
+      "scaledScore20": 0,
+      "earnedPoints": 0,
+      "maxPoints": 52,
+      "status": "good"
+    },
+    "aiGrading": {
+      "questionScores": {},
+      "questionFeedbacks": {},
+      "totalScore": 0,
+      "scaledScore20": 0,
+      "gradedAt": "2026-11-08T20:20:09.579Z",
+      "summary": "پاسخ‌های شما با موفقیت دریافت شد و پس از بررسی و تایید آموزگار در کارنامه درج خواهد شد."
+    },
+    "teacherGrading": {
+      "approved": false,
+      "questionScores": {},
+      "questionFeedbacks": {},
+      "totalScore": 0,
+      "scaledScore20": 0,
+      "teacherNotes": "پاسخ‌های محمد قاسمی گوربندی دریافت و در صف بازبینی آموزگار قرار گرفت."
+    },
+    "clientExamTitle": "آزمون تقسیم",
+    "clientSubject": "ریاضی"
   }
 ]

@@ -8,6 +8,7 @@ import WhatsappPosterModal from './WhatsappPosterModal'
 import { WhatsappPosterData } from '../types/whatsappPoster'
 import { deleteExam, getLocalExams } from '../utils/examStore'
 import { realtimeSync } from '../services/realtimeSync'
+import { fetchApiJson, isBackendStaticOnly } from '../utils/networkResilience'
 
 export default function PostsBoard({
   posts,
@@ -151,18 +152,23 @@ export default function PostsBoard({
       let deleted = false
 
       // 1. First call server-side delete endpoint
-      try {
-        const res = await fetch('/api/teacher/delete-post', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ teacherPassword, postId }),
-        })
-        const data = await res.json()
-        if (data && data.success) {
-          deleted = true
+      if (!isBackendStaticOnly()) {
+        try {
+          const data = await fetchApiJson<any>(
+            '/api/teacher/delete-post',
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ teacherPassword, postId }),
+            },
+            5000
+          )
+          if (data && data.success) {
+            deleted = true
+          }
+        } catch (errServer) {
+          console.warn('Server delete endpoint error:', errServer)
         }
-      } catch (errServer) {
-        console.warn('Server delete endpoint error:', errServer)
       }
 
       // 2. Direct client-side fallbacks if server wasn't reachable

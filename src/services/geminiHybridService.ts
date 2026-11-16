@@ -206,6 +206,8 @@ export function getBackendAuthHeaders(explicitPassword?: string): Record<string,
  * Safely calls backend AI route with content-type inspection and HTML 404 detection
  * to prevent JSON parse errors on static hosting (Netlify/Cloudflare Workers).
  */
+import { resolveApiUrl } from '../utils/networkResilience'
+
 export async function callBackendAiSafe(
   endpoint: string,
   payload: any,
@@ -217,7 +219,7 @@ export async function callBackendAiSafe(
 
   let res: Response
   try {
-    res = await fetch(endpoint, {
+    res = await fetch(resolveApiUrl(endpoint), {
       method: 'POST',
       headers: getBackendAuthHeaders(teacherPass),
       body: JSON.stringify({ ...payload, teacherPassword: teacherPass }),

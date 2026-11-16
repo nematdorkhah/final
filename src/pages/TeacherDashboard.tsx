@@ -24,6 +24,7 @@ import LoadingScreen from '../components/LoadingScreen'
 import { exportClassroomToExcel } from '../utils/excelExport'
 import { getLocalExams, getLocalSubmissions } from '../utils/examStore'
 import { sortByLastName } from '../utils/persianSort'
+import { realtimeSync } from '../services/realtimeSync'
 
 type TeacherTab = 'home' | 'posts' | 'attendance' | 'grades' | 'monitoring' | 'ai'
 
@@ -50,6 +51,7 @@ export default function TeacherDashboard({
   } = useClassroomData(teacherPassword)
 
   useEffect(() => {
+    realtimeSync.init()
     const handleExamsUpdated = () => {
       reload()
     }

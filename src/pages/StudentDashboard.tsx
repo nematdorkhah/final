@@ -15,10 +15,12 @@ import MathRenderer from '../components/MathRenderer'
 import { Exam, StudentExamSubmission } from '../types/examTypes'
 import {
   fetchPublishedExams,
+  fetchPublishedExamsWithDiagnostics,
   fetchExamSubmissions,
   getStudentExamSubmission,
   sanitizeExamTitle,
   getLocalExams,
+  saveLocalExams,
   getLocalSubmissions,
   flushPendingExamSyncQueue,
   extractExamsFromPosts,
@@ -30,6 +32,13 @@ import { toPersianDigits } from '../utils/persianNumbers'
 import { getSubmissionEffectiveScore } from '../utils/persianSemanticGrader'
 import { resolveCanonicalStudent, isSameStudent } from '../classStudents'
 import { realtimeSync } from '../services/realtimeSync'
+import {
+  retryWithBackoff,
+  fetchApiJson,
+  fetchFilteredPublishedPosts,
+  sanitizeExamForStudent,
+  isBackendStaticOnly,
+} from '../utils/networkResilience'
 
 
 type StudentTab = 'home' | 'tizhooshan' | 'homework' | 'grades' | 'profile'
@@ -95,16 +104,33 @@ export default function StudentDashboard({
     return []
   })
   const [takingExam, setTakingExam] = useState<Exam | null>(null)
+  const [fetchStatus, setFetchStatus] = useState<'loading' | 'ready' | 'error'>(() => {
+    try {
+      const hasCachedExams = getLocalExams().some((e) => e && e.published !== false)
+      const rawPosts = typeof localStorage !== 'undefined' ? localStorage.getItem('cached_published_posts') : null
+      const hasCachedPosts = Boolean(rawPosts && JSON.parse(rawPosts).length > 0)
+      if (hasCachedExams || hasCachedPosts) return 'ready'
+    } catch {}
+    return 'loading'
+  })
+  const [examsFetchStatus, setExamsFetchStatus] = useState<'loading' | 'ready' | 'error'>(() => {
+    try {
+      const hasCachedExams = getLocalExams().some((e) => e && e.published !== false)
+      if (hasCachedExams) return 'ready'
+    } catch {}
+    return 'loading'
+  })
   const [loading, setLoading] = useState(() => {
     try {
-      if (typeof localStorage !== 'undefined') {
-        const raw = localStorage.getItem('cached_published_posts')
-        if (raw && JSON.parse(raw).length > 0) return false
-      }
+      const hasCachedExams = getLocalExams().some((e) => e && e.published !== false)
+      const rawPosts = typeof localStorage !== 'undefined' ? localStorage.getItem('cached_published_posts') : null
+      const hasCachedPosts = Boolean(rawPosts && JSON.parse(rawPosts).length > 0)
+      if (hasCachedExams || hasCachedPosts) return false
     } catch {}
     return true
   })
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [syncWarning, setSyncWarning] = useState<string | null>(null)
   const [sendingPostId, setSendingPostId] = useState<string | null>(null)
   const [stagedFiles, setStagedFiles] = useState<Record<string, File>>({})
   const [noteDrafts, setNoteDrafts] = useState<Record<string, string>>(() => {
@@ -124,6 +150,9 @@ export default function StudentDashboard({
   const [showReportCardModal, setShowReportCardModal] = useState(false)
   const [currentTime, setCurrentTime] = useState(Date.now())
   const hasLoadedOnce = useRef(false)
+  const requestSeqRef = useRef(0)
+  const inFlightLoadRef = useRef<{ promise: Promise<void>; seq: number } | null>(null)
+  const serverTimeOffsetRef = useRef(0)
 
   function updateHomeworkDraft(postId: string, text: string) {
     setNoteDrafts((prev) => {
@@ -164,7 +193,7 @@ export default function StudentDashboard({
         badgeText: '🟢 آماده برگزاری',
       }
     }
-    const diffMs = startMs - currentTime
+    const diffMs = startMs - (currentTime + serverTimeOffsetRef.current)
 
     // Exact scheduled time formatted in Persian
     const startDate = new Date(scheduledStartTime)
@@ -257,56 +286,147 @@ export default function StudentDashboard({
     return false
   }
 
-  async function loadAll() {
-    // 1. Instant Cache Hydration: If local data exists, clear loading screen immediately (<5ms)
-    const localExams = getLocalExams()
-    if (localExams.length > 0) {
-      setExams(localExams.filter((e) => e.published !== false))
-    }
-    const localSubs = getLocalSubmissions()
-    if (localSubs.length > 0) {
-      setMyExamSubs(localSubs)
+  async function loadAll(force = false): Promise<void> {
+    if (!force && inFlightLoadRef.current) {
+      return inFlightLoadRef.current.promise
     }
 
-    if (hasLoadedOnce.current || localExams.length > 0) {
-      setLoading(false)
-    } else {
-      setLoading(true)
-    }
-    setLoadError(null)
+    const seq = ++requestSeqRef.current
+    const runPromise = (async () => {
+      // 1. Instant Cache Hydration: If local data exists, clear blocking loading screen immediately
+      const localExams = getLocalExams().filter((e) => e && e.published !== false)
+      const localPosts = (() => {
+        try {
+          const raw = typeof localStorage !== 'undefined' ? localStorage.getItem('cached_published_posts') : null
+          return raw ? JSON.parse(raw) : []
+        } catch {
+          return []
+        }
+      })()
+      const hasCachedData = localExams.length > 0 || localPosts.length > 0
 
-    const rawId = student?.id || student?.access_code
-    const rosterInfo = resolveCanonicalStudent(rawId || student?.full_name)
-    const canonicalStudentId = rosterInfo?.id || rawId
-    const canonicalAccessCode = rosterInfo?.nationalCode || student?.access_code || rawId
+      if (localExams.length > 0) {
+        setExams(localExams)
+      }
+      const localSubs = getLocalSubmissions()
+      if (localSubs.length > 0) {
+        setMyExamSubs(localSubs)
+      }
 
-    if (!canonicalStudentId) {
-      setLoading(false)
-      return
-    }
+      if (hasLoadedOnce.current || hasCachedData) {
+        setLoading(false)
+      } else {
+        setLoading(true)
+        setFetchStatus('loading')
+        setExamsFetchStatus('loading')
+      }
+      setLoadError(null)
+      setSyncWarning(null)
 
-    // 2. High-Speed Bundled Sync (< 25ms response time on mobile)
-    try {
-      const bundleRes = await fetch(`/api/classroom/bundle?studentId=${encodeURIComponent(canonicalStudentId)}`)
-        .then((r) => r.ok ? r.json() : null)
-        .catch(() => null)
+      const rawId = student?.id || student?.access_code
+      const rosterInfo = resolveCanonicalStudent(rawId || student?.full_name)
+      const canonicalStudentId = rosterInfo?.id || rawId
+      const canonicalAccessCode = rosterInfo?.nationalCode || student?.access_code || rawId
 
-      if (bundleRes?.success) {
+      if (!canonicalStudentId) {
+        if (seq === requestSeqRef.current) {
+          setLoading(false)
+          setFetchStatus('error')
+          setExamsFetchStatus('error')
+          setLoadError('اطلاعات کاربری دانش‌آموز معتبر نیست. لطفاً مجدداً وارد شوید.')
+        }
+        return
+      }
+
+      const withTimeout = async <T,>(promise: PromiseLike<T> | Promise<T>, ms = 8000): Promise<T> => {
+        return Promise.race([
+          Promise.resolve(promise),
+          new Promise<T>((_, reject) => setTimeout(() => reject(new Error('timeout')), ms)),
+        ])
+      }
+
+      // 2. Execute Bundle Fetch (with HTML-fallback short-circuit) + Lightweight Direct Supabase Fallbacks IN PARALLEL
+      const bundlePromise = isBackendStaticOnly()
+        ? Promise.reject(Object.assign(new Error('HTML_SPA_FALLBACK_ON_API_ROUTE'), { isHtmlFallback: true, status: 404 }))
+        : retryWithBackoff(
+            async () => {
+              const json = await fetchApiJson<any>(
+                `/api/classroom/bundle?studentId=${encodeURIComponent(canonicalStudentId)}${force ? '&fresh=1' : ''}`,
+                { headers: { 'Cache-Control': 'no-cache' } },
+                5500
+              )
+              if (!json || !json.success) {
+                throw new Error(json?.error || 'Bundle fetch failed')
+              }
+              return json
+            },
+            { maxRetries: 2, baseDelayMs: 300, stage: 'classroom_bundle' }
+          )
+
+      const supabaseResultsPromise = Promise.allSettled([
+        withTimeout<any[]>(fetchFilteredPublishedPosts(supabase, { includeScheduledFuture: false }), 7000),
+        withTimeout<any>(
+          supabase.rpc('student_list_my_submissions', {
+            p_student_id: canonicalStudentId,
+            p_access_code: canonicalAccessCode,
+          }),
+          7000
+        ),
+        withTimeout<any>(
+          supabase.rpc('student_list_my_grades', {
+            p_student_id: canonicalStudentId,
+            p_access_code: canonicalAccessCode,
+          }),
+          7000
+        ),
+        withTimeout<any>(
+          supabase.rpc('student_list_my_attendance', {
+            p_student_id: canonicalStudentId,
+            p_access_code: canonicalAccessCode,
+          }),
+          7000
+        ),
+        fetchPublishedExamsWithDiagnostics(true, force, { skipBackendApi: true }),
+        withTimeout<StudentExamSubmission[]>(fetchExamSubmissions(undefined, canonicalStudentId, force), 7000),
+      ])
+
+      let bundleOk = false
+      let postsRemoteOk = false
+      let examsRemoteOk = false
+
+      // Process whichever completes first cleanly, starting by awaiting bundle so valid serverTime & instant posts arrive ASAP
+      try {
+        const bundleOutcome = await bundlePromise
+        if (seq !== requestSeqRef.current) return
+        const bundleRes = bundleOutcome.data
+        bundleOk = true
+        postsRemoteOk = true
+        examsRemoteOk = true
+
+        if (typeof bundleRes.serverTime === 'number' && !isNaN(bundleRes.serverTime)) {
+          serverTimeOffsetRef.current = bundleRes.serverTime - Date.now()
+        }
+
         if (Array.isArray(bundleRes.posts)) {
           const cleanPosts = bundleRes.posts.filter((p: any) => !isSystemRecord(p))
-          if (cleanPosts.length > 0) {
-            setPosts(cleanPosts)
-            try {
-              localStorage.setItem('cached_published_posts', JSON.stringify(cleanPosts))
-            } catch {}
-          }
+          setPosts(cleanPosts)
+          try {
+            localStorage.setItem('cached_published_posts', JSON.stringify(cleanPosts))
+          } catch {}
         }
 
         if (Array.isArray(bundleRes.exams)) {
-          const validExams = bundleRes.exams.filter((e: Exam) => e && e.published !== false)
+          const validExams = bundleRes.exams
+            .filter((e: Exam) => e && e.published !== false)
+            .map(sanitizeExamForStudent)
+          setExams(validExams)
           if (validExams.length > 0) {
-            setExams(validExams)
+            saveLocalExams(validExams)
           }
+          setFetchStatus('ready')
+          setExamsFetchStatus('ready')
+          setLoading(false)
+          hasLoadedOnce.current = true
         }
 
         if (Array.isArray(bundleRes.examSubmissions)) {
@@ -317,106 +437,117 @@ export default function StudentDashboard({
             setMyExamSubs(mySubs)
           }
         }
-      }
-
-      // Immediately lift loading screen
-      setLoading(false)
-      hasLoadedOnce.current = true
-    } catch (e) {
-      console.warn('[StudentDashboard] Fast bundle sync warning:', e)
-    }
-
-    // 3. Resilient Background Cloud Synchronization (Non-blocking with individual timeouts)
-    try {
-      const withTimeout = async <T,>(promise: PromiseLike<T> | Promise<T>, ms = 4000): Promise<T> => {
-        return Promise.race([
-          Promise.resolve(promise),
-          new Promise<T>((_, reject) => setTimeout(() => reject(new Error('timeout')), ms)),
-        ])
-      }
-
-      const results = await Promise.allSettled([
-        withTimeout<any>(supabase.rpc('list_published_posts')),
-        withTimeout<any>(
-          supabase.rpc('student_list_my_submissions', {
-            p_student_id: canonicalStudentId,
-            p_access_code: canonicalAccessCode,
-          })
-        ),
-        withTimeout<any>(
-          supabase.rpc('student_list_my_grades', {
-            p_student_id: canonicalStudentId,
-            p_access_code: canonicalAccessCode,
-          })
-        ),
-        withTimeout<any>(
-          supabase.rpc('student_list_my_attendance', {
-            p_student_id: canonicalStudentId,
-            p_access_code: canonicalAccessCode,
-          })
-        ),
-        withTimeout<Exam[]>(fetchPublishedExams()),
-        withTimeout<StudentExamSubmission[]>(fetchExamSubmissions(undefined, canonicalStudentId)),
-      ])
-
-      const [pRes, subRes, gRes, attRes, examListRes, examSubsListRes] = results
-
-      if (pRes.status === 'fulfilled' && (pRes.value as any)?.data) {
-        const rawPosts = (pRes.value as any).data || []
-        const cleanPosts = rawPosts.filter((post: any) => !isSystemRecord(post))
-        if (cleanPosts.length > 0) {
-          setPosts(cleanPosts)
-          try {
-            localStorage.setItem('cached_published_posts', JSON.stringify(cleanPosts))
-          } catch {}
+      } catch (e: any) {
+        if (!e?.isHtmlFallback) {
+          console.warn('[StudentDashboard] Bundle sync failed, awaiting direct Supabase sync...', e)
         }
       }
 
-      if (subRes.status === 'fulfilled' && (subRes.value as any)?.data) {
-        setMySubmissions((subRes.value as any).data || [])
-        try {
-          localStorage.setItem(`cached_submissions_${canonicalStudentId}`, JSON.stringify((subRes.value as any).data || []))
-        } catch {}
+      // Now inspect parallel direct Supabase results
+      try {
+        const results = await supabaseResultsPromise
+        if (seq !== requestSeqRef.current) return
+
+        const [pRes, subRes, gRes, attRes, examDiagRes, examSubsListRes] = results
+
+        if (pRes.status === 'fulfilled' && Array.isArray(pRes.value)) {
+          postsRemoteOk = true
+          const cleanPosts = pRes.value.filter((post: any) => !isSystemRecord(post))
+          if (cleanPosts.length > 0 || !bundleOk) {
+            setPosts(cleanPosts)
+            try {
+              localStorage.setItem('cached_published_posts', JSON.stringify(cleanPosts))
+            } catch {}
+          }
+        }
+
+        if (subRes.status === 'fulfilled' && !(subRes.value as any)?.error && Array.isArray((subRes.value as any)?.data)) {
+          setMySubmissions((subRes.value as any).data || [])
+          try {
+            localStorage.setItem(`cached_submissions_${canonicalStudentId}`, JSON.stringify((subRes.value as any).data || []))
+          } catch {}
+        }
+
+        if (gRes.status === 'fulfilled' && !(gRes.value as any)?.error && Array.isArray((gRes.value as any)?.data)) {
+          setMyGrades((gRes.value as any).data || [])
+          try {
+            localStorage.setItem(`cached_grades_${canonicalStudentId}`, JSON.stringify((gRes.value as any).data || []))
+          } catch {}
+        }
+
+        if (attRes.status === 'fulfilled' && !(attRes.value as any)?.error && Array.isArray((attRes.value as any)?.data)) {
+          setMyAttendance((attRes.value as any).data || [])
+        }
+
+        if (examSubsListRes.status === 'fulfilled' && Array.isArray(examSubsListRes.value)) {
+          setMyExamSubs(examSubsListRes.value)
+        }
+
+        if (examDiagRes.status === 'fulfilled') {
+          const diag = examDiagRes.value
+          if (diag.remoteOk) {
+            examsRemoteOk = true
+            setExams(diag.exams)
+          }
+        }
+      } catch (err) {
+        console.warn('Direct Supabase refresh warning:', err)
       }
 
-      if (gRes.status === 'fulfilled' && (gRes.value as any)?.data) {
-        setMyGrades((gRes.value as any).data || [])
-        try {
-          localStorage.setItem(`cached_grades_${canonicalStudentId}`, JSON.stringify((gRes.value as any).data || []))
-        } catch {}
-      }
+      if (seq !== requestSeqRef.current) return
 
-      if (attRes.status === 'fulfilled' && (attRes.value as any)?.data) {
-        setMyAttendance((attRes.value as any).data || [])
-      }
-
-      if (examSubsListRes.status === 'fulfilled' && Array.isArray(examSubsListRes.value)) {
-        setMyExamSubs(examSubsListRes.value)
-      }
-
-      if (examListRes.status === 'fulfilled' && Array.isArray(examListRes.value) && examListRes.value.length > 0) {
-        const mergedExamsMap = new Map<string, Exam>()
-        examListRes.value.forEach((e: Exam) => mergedExamsMap.set(e.id, e))
-        setExams(Array.from(mergedExamsMap.values()))
-      }
-    } catch (err) {
-      console.warn('Background Supabase refresh warning:', err)
-    } finally {
       setLoading(false)
       hasLoadedOnce.current = true
-    }
+
+      // STRICT 3-STATE EVALUATION FOR EXAMS & POSTS:
+      // Never mark examsFetchStatus as 'ready' simply because grades/attendance loaded if exam sources actually failed!
+      if (examsRemoteOk && postsRemoteOk) {
+        setFetchStatus('ready')
+        setExamsFetchStatus('ready')
+        setLoadError(null)
+        setSyncWarning(null)
+      } else if (examsRemoteOk || postsRemoteOk) {
+        setFetchStatus('ready')
+        setExamsFetchStatus(examsRemoteOk ? 'ready' : (localExams.length > 0 ? 'ready' : 'error'))
+        if (!examsRemoteOk) {
+          setSyncWarning('ارتباط برای دریافت جدیدترین آزمون‌ها برقرار نشد؛ لطفاً اتصال اینترنت را بررسی کرده و دوباره تلاش کنید.')
+          setLoadError('دریافت جدیدترین آزمون‌ها از پایگاه داده با خطا مواجه شد.')
+        } else {
+          setLoadError(null)
+          setSyncWarning(null)
+        }
+      } else if (hasCachedData) {
+        // Keep cached exams/posts visible, warn clearly instead of pretending server is empty
+        setFetchStatus('ready')
+        setExamsFetchStatus(localExams.length > 0 ? 'ready' : 'error')
+        setSyncWarning('اتصال به سرور با خطا مواجه شد؛ اطلاعات ذخیره‌شده قبلی نمایش داده می‌شود. برای دریافت جدیدترین آزمون‌ها دوباره تلاش کنید.')
+        setLoadError('اختلال در دریافت اطلاعات جدید از سرور.')
+      } else {
+        setFetchStatus('error')
+        setExamsFetchStatus('error')
+        setLoadError('خطا در دریافت اطلاعات و آزمون‌ها از سرور. لطفاً اتصال اینترنت را بررسی کرده و دکمه «تلاش مجدد» را بزنید.')
+      }
+    })().finally(() => {
+      if (inFlightLoadRef.current?.seq === seq) {
+        inFlightLoadRef.current = null
+      }
+    })
+
+    inFlightLoadRef.current = { promise: runPromise, seq }
+    return runPromise
   }
 
   useEffect(() => {
-    loadAll()
+    loadAll(false)
     flushPendingExamSyncQueue().catch(() => {})
 
     realtimeSync.init()
     const unsubscribe = realtimeSync.subscribe((event) => {
       if (event.type === 'post') {
         if (event.action === 'create' && event.item && !isSystemRecord(event.item)) {
-          // Guard against scheduled future posts appearing early
-          const isFuture = event.item.publish_at && new Date(event.item.publish_at).getTime() > Date.now()
+          // Guard against scheduled future posts appearing early (using server-offset corrected clock)
+          const nowCorrected = Date.now() + serverTimeOffsetRef.current
+          const isFuture = event.item.publish_at && new Date(event.item.publish_at).getTime() > nowCorrected
           if (!isFuture) {
             setPosts((prev) => {
               const exists = prev.some((p) => p.id === event.item.id)
@@ -427,6 +558,7 @@ export default function StudentDashboard({
               } catch {}
               return updated
             })
+            setFetchStatus('ready')
           }
         } else if (event.action === 'update' && event.item) {
           setPosts((prev) => {
@@ -449,33 +581,62 @@ export default function StudentDashboard({
         }
       } else if (event.type === 'exam') {
         if (event.action === 'create' || event.action === 'update') {
-          if (event.item && event.item.published !== false) {
-            setExams((prev) => {
-              const exists = prev.some((e) => e.id === event.item.id)
-              return exists
-                ? prev.map((e) => (e.id === event.item.id ? { ...e, ...event.item } : e))
-                : [event.item, ...prev]
-            })
+          if (event.item) {
+            const safeExam = sanitizeExamForStudent(event.item)
+            if (safeExam.published === false) {
+              setExams((prev) => prev.filter((e) => e.id !== safeExam.id))
+            } else {
+              setExams((prev) => {
+                const exists = prev.some((e) => e.id === safeExam.id)
+                const next = exists
+                  ? prev.map((e) => (e.id === safeExam.id ? { ...e, ...safeExam } : e))
+                  : [safeExam, ...prev]
+                saveLocalExams(next)
+                return next
+              })
+              setFetchStatus('ready')
+              setExamsFetchStatus('ready')
+              setLoadError(null)
+              setSyncWarning(null)
+            }
+          } else {
+            // e.g. __SYSTEM_EXAMS__ changed in Supabase: re-fetch immediately without blocking UI
+            loadAll(true)
           }
         } else if (event.action === 'delete' && event.id) {
-          setExams((prev) => prev.filter((e) => e.id !== event.id))
+          setExams((prev) => {
+            const next = prev.filter((e) => e.id !== event.id)
+            saveLocalExams(next)
+            return next
+          })
         }
       } else if (event.type === 'grade' || event.type === 'submission') {
         // Silently reload grades and submissions without blocking screen
-        loadAll()
+        loadAll(true)
       }
     })
 
+    // Non-Realtime fallback polling only while Realtime channel is not subscribed
+    const fallbackInterval = setInterval(() => {
+      if (!realtimeSync.getIsSubscribed()) {
+        loadAll(true)
+      }
+    }, 20000)
+
     const handleReconnect = () => {
-      loadAll()
+      realtimeSync.init()
+      loadAll(true)
     }
     window.addEventListener('classroom_network_reconnected', handleReconnect)
     window.addEventListener('classroom_tab_activated', handleReconnect)
+    window.addEventListener('online', handleReconnect)
 
     return () => {
       unsubscribe()
+      clearInterval(fallbackInterval)
       window.removeEventListener('classroom_network_reconnected', handleReconnect)
       window.removeEventListener('classroom_tab_activated', handleReconnect)
+      window.removeEventListener('online', handleReconnect)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -833,18 +994,31 @@ export default function StudentDashboard({
     })
   }, [posts])
 
+  // Memoized fast submission map by examId (avoids repeated localStorage scans on every 1s timer tick)
+  const mySubByExamId = useMemo(() => {
+    const map = new Map<string, StudentExamSubmission>()
+    const source = myExamSubs.length > 0 ? myExamSubs : getLocalSubmissions()
+    for (const s of source) {
+      if (!s || !s.examId) continue
+      if (isSameStudent(s.studentId, student.id, s.studentName, student?.full_name || (student as any)?.fullName)) {
+        map.set(s.examId, s)
+      }
+    }
+    return map
+  }, [myExamSubs, student.id, student?.full_name])
+
   // Active exams & assignments for home dashboard
   const activeExams = useMemo(() => {
     return exams
       .filter((e) => Boolean(e && e.published !== false))
       .sort((a, b) => {
-        const subA = getStudentExamSubmission(a.id, student.id)
-        const subB = getStudentExamSubmission(b.id, student.id)
+        const subA = mySubByExamId.get(a.id)
+        const subB = mySubByExamId.get(b.id)
         if (!subA && subB) return -1
         if (subA && !subB) return 1
         return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
       })
-  }, [exams, student.id])
+  }, [exams, mySubByExamId])
 
   // Dedicated list for Homework (تکالیف) tab:
   // Includes all active and completed class assignments and online exams
@@ -852,16 +1026,16 @@ export default function StudentDashboard({
     return exams
       .filter((e) => Boolean(e && e.published !== false))
       .sort((a, b) => {
-        const subA = getStudentExamSubmission(a.id, student.id)
-        const subB = getStudentExamSubmission(b.id, student.id)
+        const subA = mySubByExamId.get(a.id)
+        const subB = mySubByExamId.get(b.id)
         if (!subA && subB) return -1
         if (subA && !subB) return 1
         return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
       })
-  }, [exams, student.id])
+  }, [exams, mySubByExamId])
 
   const submittedIds = new Set(mySubmissions.map((s) => s.post_id))
-  const pendingExamCount = homeworkAssignments.filter((e) => !getStudentExamSubmission(e.id, student.id)).length
+  const pendingExamCount = homeworkAssignments.filter((e) => !mySubByExamId.get(e.id)).length
   const pendingHwCount = homeworkPosts.filter((p) => !submittedIds.has(p.id)).length
   const pendingCount = pendingHwCount + pendingExamCount
 
@@ -946,9 +1120,9 @@ export default function StudentDashboard({
     return (
       <div dir="rtl" className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
         <LoadingScreen
-          message="در حال دریافت اطلاعات دانش‌آموز..."
+          message="در حال دریافت اطلاعات دانش‌آموز و آزمون‌ها..."
           error={loadError}
-          onRetry={loadAll}
+          onRetry={() => loadAll(true)}
           onLogout={onLogout}
         />
       </div>
@@ -1055,7 +1229,11 @@ export default function StudentDashboard({
                   سلام {String(student?.full_name || 'دانش‌آموز').split(' ')[0]} عزیز! 👋
                 </h2>
                 <p className="text-xs sm:text-sm text-blue-100 font-medium max-w-xl leading-relaxed">
-                  {pendingCount > 0
+                  {fetchStatus === 'loading'
+                    ? 'در حال بررسی و همگام‌سازی تکالیف و آزمون‌های جدید...'
+                    : fetchStatus === 'error'
+                    ? 'در دریافت وضعیت تکالیف و آزمون‌ها از سرور خطا رخ داد. لطفاً اتصال اینترنت را بررسی کرده و دوباره تلاش کنید.'
+                    : pendingCount > 0
                     ? `تو ${toPersianDigits(pendingCount)} تکلیف انجام‌نشده داری. همین حالا پاسخ‌های خود را ارسال کن تا امتیاز کامل کسب کنی!`
                     : 'آفرین به پشتکارت! تمام تکالیف فعال تا این لحظه تحویل داده شده‌اند.'}
                 </p>
@@ -1108,6 +1286,33 @@ export default function StudentDashboard({
               </span>
             </div>
 
+            {/* Server Sync / Fetch Error Banner on Home Tab */}
+            {(fetchStatus === 'error' || examsFetchStatus === 'error' || syncWarning) && (
+              <div className="bg-rose-50 border border-rose-200 rounded-2xl p-4 sm:p-5 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-start gap-3">
+                  <span className="text-xl shrink-0">⚠️</span>
+                  <div>
+                    <h4 className="text-xs sm:text-sm font-black text-rose-900">
+                      {fetchStatus === 'error' || examsFetchStatus === 'error'
+                        ? 'خطا در دریافت آزمون‌ها و تکالیف از سرور'
+                        : 'اختلال در به‌روزرسانی لحظه‌ای'}
+                    </h4>
+                    <p className="text-xs text-rose-800 mt-0.5 leading-relaxed">
+                      {loadError || syncWarning}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => loadAll(true)}
+                  className="px-4 py-2 text-xs font-black bg-rose-600 hover:bg-rose-700 text-white rounded-xl shadow-xs transition-colors cursor-pointer shrink-0 inline-flex items-center justify-center gap-1.5"
+                >
+                  <span>🔄</span>
+                  <span>تلاش مجدد</span>
+                </button>
+              </div>
+            )}
+
             {/* Online Exams Section */}
             {activeExams.length > 0 && (
               <div className="space-y-3.5">
@@ -1120,7 +1325,7 @@ export default function StudentDashboard({
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   {activeExams.map((exam) => {
-                    const sub = getStudentExamSubmission(exam.id, student.id)
+                    const sub = mySubByExamId.get(exam.id) || getStudentExamSubmission(exam.id, student.id)
                     const isSubmitted = Boolean(sub)
                     const countdown = getExamCountdownInfo(exam.scheduledStartTime)
                     const isStarted = countdown.isStarted
@@ -1132,7 +1337,7 @@ export default function StudentDashboard({
                     const isGraded = matchedGrade?.status === 'graded' && matchedGrade.score !== null && matchedGrade.score !== undefined
                     const isPendingReview = matchedGrade?.status === 'pending_review' || (isSubmitted && !isGraded)
                     const isUntimedExam = exam.mode === 'assignment' || Boolean(exam.isUntimed) || !exam.durationMinutes || Number(exam.durationMinutes) <= 0
-                    const isPastDue = Boolean(exam.dueDate && new Date(exam.dueDate) < new Date())
+                    const isPastDue = Boolean(exam.dueDate && new Date(exam.dueDate).getTime() < (currentTime + serverTimeOffsetRef.current))
                     const isUntimedEditable = isUntimedExam && !isPastDue && !isGraded
                     const hasDraft = !isSubmitted && typeof localStorage !== 'undefined' && Boolean(
                       localStorage.getItem(`exam_draft_${exam.id}_${student.id}`) ||
@@ -1405,7 +1610,11 @@ export default function StudentDashboard({
               <div>
                 <h2 className="text-xl font-black text-slate-900 tracking-tight">تکالیف درسی من</h2>
                 <p className="text-xs text-slate-500 font-medium mt-0.5">
-                  {pendingCount > 0
+                  {fetchStatus === 'loading'
+                    ? 'در حال دریافت و بررسی لیست تکالیف و آزمون‌ها...'
+                    : fetchStatus === 'error'
+                    ? 'در دریافت لیست تکالیف از سرور خطا رخ داد'
+                    : pendingCount > 0
                     ? `${toPersianDigits(pendingCount)} تکلیف انجام‌نشده در انتظار تحویل است`
                     : 'همه تکالیف فعال تا این لحظه ارسال شده‌اند'}
                 </p>
@@ -1423,7 +1632,7 @@ export default function StudentDashboard({
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   {homeworkAssignments.map((assignment) => {
-                    const sub = getStudentExamSubmission(assignment.id, student.id)
+                    const sub = mySubByExamId.get(assignment.id) || getStudentExamSubmission(assignment.id, student.id)
                     const isSubmitted = Boolean(sub)
                     const matchedGrade = combinedGrades.find(
                       (g) => g.examId === assignment.id || g.matchedExam?.id === assignment.id || (g as any).sub?.id === sub?.id
@@ -1431,7 +1640,7 @@ export default function StudentDashboard({
                     const isGraded = matchedGrade?.status === 'graded' && matchedGrade.score !== null && matchedGrade.score !== undefined
                     const isPendingReview = matchedGrade?.status === 'pending_review' || (isSubmitted && !isGraded)
                     const isUntimedExam = assignment.mode === 'assignment' || Boolean(assignment.isUntimed) || !assignment.durationMinutes || Number(assignment.durationMinutes) <= 0
-                    const isPastDue = Boolean(assignment.dueDate && new Date(assignment.dueDate) < new Date())
+                    const isPastDue = Boolean(assignment.dueDate && new Date(assignment.dueDate).getTime() < (currentTime + serverTimeOffsetRef.current))
                     const isUntimedEditable = isUntimedExam && !isPastDue && !isGraded
                     const hasDraft = !isSubmitted && typeof localStorage !== 'undefined' && Boolean(
                       localStorage.getItem(`exam_draft_${assignment.id}_${student.id}`) ||
@@ -1547,21 +1756,45 @@ export default function StudentDashboard({
               </div>
             )}
 
-            {loading && homeworkPosts.length === 0 && homeworkAssignments.length === 0 && (
+            {(fetchStatus === 'loading' || examsFetchStatus === 'loading' || loading) && homeworkPosts.length === 0 && homeworkAssignments.length === 0 && (
               <div className="bg-white border border-slate-200/80 rounded-2xl p-8 text-center shadow-xs animate-pulse">
                 <div className="w-12 h-12 mx-auto mb-3 rounded-2xl bg-blue-50 text-blue-500 flex items-center justify-center text-xl">
                   ⏳
                 </div>
                 <h4 className="text-sm font-black text-slate-800 mb-1">
-                  در حال بارگذاری تکالیف کلاس...
+                  در حال بارگذاری تکالیف و آزمون‌ها...
                 </h4>
                 <p className="text-xs text-slate-500 max-w-sm mx-auto">
-                  ارتباط امن با سرور برقرار شد، دریافت جدیدترین اطلاعات در چند ثانیه...
+                  ارتباط با سرور برقرار شد، در حال دریافت جدیدترین اطلاعات از پایگاه داده...
                 </p>
               </div>
             )}
 
-            {!loading && homeworkPosts.length === 0 && homeworkAssignments.length === 0 && (
+            {(fetchStatus === 'error' || examsFetchStatus === 'error' || syncWarning) && (
+              <div className="bg-rose-50 border border-rose-200 rounded-2xl p-5 sm:p-6 text-center shadow-xs space-y-3">
+                <div className="w-12 h-12 mx-auto rounded-2xl bg-rose-100 text-rose-600 flex items-center justify-center text-2xl">
+                  📡
+                </div>
+                <h4 className="text-sm font-black text-rose-950">
+                  {fetchStatus === 'error' || examsFetchStatus === 'error'
+                    ? 'خطا در دریافت لیست تکالیف و آزمون‌ها'
+                    : 'اختلال در ارتباط با سرور'}
+                </h4>
+                <p className="text-xs text-rose-800 max-w-md mx-auto leading-relaxed">
+                  {loadError || syncWarning || 'ارتباط با پایگاه داده برقرار نشد. لطفاً وضعیت اینترنت را بررسی کرده و مجدداً تلاش کنید.'}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => loadAll(true)}
+                  className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-black text-white bg-rose-600 hover:bg-rose-700 rounded-xl shadow-xs transition-colors cursor-pointer"
+                >
+                  <span>🔄</span>
+                  <span>تلاش مجدد برای دریافت آزمون‌ها</span>
+                </button>
+              </div>
+            )}
+
+            {fetchStatus === 'ready' && examsFetchStatus === 'ready' && !syncWarning && !loading && homeworkPosts.length === 0 && homeworkAssignments.length === 0 && (
               <div className="bg-white border border-slate-200/80 rounded-2xl p-8 text-center shadow-xs">
                 <div className="w-14 h-14 mx-auto mb-3 rounded-2xl bg-slate-50 text-slate-400 flex items-center justify-center text-2xl shadow-2xs">
                   📝

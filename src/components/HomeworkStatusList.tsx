@@ -113,13 +113,20 @@ export default function HomeworkStatusList({
         await deleteExam(target.id, teacherPassword)
       } else {
         // Standard post delete
-        try {
-          await fetch('/api/teacher/delete-post', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ teacherPassword, postId: target.id }),
-          })
-        } catch (e) {}
+        const { fetchWithTimeout, isBackendStaticOnly } = await import('../utils/networkResilience')
+        if (!isBackendStaticOnly()) {
+          try {
+            await fetchWithTimeout(
+              '/api/teacher/delete-post',
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ teacherPassword, postId: target.id }),
+              },
+              5000
+            )
+          } catch (e) {}
+        }
 
         await supabase.from('submissions').delete().eq('post_id', target.id)
         await supabase.from('posts').delete().eq('id', target.id)

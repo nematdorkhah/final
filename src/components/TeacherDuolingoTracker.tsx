@@ -2,6 +2,7 @@ import { useState, useMemo, useEffect } from 'react'
 import { toPersianDigits } from '../utils/persianNumbers'
 import { sortByLastName } from '../utils/persianSort'
 import { tizhooshanTopicsData } from '../data/tizhooshanQuestions'
+import { fetchApiJson, isBackendStaticOnly } from '../utils/networkResilience'
 
 interface StudentDuolingoData {
   studentId: string
@@ -29,15 +30,20 @@ export default function TeacherDuolingoTracker({
   const [isRefreshing, setIsRefreshing] = useState(false)
 
   const fetchLiveProgress = () => {
+    if (isBackendStaticOnly()) {
+      setIsRefreshing(false)
+      return
+    }
     setIsRefreshing(true)
-    fetch('/api/tizhooshan/all-progress')
-      .then((r) => r.json())
+    fetchApiJson<any>('/api/tizhooshan/all-progress', {}, 5000)
       .then((data) => {
-        if (data.success && data.progressMap) {
+        if (data?.success && data.progressMap) {
           setServerProgressMap(data.progressMap)
         }
       })
-      .catch((err) => console.warn('Failed to fetch server tizhooshan all-progress', err))
+      .catch((err) => {
+        if (!err?.isHtmlFallback) console.warn('Failed to fetch server tizhooshan all-progress', err)
+      })
       .finally(() => setIsRefreshing(false))
   }
 

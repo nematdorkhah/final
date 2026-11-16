@@ -4,6 +4,7 @@ import { todayISO } from '../useJalaliDate'
 import { sortByLastName } from '../utils/persianSort'
 import { CLASS_STUDENTS_ROSTER } from '../classStudents'
 import { realtimeSync } from '../services/realtimeSync'
+import { fetchFilteredPublishedPosts } from '../utils/networkResilience'
 
 export function useClassroomData(teacherPassword: string) {
   // Safe initial state from roster so UI is never stuck on empty
@@ -81,7 +82,9 @@ export function useClassroomData(teacherPassword: string) {
     try {
       const fetchPromise = Promise.all([
         supabase.rpc('teacher_list_students', { p_password: effectivePassword }),
-        supabase.rpc('teacher_list_posts', { p_password: effectivePassword }),
+        fetchFilteredPublishedPosts(supabase, { includeScheduledFuture: true })
+          .then((data) => ({ data }))
+          .catch(() => supabase.rpc('teacher_list_posts', { p_password: effectivePassword })),
         supabase.rpc('teacher_list_submissions', { p_password: effectivePassword }),
         supabase.rpc('teacher_list_attendance', { p_password: effectivePassword }),
         supabase.rpc('teacher_list_grades', { p_password: effectivePassword }),

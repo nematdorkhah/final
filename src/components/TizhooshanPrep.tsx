@@ -10,6 +10,7 @@ import {
 import { generateRandomTizhooshanQuestion } from '../data/endlessGenerator'
 import { toPersianDigits } from '../utils/persianNumbers'
 import { sortByLastName } from '../utils/persianSort'
+import { fetchApiJson, fetchWithTimeout, isBackendStaticOnly } from '../utils/networkResilience'
 
 interface UserProgress {
   totalXp: number
@@ -267,10 +268,13 @@ export default function TizhooshanPrep({ student }: { student: any }) {
       setIsServerLoaded(true)
       return
     }
-    fetch(`/api/tizhooshan/progress?studentId=${student.id}`)
-      .then((r) => r.json())
+    if (isBackendStaticOnly()) {
+      setIsServerLoaded(true)
+      return
+    }
+    fetchApiJson<any>(`/api/tizhooshan/progress?studentId=${encodeURIComponent(student.id)}`, {}, 5000)
       .then((data) => {
-        if (data.success && data.progress) {
+        if (data?.success && data.progress) {
           const cloud = data.progress
           setProgress((prev) => {
             const merged = {
@@ -295,7 +299,9 @@ export default function TizhooshanPrep({ student }: { student: any }) {
           })
         }
       })
-      .catch((err) => console.warn('Failed to fetch cloud tizhooshan progress', err))
+      .catch((err) => {
+        if (!err?.isHtmlFallback) console.warn('Failed to fetch cloud tizhooshan progress', err)
+      })
       .finally(() => {
         setIsServerLoaded(true)
       })
@@ -325,19 +331,29 @@ export default function TizhooshanPrep({ student }: { student: any }) {
         localStorage.setItem('tizhooshan_class_progress', JSON.stringify(classMap))
 
         // Sync to server persistent storage (tizhooshan_progress.json)
-        fetch('/api/tizhooshan/progress', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            studentId: student.id,
-            studentName: student.full_name,
-            progress,
-          }),
-        })
-          .catch((err) => console.warn('Cloud sync error for Tizhooshan', err))
-          .finally(() => {
-            setIsCloudSyncing(false)
-          })
+        if (!isBackendStaticOnly()) {
+          fetchWithTimeout(
+            '/api/tizhooshan/progress',
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                studentId: student.id,
+                studentName: student.full_name,
+                progress,
+              }),
+            },
+            5000
+          )
+            .catch((err) => {
+              if (!err?.isHtmlFallback) console.warn('Cloud sync error for Tizhooshan', err)
+            })
+            .finally(() => {
+              setIsCloudSyncing(false)
+            })
+        } else {
+          setIsCloudSyncing(false)
+        }
       }
     } catch (e) {
       console.error(e)
@@ -374,14 +390,15 @@ export default function TizhooshanPrep({ student }: { student: any }) {
       }
 
       // 2. Fetch real cloud progress map for all students
-      try {
-        const res = await fetch('/api/tizhooshan/all-progress')
-        const json = await res.json()
-        if (json.success && json.progressMap) {
-          setAllProgressMap(json.progressMap)
+      if (!isBackendStaticOnly()) {
+        try {
+          const json = await fetchApiJson<any>('/api/tizhooshan/all-progress', {}, 5000)
+          if (json?.success && json.progressMap) {
+            setAllProgressMap(json.progressMap)
+          }
+        } catch (err: any) {
+          if (!err?.isHtmlFallback) console.warn('Failed to load all-progress for leaderboard', err)
         }
-      } catch (err) {
-        console.warn('Failed to load all-progress for leaderboard', err)
       }
     }
     fetchLeaderboardData()

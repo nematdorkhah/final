@@ -183,19 +183,31 @@ async function startServer() {
   const cliPort = portArgIdx !== -1 && process.argv[portArgIdx + 1] ? parseInt(process.argv[portArgIdx + 1], 10) : null
   const PORT = cliPort || (process.env.NODE_ENV === 'production' && process.env.PORT ? parseInt(process.env.PORT, 10) : 3000)
 
+  app.set('trust proxy', 1)
   app.use(express.json({ limit: '20mb' }))
 
-  // Enable CORS across mobile browsers, custom domains, and preflight requests
+  // Enable CORS across mobile browsers, custom domains (Cloudflare Pages / Workers), and preflight requests
   app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*')
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
     res.header(
       'Access-Control-Allow-Headers',
-      'Origin, X-Requested-With, Content-Type, Accept, Authorization, x-teacher-password, x-principal-password'
+      'Origin, X-Requested-With, Content-Type, Accept, Authorization, x-teacher-password, x-principal-password, Cache-Control'
     )
     if (req.method === 'OPTIONS') {
       return res.sendStatus(200)
     }
+    next()
+  })
+
+  // Prevent Cloudflare CDN / proxies / browsers from ever caching dynamic /api/* responses
+  app.use('/api', (_req, res, next) => {
+    res.setHeader('Cache-Control', 'private, no-store, no-cache, must-revalidate, proxy-revalidate')
+    res.setHeader('CDN-Cache-Control', 'no-store')
+    res.setHeader('Cloudflare-CDN-Cache-Control', 'no-store')
+    res.setHeader('Pragma', 'no-cache')
+    res.setHeader('Expires', '0')
+    res.setHeader('Vary', 'Origin, Authorization, x-teacher-password, x-principal-password')
     next()
   })
 
@@ -228,6 +240,8 @@ async function startServer() {
   let cachedSubmissions: any[] = []
   let cachedTizhooshanProgress: Record<string, any> = {}
   let cachedPublishedPosts: any[] = []
+  let lastExamsRefreshAt = 0
+  const fetchErrorLogs: any[] = []
   const DRAFTS_BACKUP_FILE = path.join(DATA_DIR, 'exam_drafts.json')
   const cachedDraftsMap = new Map<string, any>()
   let isInitializedFromSupabase = false
@@ -453,13 +467,76 @@ async function startServer() {
   async function initDataFromSupabase() {
     if (isInitializedFromSupabase) return
     try {
-      // 1. Quizzes table direct load
-      try {
-        const { data: dbQuizzes } = await withSupabaseTimeout(
+      // Run targeted Supabase queries IN PARALLEL (excludes 10MB duplicate __SYSTEM_EXAM_SUBMISSIONS__ history rows)
+      const [quizzesRes, subsRes, postsRes, sysExamsRes, sysSubsRes, indSubsRes, tizRes] = await Promise.allSettled([
+        withSupabaseTimeout(
           supabase.from('quizzes').select('*').order('created_at', { ascending: false }),
           SUPABASE_TIMEOUT_MS,
           { data: [] }
-        )
+        ),
+        withSupabaseTimeout(
+          supabase.from('quiz_submissions').select('*').order('submitted_at', { ascending: false }),
+          SUPABASE_TIMEOUT_MS,
+          { data: [] }
+        ),
+        withSupabaseTimeout(
+          supabase
+            .from('posts')
+            .select('id, title, body, type, attachment_path, publish_at, due_at, created_at')
+            .not('title', 'like', '\\_\\_%')
+            .order('created_at', { ascending: false })
+            .limit(200),
+          SUPABASE_TIMEOUT_MS,
+          { data: [] }
+        ),
+        withSupabaseTimeout(
+          supabase
+            .from('posts')
+            .select('id, title, body, type, publish_at')
+            .eq('title', '__SYSTEM_EXAMS__')
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .maybeSingle(),
+          SUPABASE_TIMEOUT_MS,
+          { data: null }
+        ),
+        withSupabaseTimeout(
+          supabase
+            .from('posts')
+            .select('id, title, body')
+            .eq('title', '__SYSTEM_EXAM_SUBMISSIONS__')
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .maybeSingle(),
+          SUPABASE_TIMEOUT_MS,
+          { data: null }
+        ),
+        withSupabaseTimeout(
+          supabase
+            .from('posts')
+            .select('id, title, body')
+            .like('title', '__EXAM_SUB__:%')
+            .order('created_at', { ascending: false })
+            .limit(100),
+          SUPABASE_TIMEOUT_MS,
+          { data: [] }
+        ),
+        withSupabaseTimeout(
+          supabase
+            .from('posts')
+            .select('id, title, body')
+            .eq('title', '__SYSTEM_TIZHOOSHAN_PROGRESS__')
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .maybeSingle(),
+          SUPABASE_TIMEOUT_MS,
+          { data: null }
+        ),
+      ])
+
+      // 1. Quizzes table direct load
+      try {
+        const dbQuizzes = quizzesRes.status === 'fulfilled' ? (quizzesRes.value as any)?.data : []
         if (Array.isArray(dbQuizzes) && dbQuizzes.length > 0) {
           dbQuizzes.forEach((row: any) => {
             if (!row?.id) return
@@ -489,6 +566,7 @@ async function startServer() {
               cachedExams.push(mappedExam)
             }
           })
+          lastExamsRefreshAt = Date.now()
           saveExamsToDisk()
         }
       } catch (e) {
@@ -497,11 +575,7 @@ async function startServer() {
 
       // 2. Quiz Submissions table direct load
       try {
-        const { data: dbSubs } = await withSupabaseTimeout(
-          supabase.from('quiz_submissions').select('*').order('submitted_at', { ascending: false }),
-          SUPABASE_TIMEOUT_MS,
-          { data: [] }
-        )
+        const dbSubs = subsRes.status === 'fulfilled' ? (subsRes.value as any)?.data : []
         if (Array.isArray(dbSubs) && dbSubs.length > 0) {
           dbSubs.forEach((qs: any) => {
             const ans = qs.answers || {}
@@ -539,79 +613,72 @@ async function startServer() {
         console.warn('Direct quiz_submissions table init warning:', e)
       }
 
-      const { data: posts } = await withSupabaseTimeout(
-        supabase.rpc('list_published_posts'),
-        SUPABASE_TIMEOUT_MS,
-        { data: [] }
-      )
-      if (posts && Array.isArray(posts)) {
-        // 1. Tizhooshan progress
-        const progPost = posts.find((p: any) => p.title === '__SYSTEM_TIZHOOSHAN_PROGRESS__')
-        if (progPost?.body) {
-          try {
-            cachedTizhooshanProgress = JSON.parse(progPost.body)
-          } catch (e) {
-            console.warn('Failed parsing tizhooshan progress from Supabase post', e)
-          }
+      // 3. Tizhooshan progress
+      const progPost = tizRes.status === 'fulfilled' ? (tizRes.value as any)?.data : null
+      if (progPost?.body) {
+        try {
+          cachedTizhooshanProgress = JSON.parse(progPost.body)
+        } catch (e) {
+          console.warn('Failed parsing tizhooshan progress from Supabase post', e)
         }
+      }
 
-        // 2. Exam submissions (individual records per examId and studentId + legacy fallback)
-        const subPosts = posts.filter((p: any) => p.title && p.title.startsWith('__EXAM_SUB__:'))
-        for (const sp of subPosts) {
-          try {
-            const parsed = JSON.parse(sp.body)
-            if (parsed && parsed.examId && parsed.studentId) {
-              const canon = resolveCanonicalStudent(parsed.studentId || parsed.studentName)
-              const targetStudentId = canon ? canon.id : parsed.studentId
-              parsed.studentId = targetStudentId
-              if (canon) parsed.studentName = canon.fullName
-              const key = `${parsed.examId}:${targetStudentId}`
-              const existing = cachedSubmissionsMap.get(key)
-              // CRITICAL: NEVER overwrite an approved submission with an unapproved one from Supabase!
-              if (existing?.teacherGrading?.approved && !parsed?.teacherGrading?.approved) {
-                continue
-              }
-              cachedSubmissionsMap.set(key, parsed)
+      // 4. Individual exam submissions (__EXAM_SUB__:*)
+      const subPosts = indSubsRes.status === 'fulfilled' ? (indSubsRes.value as any)?.data || [] : []
+      for (const sp of subPosts) {
+        try {
+          const parsed = JSON.parse(sp.body)
+          if (parsed && parsed.examId && parsed.studentId) {
+            const canon = resolveCanonicalStudent(parsed.studentId || parsed.studentName)
+            const targetStudentId = canon ? canon.id : parsed.studentId
+            parsed.studentId = targetStudentId
+            if (canon) parsed.studentName = canon.fullName
+            const key = `${parsed.examId}:${targetStudentId}`
+            const existing = cachedSubmissionsMap.get(key)
+            if (existing?.teacherGrading?.approved && !parsed?.teacherGrading?.approved) {
+              continue
             }
-          } catch (e) {
-            console.warn('Failed parsing independent submission from Supabase post', e)
+            cachedSubmissionsMap.set(key, parsed)
           }
+        } catch (e) {
+          console.warn('Failed parsing independent submission from Supabase post', e)
         }
+      }
 
-        // Backward compatibility: load legacy __SYSTEM_EXAM_SUBMISSIONS__ entries not yet migrated
-        const subsPost = posts.find((p: any) => p.title === '__SYSTEM_EXAM_SUBMISSIONS__')
-        if (subsPost?.body) {
-          try {
-            const legacyArray = JSON.parse(subsPost.body)
-            if (Array.isArray(legacyArray)) {
-              for (const item of legacyArray) {
-                if (item && item.examId && item.studentId) {
-                  const canon = resolveCanonicalStudent(item.studentId || item.studentName)
-                  const targetStudentId = canon ? canon.id : item.studentId
-                  item.studentId = targetStudentId
-                  if (canon) item.studentName = canon.fullName
-                  const key = `${item.examId}:${targetStudentId}`
-                  const existing = cachedSubmissionsMap.get(key)
-                  if (existing?.teacherGrading?.approved && !item?.teacherGrading?.approved) {
-                    continue
-                  }
-                  if (!cachedSubmissionsMap.has(key)) {
-                    cachedSubmissionsMap.set(key, item)
-                  }
+      // 5. Latest __SYSTEM_EXAM_SUBMISSIONS__
+      const subsPost = sysSubsRes.status === 'fulfilled' ? (sysSubsRes.value as any)?.data : null
+      if (subsPost?.body) {
+        try {
+          const legacyArray = JSON.parse(subsPost.body)
+          if (Array.isArray(legacyArray)) {
+            for (const item of legacyArray) {
+              if (item && item.examId && item.studentId) {
+                const canon = resolveCanonicalStudent(item.studentId || item.studentName)
+                const targetStudentId = canon ? canon.id : item.studentId
+                item.studentId = targetStudentId
+                if (canon) item.studentName = canon.fullName
+                const key = `${item.examId}:${targetStudentId}`
+                const existing = cachedSubmissionsMap.get(key)
+                if (existing?.teacherGrading?.approved && !item?.teacherGrading?.approved) {
+                  continue
+                }
+                if (!cachedSubmissionsMap.has(key)) {
+                  cachedSubmissionsMap.set(key, item)
                 }
               }
             }
-          } catch (e) {
-            console.warn('Failed parsing legacy submissions from Supabase post', e)
           }
+        } catch (e) {
+          console.warn('Failed parsing legacy submissions from Supabase post', e)
         }
+      }
 
-        cachedSubmissions = Array.from(cachedSubmissionsMap.values())
+      cachedSubmissions = Array.from(cachedSubmissionsMap.values())
 
-        // 3. Exams: Merge Supabase exams with disk backup to prevent any accidental wipeout
-        const examPosts = posts.filter((p: any) => p.type === 'exam' || p.title === '__SYSTEM_EXAMS__')
+      // 6. Merge __SYSTEM_EXAMS__ safely with disk backup
+      const sysExamRow = sysExamsRes.status === 'fulfilled' ? (sysExamsRes.value as any)?.data : null
+      if (sysExamRow?.body) {
         const loadedExamsMap = new Map<string, any>()
-        // Seed with existing cached exams from disk backup
         cachedExams.forEach((e: any) => { if (e && e.id) loadedExamsMap.set(e.id, e) })
         const mergeExamSafely = (incoming: any) => {
           if (!incoming || !incoming.id) return
@@ -626,27 +693,25 @@ async function startServer() {
           })
           loadedExamsMap.set(incoming.id, { ...incoming, ...existing, questions: mergedQuestions })
         }
-        for (const p of examPosts) {
-          try {
-            const parsed = JSON.parse(p.body)
-            if (Array.isArray(parsed)) {
-              parsed.forEach(mergeExamSafely)
-            } else if (parsed && parsed.id) {
-              mergeExamSafely(parsed)
-            }
-          } catch {}
-        }
+        try {
+          const parsed = typeof sysExamRow.body === 'string' ? JSON.parse(sysExamRow.body) : sysExamRow.body
+          if (Array.isArray(parsed)) parsed.forEach(mergeExamSafely)
+          else if (parsed && parsed.id) mergeExamSafely(parsed)
+        } catch {}
         if (loadedExamsMap.size > 0) {
           cachedExams = Array.from(loadedExamsMap.values())
           saveExamsToDisk()
         }
-        const cleanPosts = (posts || []).filter((post: any) => !isSystemRecord(post))
-        if (cleanPosts.length > 0) {
-          cachedPublishedPosts = cleanPosts
-        }
-        saveSubmissionsToDisk()
-        saveTizhooshanToDisk()
       }
+
+      // 7. Non-system classroom posts
+      const rawCleanPosts = postsRes.status === 'fulfilled' ? (postsRes.value as any)?.data : []
+      if (Array.isArray(rawCleanPosts)) {
+        cachedPublishedPosts = rawCleanPosts.filter((post: any) => !isSystemRecord(post))
+        lastPostsRefreshAt = Date.now()
+      }
+      saveSubmissionsToDisk()
+      saveTizhooshanToDisk()
 
       isInitializedFromSupabase = true
     } catch (err) {
@@ -660,7 +725,7 @@ async function startServer() {
     try {
       // 1. Direct update or upsert to posts table (instant and reliable)
       const { data: existingRow } = await withSupabaseTimeout(
-        supabase.from('posts').select('id, title').eq('title', title).limit(1).maybeSingle(),
+        supabase.from('posts').select('id, title').eq('title', title).order('created_at', { ascending: false }).limit(1).maybeSingle(),
         SUPABASE_TIMEOUT_MS,
         { data: null }
       )
@@ -737,13 +802,13 @@ async function startServer() {
     return initDataPromise
   }
 
-  // Route-level data assurance: non-blocking bounded wait so requests never hang
+  // Route-level data assurance: wait up to 4500ms on cold start so first request gets complete data
   async function ensureDataInitialized() {
     if (isInitializedFromSupabase) return
     try {
       await Promise.race([
         runInitDataBackground(),
-        new Promise((resolve) => setTimeout(resolve, 1200)),
+        new Promise((resolve) => setTimeout(resolve, 4500)),
       ])
     } catch {}
   }
@@ -852,7 +917,16 @@ async function startServer() {
       await ensureDataInitialized()
       const [s, p, sub, allAtt, g] = await Promise.all([
         withSupabaseTimeout(supabase.rpc('teacher_list_students', { p_password: SYSTEM_TEACHER_KEY }), SUPABASE_TIMEOUT_MS, { data: [] }),
-        withSupabaseTimeout(supabase.rpc('teacher_list_posts', { p_password: SYSTEM_TEACHER_KEY }), SUPABASE_TIMEOUT_MS, { data: [] }),
+        withSupabaseTimeout(
+          supabase
+            .from('posts')
+            .select('id, title, body, type, attachment_path, publish_at, due_at, created_at')
+            .not('title', 'like', '\\_\\_%')
+            .order('created_at', { ascending: false })
+            .limit(200),
+          SUPABASE_TIMEOUT_MS,
+          { data: [] }
+        ),
         withSupabaseTimeout(supabase.rpc('teacher_list_submissions', { p_password: SYSTEM_TEACHER_KEY }), SUPABASE_TIMEOUT_MS, { data: [] }),
         withSupabaseTimeout(supabase.rpc('teacher_list_attendance', { p_password: SYSTEM_TEACHER_KEY }), SUPABASE_TIMEOUT_MS, { data: [] }),
         withSupabaseTimeout(supabase.rpc('teacher_list_grades', { p_password: SYSTEM_TEACHER_KEY }), SUPABASE_TIMEOUT_MS, { data: [] }),
@@ -890,24 +964,147 @@ async function startServer() {
     }
   })
 
+  let inFlightPostsRefresh: Promise<any[]> | null = null
+  let inFlightExamsRefresh: Promise<{ exams: any[]; ok: boolean }> | null = null
+  let lastPostsRefreshAt = 0
+
   async function refreshPublishedPosts(force = false): Promise<any[]> {
-    try {
-      const { data, error } = await withSupabaseTimeout(
-        supabase.rpc('list_published_posts'),
-        3500,
-        { data: [] }
-      )
-      if (!error && Array.isArray(data)) {
-        const clean = data.filter((post: any) => !isSystemRecord(post))
-        if (clean.length > 0 || force) {
-          cachedPublishedPosts = clean
+    if (inFlightPostsRefresh) return inFlightPostsRefresh
+    inFlightPostsRefresh = (async () => {
+      try {
+        const { data, error } = await withSupabaseTimeout(
+          supabase
+            .from('posts')
+            .select('id, title, body, type, attachment_path, publish_at, due_at, created_at')
+            .not('title', 'like', '\\_\\_%')
+            .order('created_at', { ascending: false })
+            .limit(200),
+          3500,
+          { data: null, error: new Error('timeout') }
+        )
+        if (!error && Array.isArray(data)) {
+          const clean = data.filter((post: any) => !isSystemRecord(post))
+          if (clean.length > 0 || force) {
+            cachedPublishedPosts = clean
+          }
+          lastPostsRefreshAt = Date.now()
         }
+      } catch (e) {
+        console.warn('refreshPublishedPosts warning:', e)
+      } finally {
+        inFlightPostsRefresh = null
       }
-    } catch (e) {
-      console.warn('refreshPublishedPosts warning:', e)
-    }
-    return cachedPublishedPosts
+      return cachedPublishedPosts
+    })()
+    return inFlightPostsRefresh
   }
+
+  async function refreshPublishedExamsFromSupabase(force = false): Promise<{ exams: any[]; ok: boolean }> {
+    if (inFlightExamsRefresh) return inFlightExamsRefresh
+    inFlightExamsRefresh = (async () => {
+      try {
+        const [quizzesRes, sysRes] = await Promise.allSettled([
+          withSupabaseTimeout(
+            supabase.from('quizzes').select('*').order('created_at', { ascending: false }),
+            3500,
+            { data: null, error: new Error('timeout') }
+          ),
+          withSupabaseTimeout(
+          supabase.from('posts').select('id, body, publish_at').eq('title', '__SYSTEM_EXAMS__').order('created_at', { ascending: false }).limit(1).maybeSingle(),
+          3500,
+          { data: null, error: new Error('timeout') }
+        ),
+      ])
+
+      const qOk = quizzesRes.status === 'fulfilled' && !(quizzesRes.value as any)?.error && Array.isArray((quizzesRes.value as any)?.data)
+      const sOk = sysRes.status === 'fulfilled' && !(sysRes.value as any)?.error && (sysRes.value as any)?.data
+
+      if (!qOk && !sOk) {
+        return { exams: cachedExams, ok: false }
+      }
+
+      const mergedMap = new Map<string, any>()
+      // Start with current cache unless forced full reconciliation
+      if (!force) {
+        cachedExams.forEach((e: any) => { if (e?.id) mergedMap.set(e.id, e) })
+      }
+
+      if (qOk) {
+        const dbQuizzes = (quizzesRes.value as any).data || []
+        dbQuizzes.forEach((row: any) => {
+          if (!row?.id) return
+          const existing = mergedMap.get(row.id)
+          const questions = Array.isArray(row.questions) && row.questions.length > 0 ? row.questions : (existing?.questions || [])
+          mergedMap.set(row.id, {
+            ...(existing || {}),
+            id: row.id,
+            title: row.title || existing?.title || 'آزمون کلاسی',
+            subject: row.subject || existing?.subject || 'عمومی',
+            description: existing?.description || `آزمون درس ${row.subject || 'عمومی'}`,
+            questions,
+            durationMinutes: Number(row.duration_minutes ?? existing?.durationMinutes ?? 30),
+            totalPoints: questions.length > 0
+              ? questions.reduce((sum: number, q: any) => sum + (Number(q?.points) || 1), 0)
+              : (existing?.totalPoints || 20),
+            createdAt: row.created_at || existing?.createdAt || new Date().toISOString(),
+            scheduledStartTime: existing?.scheduledStartTime || row.created_at || new Date().toISOString(),
+            published: existing?.published !== undefined ? existing.published : true,
+          })
+        })
+      }
+
+      if (sOk && (sysRes.value as any).data?.body) {
+        try {
+          const parsed = typeof (sysRes.value as any).data.body === 'string'
+            ? JSON.parse((sysRes.value as any).data.body)
+            : (sysRes.value as any).data.body
+          if (Array.isArray(parsed)) {
+            parsed.forEach((e: any) => {
+              if (e && e.id) {
+                const existing = mergedMap.get(e.id) || {}
+                mergedMap.set(e.id, { ...existing, ...e, published: e.published !== false })
+              }
+            })
+          }
+        } catch {}
+      }
+
+      if (mergedMap.size > 0 || (qOk && sOk)) {
+        cachedExams = Array.from(mergedMap.values())
+        lastExamsRefreshAt = Date.now()
+        saveExamsToDisk()
+      }
+      return { exams: cachedExams, ok: true }
+    } catch (err) {
+      console.warn('refreshPublishedExamsFromSupabase warning:', err)
+      return { exams: cachedExams, ok: false }
+    } finally {
+      inFlightExamsRefresh = null
+    }
+    })()
+    return inFlightExamsRefresh
+  }
+
+  // Non-PII fetch failure / retry telemetry endpoint
+  app.post('/api/telemetry/fetch-log', (req, res) => {
+    const body = req.body || {}
+    const sanitizedEntry = {
+      timestamp: typeof body.timestamp === 'string' ? body.timestamp : new Date().toISOString(),
+      examId: typeof body.examId === 'string' ? body.examId.slice(0, 64) : null,
+      stage: typeof body.stage === 'string' ? body.stage.slice(0, 64) : 'unknown',
+      statusOrError: typeof body.statusOrError === 'string' ? body.statusOrError.slice(0, 120) : 'unknown',
+      durationMs: Number(body.durationMs) || 0,
+      retryCount: Number(body.retryCount) || 0,
+      finalStatus: ['success', 'recovered_after_retry', 'failed'].includes(body.finalStatus) ? body.finalStatus : 'failed',
+    }
+    fetchErrorLogs.push(sanitizedEntry)
+    if (fetchErrorLogs.length > 200) fetchErrorLogs.shift()
+    res.json({ success: true })
+  })
+
+  app.get('/api/telemetry/fetch-log', requireTeacherAuth, (_req, res) => {
+    res.json({ success: true, logs: fetchErrorLogs })
+  })
 
   // Instant notification endpoint called when teacher creates/updates/deletes posts, exams, or grades
   app.post('/api/sync/notify', async (req, res) => {
@@ -934,6 +1131,9 @@ async function startServer() {
         if (action === 'delete' && id) {
           cachedExams = cachedExams.filter((e: any) => e.id !== id)
           saveExamsToDisk()
+        } else {
+          // Authoritatively sync newly published or updated exams from Supabase into server cache
+          await refreshPublishedExamsFromSupabase(false)
         }
       }
       res.json({ success: true, timestamp: Date.now() })
@@ -951,17 +1151,17 @@ async function startServer() {
       const freshPosts = await refreshPublishedPosts(true)
       const nowMs = Date.now()
       const readyPosts = freshPosts.filter((p: any) => !p.publish_at || new Date(p.publish_at).getTime() <= nowMs)
-      return res.json({ success: true, posts: readyPosts })
+      return res.json({ success: true, serverTime: nowMs, posts: readyPosts })
     }
 
     // Instant return of warm cache + background refresh
     const nowMs = Date.now()
     const readyPosts = cachedPublishedPosts.filter((p: any) => !p.publish_at || new Date(p.publish_at).getTime() <= nowMs)
-    res.json({ success: true, posts: readyPosts })
+    res.json({ success: true, serverTime: nowMs, posts: readyPosts })
     refreshPublishedPosts().catch(() => {})
   })
 
-  // BUNDLED CLASSROOM DATA ENDPOINT: Combines posts, exams, and student submissions in ONE <25ms response
+  // BUNDLED CLASSROOM DATA ENDPOINT: Combines posts, exams, and student submissions in ONE fast response
   app.get('/api/classroom/bundle', async (req, res) => {
     await ensureDataInitialized()
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
@@ -969,12 +1169,42 @@ async function startServer() {
     const rawStudentId = (req.query.studentId as string) || ''
     const canon = resolveCanonicalStudent(rawStudentId)
     const canonicalStudentId = canon?.id || rawStudentId
+    const fresh = req.query.fresh === '1'
+
+    // Ensure exams & posts caches are never stale or cold-empty, running refreshes in parallel & single-flight
+    let examSyncOk = true
+    const needExamSync = fresh || cachedExams.length === 0
+    const needPostSync = fresh || cachedPublishedPosts.length === 0
+
+    if (needExamSync || needPostSync) {
+      const [examR] = await Promise.all([
+        needExamSync ? refreshPublishedExamsFromSupabase(fresh) : Promise.resolve({ exams: cachedExams, ok: true }),
+        needPostSync ? refreshPublishedPosts(true) : Promise.resolve(cachedPublishedPosts),
+      ])
+      examSyncOk = examR.ok || cachedExams.length > 0
+    } else {
+      if (Date.now() - lastExamsRefreshAt > 20000) {
+        refreshPublishedExamsFromSupabase(false).catch(() => {})
+      }
+      if (Date.now() - lastPostsRefreshAt > 20000) {
+        refreshPublishedPosts(false).catch(() => {})
+      }
+    }
+
+    if (fresh && !examSyncOk && cachedExams.length === 0) {
+      return res.status(503).json({
+        success: false,
+        error: 'ارتباط با پایگاه داده برقرار نشد. لطفاً مجدداً تلاش کنید.',
+      })
+    }
 
     // 1. Strict answer key and hint stripping for student security
     const sanitizedExams = cachedExams
       .filter((e) => Boolean(e && e.published !== false))
       .map((exam) => {
-        const resultsReleased = Boolean(exam.resultsReleased)
+        const resultsReleased = Boolean(
+          exam.resultsPublished || exam.results_published || exam.isResultsReleased || exam.resultsReleased
+        )
         return {
           ...exam,
           questions: (exam.questions || []).map((q: any) => {
@@ -983,6 +1213,8 @@ async function startServer() {
             const {
               correctAnswer,
               rubricOrHint,
+              correctOptionIndex,
+              correctOptionText,
               gradingNotes,
               explanation,
               solution,
@@ -1000,10 +1232,6 @@ async function startServer() {
       : []
 
     // 3. Return warm cached posts (excluding any future scheduled posts)
-    if (cachedPublishedPosts.length === 0) {
-      await refreshPublishedPosts(true)
-    }
-
     const nowMs = Date.now()
     const studentEligiblePosts = cachedPublishedPosts.filter((p: any) => {
       if (isSystemRecord(p)) return false
@@ -1013,7 +1241,8 @@ async function startServer() {
 
     res.json({
       success: true,
-      timestamp: Date.now(),
+      timestamp: nowMs,
+      serverTime: nowMs,
       posts: studentEligiblePosts,
       exams: sanitizedExams,
       examSubmissions: studentSubs,
@@ -1036,7 +1265,9 @@ async function startServer() {
   // --------------------------------------------------------------------------
   app.get('/api/exams', async (req, res) => {
     await ensureDataInitialized()
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
     const role = (req.query.role as string) || 'student'
+    const fresh = req.query.fresh === '1'
     let teacherPass = (req.headers['x-teacher-password'] as string) || (req.query.teacherPassword as string)
     if (!teacherPass) {
       const authHeader = req.headers['authorization']
@@ -1054,29 +1285,51 @@ async function startServer() {
       })
     }
 
+    if (fresh || cachedExams.length === 0) {
+      const r = await refreshPublishedExamsFromSupabase(fresh)
+      if (fresh && !r.ok && cachedExams.length === 0) {
+        return res.status(503).json({
+          success: false,
+          error: 'خطا در دریافت لیست آزمون‌ها از پایگاه داده.',
+        })
+      }
+    } else if (Date.now() - lastExamsRefreshAt > 20000) {
+      refreshPublishedExamsFromSupabase(false).catch(() => {})
+    }
+
     if (!isTeacherAuthed) {
-      // SECURITY FIX: Strip correctAnswer and rubricOrHint unless teacher has explicitly released results!
+      // SECURITY FIX: Strip all answer-key, rubric, note & explanation fields unless teacher explicitly released results!
       const sanitized = cachedExams
-        .filter((e) => e.published)
+        .filter((e) => Boolean(e && e.published !== false))
         .map((exam) => {
           const isResultsReleased = Boolean(
-            exam.resultsPublished || exam.results_published || exam.isResultsReleased
+            exam.resultsPublished || exam.results_published || exam.isResultsReleased || exam.resultsReleased
           )
           if (!isResultsReleased) {
             return {
               ...exam,
               questions: (exam.questions || []).map((q: any) => {
-                const { correctAnswer, rubricOrHint, correctOptionIndex, correctOptionText, ...safeQuestion } = q
+                const {
+                  correctAnswer,
+                  rubricOrHint,
+                  correctOptionIndex,
+                  correctOptionText,
+                  gradingNotes,
+                  explanation,
+                  solution,
+                  teacherNotes,
+                  ...safeQuestion
+                } = q
                 return safeQuestion
               }),
             }
           }
           return exam
         })
-      return res.json({ success: true, exams: sanitized })
+      return res.json({ success: true, serverTime: Date.now(), exams: sanitized })
     }
 
-    res.json({ success: true, exams: cachedExams })
+    res.json({ success: true, serverTime: Date.now(), exams: cachedExams })
   })
 
   app.post('/api/exams/save', requireTeacherAuth, async (req, res) => {
@@ -1404,6 +1657,8 @@ async function startServer() {
           .from('posts')
           .select('id')
           .eq('title', postTitle)
+          .order('created_at', { ascending: false })
+          .limit(1)
           .maybeSingle()
 
         if (existingPost?.id) {
@@ -1449,6 +1704,7 @@ async function startServer() {
             .select('body')
             .eq('title', postTitle)
             .order('publish_at', { ascending: false })
+            .limit(1)
             .maybeSingle()
           if (post?.body) {
             const parsed = JSON.parse(post.body)
@@ -2610,6 +2866,14 @@ ${JSON.stringify(questions, null, 2)}
     }
   })
 
+  // Never allow unknown /api/* paths to fall through to SPA HTML fallback
+  app.all('/api/*', (req, res) => {
+    res.status(404).json({
+      success: false,
+      error: `مسیر API یافت نشد: ${req.method} ${req.path}`,
+    })
+  })
+
   // --------------------------------------------------------------------------
   // VITE / STATIC SERVING
   // --------------------------------------------------------------------------
@@ -2637,12 +2901,20 @@ ${JSON.stringify(questions, null, 2)}
         setHeaders: (res, filePath) => {
           if (filePath.endsWith('.html')) {
             res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate')
+            res.setHeader('CDN-Cache-Control', 'no-store')
+            res.setHeader('Cloudflare-CDN-Cache-Control', 'no-store')
+            res.setHeader('Pragma', 'no-cache')
+            res.setHeader('Expires', '0')
           }
         },
       })
     )
-    app.get('*', (req, res) => {
+    app.get('*', (_req, res) => {
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate')
+      res.setHeader('CDN-Cache-Control', 'no-store')
+      res.setHeader('Cloudflare-CDN-Cache-Control', 'no-store')
+      res.setHeader('Pragma', 'no-cache')
+      res.setHeader('Expires', '0')
       res.sendFile(path.join(distPath, 'index.html'))
     })
   }
