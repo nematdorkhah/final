@@ -44,6 +44,7 @@ export function resolveApiUrl(path: string): string {
 }
 
 export function isBackendStaticOnly(): boolean {
+  if (typeof window === 'undefined') return true
   const now = Date.now()
   if (now < backendStaticOnlyUntil) return true
   try {

@@ -4,12 +4,19 @@ import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'rec
 import { groupSkillMastery, computeStreak, computeBadges, getHomeworkStatus } from '../masteryHelpers'
 import { getSignedFileUrl } from '../viewSubmission'
 import { toPersianDigits } from '../utils/persianNumbers'
+import { roundScore2 } from '../utils/persianSemanticGrader'
+import { getLocalExams, getLocalSubmissions, mergeSubmissionsDeduplicated, buildCanonicalGradesList, upsertGradebookExamRow } from '../utils/examStore'
+import { isSameStudent } from '../classStudents'
+import { Exam, StudentExamSubmission } from '../types/examTypes'
 import FileViewerModal from './FileViewerModal'
 import StudentReportCard from './StudentReportCard'
 
 export default function StudentProfilePanel({
   student,
   grades,
+  rawDbGrades,
+  exams,
+  examSubmissions,
   submissions,
   attendanceRows,
   homeworkPosts,
@@ -20,6 +27,9 @@ export default function StudentProfilePanel({
 }: {
   student: any
   grades: any[]
+  rawDbGrades?: any[]
+  exams?: Exam[]
+  examSubmissions?: StudentExamSubmission[]
   submissions: any[]
   attendanceRows: any[]
   homeworkPosts: any[]
@@ -106,7 +116,14 @@ export default function StudentProfilePanel({
 
   const trendData = [...grades]
     .sort((a, b) => new Date(a.recorded_at).getTime() - new Date(b.recorded_at).getTime())
-    .map((g, i) => ({ idx: i + 1, نمره: Number(((g.score / g.max_score) * 20).toFixed(1)) }))
+    .map((g, i) => {
+      const m = Number(g.max_score)
+      const s = Number(g.score) || 0
+      return {
+        idx: i + 1,
+        نمره: roundScore2(m === 20 ? s : m > 0 ? (s / m) * 20 : s),
+      }
+    })
 
   const presentCount = attendanceRows.filter((a) => a.status === 'present').length
   const lateCount = attendanceRows.filter((a) => a.status === 'late').length
@@ -116,31 +133,83 @@ export default function StudentProfilePanel({
 
   async function saveRename() {
     if (!nameDraft.trim()) return
-    await supabase.rpc('teacher_update_student', { p_password: teacherPassword, p_student_id: student.id, p_full_name: nameDraft.trim() })
+    const { error } = await supabase.rpc('teacher_update_student', { p_password: teacherPassword, p_student_id: student.id, p_full_name: nameDraft.trim() })
+    if (error) {
+      alert('خطا در تغییر نام دانش‌آموز: ' + error.message)
+      return
+    }
     setRenaming(false)
     onChanged()
   }
 
   async function deleteStudent() {
     if (!confirm(`مطمئنی می‌خوای ${student.full_name} رو کامل حذف کنی؟ همه‌ی نمره/حضور/تکلیفاش هم پاک می‌شه.`)) return
-    await supabase.rpc('teacher_delete_student', { p_password: teacherPassword, p_student_id: student.id })
+    const { error } = await supabase.rpc('teacher_delete_student', { p_password: teacherPassword, p_student_id: student.id })
+    if (error) {
+      alert('خطا در حذف دانش‌آموز: ' + error.message)
+      return
+    }
     onDeleted()
   }
 
-  async function saveGradeEdit(gradeId: string, maxScore: number) {
+  async function saveGradeEdit(g: any) {
+    const maxScore = Number(g.max_score) || 20
     const val = parseFloat(scoreDraft)
     if (isNaN(val) || val < 0 || val > maxScore) {
       alert(`نمره باید بین ۰ تا ${maxScore} باشه.`)
       return
     }
-    await supabase.rpc('teacher_update_grade', { p_password: teacherPassword, p_grade_id: gradeId, p_score: val, p_max_score: maxScore })
+    const isSyntheticFallback =
+      g.isPersistedInGradesTable === false ||
+      String(g.id || '').startsWith('exam_sub_') ||
+      String(g.id || '').startsWith('exam_')
+    if (isSyntheticFallback) {
+      const targetExam = g.matchedExam || g.exam
+      if (!targetExam) {
+        alert('این نمره هنوز در جدول اصلی grades ثبت نشده است و برای ویرایش باید از بخش بررسی پاسخ‌نامه‌های آزمون اقدام کنید.')
+        return
+      }
+      const scaled20 = maxScore === 20 ? roundScore2(val) : roundScore2((val / maxScore) * 20)
+      const upsertRes = await upsertGradebookExamRow({
+        teacherPassword,
+        studentId: student.id,
+        studentName: student.full_name,
+        exam: targetExam,
+        scaledScore20: scaled20,
+        existingGradesCache: rawDbGrades,
+      })
+      if (!upsertRes.ok) {
+        alert('خطا در ثبت نمره در جدول grades: ' + (upsertRes.error || 'خطای نامشخص'))
+        return
+      }
+      setEditingGradeId(null)
+      onChanged()
+      return
+    }
+    const { error } = await supabase.rpc('teacher_update_grade', { p_password: teacherPassword, p_grade_id: g.id, p_score: val, p_max_score: maxScore })
+    if (error) {
+      alert('خطا در ویرایش نمره در جدول grades: ' + error.message)
+      return
+    }
     setEditingGradeId(null)
     onChanged()
   }
 
-  async function deleteGrade(gradeId: string) {
+  async function deleteGrade(g: any) {
+    const isSyntheticFallback =
+      g.isPersistedInGradesTable === false ||
+      String(g.id || '').startsWith('exam_sub_') ||
+      String(g.id || '').startsWith('exam_')
+    if (isSyntheticFallback) {
+      alert('این نمره از پاسخ‌نامه آزمون نمایش داده می‌شود و در جدول grades رکورد مستقلی ندارد.')
+      return
+    }
     if (!confirm('این نمره حذف بشه؟')) return
-    await supabase.rpc('teacher_delete_grade', { p_password: teacherPassword, p_grade_id: gradeId })
+    const { error } = await supabase.rpc('teacher_delete_grade', { p_password: teacherPassword, p_grade_id: g.id })
+    if (error) {
+      alert('خطا در حذف نمره از جدول grades: ' + error.message)
+      return
+    }
     onChanged()
   }
 
@@ -378,12 +447,12 @@ export default function StudentProfilePanel({
               <div className="post" key={sg.subject}>
                 <div className="tag">📚</div>
                 <div className="body">
-                  <h3>{sg.subject} — میانگین {toPersianDigits(sg.avg.toFixed(1))}</h3>
+                  <h3>{sg.subject} — میانگین {toPersianDigits(roundScore2(sg.avg))}</h3>
                   {sg.skills.length > 0 ? (
                     <p>
                       {sg.skills.map((sk) => (
                         <span key={sk.skill} style={{ display: 'inline-block', marginInlineEnd: 12 }}>
-                          {sk.color} {sk.skill} ({toPersianDigits(sk.avg.toFixed(1))})
+                          {sk.color} {sk.skill} ({toPersianDigits(roundScore2(sk.avg))})
                         </span>
                       ))}
                     </p>
@@ -400,32 +469,57 @@ export default function StudentProfilePanel({
           <div style={{ marginTop: 20 }}>
             <div className="block-head"><h2 style={{ fontSize: 15 }}>همه‌ی نمره‌ها (ویرایش/حذف)</h2></div>
             <div className="hw-list hard">
-              {grades.map((g) => (
-                <div className="hw-item" key={g.id}>
-                  <div className="title">
-                    <h4>{g.subject}{g.skill ? ` — ${g.skill}` : ''}</h4>
-                    <span>{toPersianDigits(new Date(g.recorded_at).toLocaleDateString('fa-IR'))}</span>
+              {grades.map((g) => {
+                const isFallbackSource =
+                  g.isPersistedInGradesTable === false ||
+                  String(g.id || '').startsWith('exam_sub_') ||
+                  String(g.id || '').startsWith('exam_')
+                return (
+                  <div className="hw-item" key={g.id}>
+                    <div className="title">
+                      <h4>
+                        {g.subject}{g.skill ? ` — ${g.skill}` : ''}{' '}
+                        {g.is_exam && (
+                          <span
+                            style={{
+                              fontSize: 10.5,
+                              padding: '1px 6px',
+                              borderRadius: 999,
+                              fontWeight: 800,
+                              background: isFallbackSource ? '#FFEDD5' : '#DCFCE7',
+                              color: isFallbackSource ? '#9A3412' : '#166534',
+                              marginRight: 4,
+                            }}
+                          >
+                            {isFallbackSource ? 'منبع جایگزین پاسخ‌نامه (در grades نیست)' : 'ثبت‌شده در grades'}
+                          </span>
+                        )}
+                      </h4>
+                      <span>{toPersianDigits(new Date(g.recorded_at).toLocaleDateString('fa-IR'))}</span>
+                    </div>
+                    {editingGradeId === g.id ? (
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                        <input
+                          type="number" step="0.25" value={scoreDraft}
+                          onChange={(e) => setScoreDraft(e.target.value)}
+                          style={{ width: 70, padding: '5px 8px', borderRadius: 8, border: '2px solid var(--black)' }}
+                        />
+                        <span style={{ fontSize: 12.5 }}>/{toPersianDigits(g.max_score)}</span>
+                        <button className="upload-btn" type="button" onClick={() => saveGradeEdit(g)}>ذخیره</button>
+                        <button className="link" onClick={() => setEditingGradeId(null)}>انصراف</button>
+                      </div>
+                    ) : (
+                      <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                        <span style={{ fontWeight: 800 }}>{toPersianDigits(g.score)}/{toPersianDigits(g.max_score)}</span>
+                        <button className="upload-btn" type="button" onClick={() => { setEditingGradeId(g.id); setScoreDraft(String(g.score)) }}>✏️</button>
+                        {!isFallbackSource && (
+                          <button className="upload-btn" type="button" onClick={() => deleteGrade(g)}>🗑</button>
+                        )}
+                      </div>
+                    )}
                   </div>
-                  {editingGradeId === g.id ? (
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                      <input
-                        type="number" step="0.25" value={scoreDraft}
-                        onChange={(e) => setScoreDraft(e.target.value)}
-                        style={{ width: 70, padding: '5px 8px', borderRadius: 8, border: '2px solid var(--black)' }}
-                      />
-                      <span style={{ fontSize: 12.5 }}>/{toPersianDigits(g.max_score)}</span>
-                      <button className="upload-btn" type="button" onClick={() => saveGradeEdit(g.id, g.max_score)}>ذخیره</button>
-                      <button className="link" onClick={() => setEditingGradeId(null)}>انصراف</button>
-                    </div>
-                  ) : (
-                    <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-                      <span style={{ fontWeight: 800 }}>{toPersianDigits(g.score)}/{toPersianDigits(g.max_score)}</span>
-                      <button className="upload-btn" type="button" onClick={() => { setEditingGradeId(g.id); setScoreDraft(String(g.score)) }}>✏️</button>
-                      <button className="upload-btn" type="button" onClick={() => deleteGrade(g.id)}>🗑</button>
-                    </div>
-                  )}
-                </div>
-              ))}
+                )
+              })}
             </div>
           </div>
         )}
@@ -471,9 +565,24 @@ export default function StudentProfilePanel({
       {showReportCard && (
         <StudentReportCard
           student={student}
-          grades={grades}
+          grades={buildCanonicalGradesList({
+            studentId: student.id,
+            studentName: student.full_name,
+            dbGrades: rawDbGrades || grades,
+            exams: exams && exams.length > 0 ? exams : getLocalExams(),
+            examSubmissions: examSubmissions && examSubmissions.length > 0 ? examSubmissions : getLocalSubmissions(),
+            homeworkPosts,
+            homeworkSubmissions: submissions,
+            includePending: true,
+          })}
           attendanceRows={attendanceRows}
           submissions={submissions}
+          examSubmissions={mergeSubmissionsDeduplicated(
+            [],
+            (examSubmissions && examSubmissions.length > 0 ? examSubmissions : getLocalSubmissions()).filter((sub) =>
+              isSameStudent(sub.studentId, student.id, sub.studentName, student.full_name)
+            )
+          )}
           homeworkCount={homeworkPosts.length}
           reportNote={noteActive ? noteText : undefined}
           onClose={() => setShowReportCard(false)}

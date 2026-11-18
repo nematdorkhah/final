@@ -1,4 +1,5 @@
 import { toPersianDigits } from '../utils/persianNumbers'
+import { roundScore2 } from '../utils/persianSemanticGrader'
 
 export default function KpiCards({
   students,
@@ -28,7 +29,11 @@ export default function KpiCards({
   }, 0)
 
   const classAvg = grades.length
-    ? grades.reduce((sum: number, g: any) => sum + (g.score / g.max_score) * 20, 0) / grades.length
+    ? grades.reduce((sum: number, g: any) => {
+        const m = Number(g.max_score)
+        const s = Number(g.score) || 0
+        return sum + (m === 20 ? s : m > 0 ? (s / m) * 20 : s)
+      }, 0) / grades.length
     : null
 
   const ranked = [...statsRows].filter((r) => r.avg !== null).sort((a, b) => b.avg - a.avg)
@@ -134,7 +139,7 @@ export default function KpiCards({
         </div>
         <div className="mt-3">
           <div className="text-2xl font-black text-indigo-700 tracking-tight">
-            {classAvg !== null ? toPersianDigits(classAvg.toFixed(1)) : '—'}{' '}
+            {classAvg !== null ? toPersianDigits(roundScore2(classAvg)) : '—'}{' '}
             <span className="text-xs font-medium text-slate-500">/ ۲۰</span>
           </div>
           <div className="text-xs font-medium text-slate-500 mt-1">
@@ -158,7 +163,7 @@ export default function KpiCards({
                 key={w.subject}
                 className="bg-white text-amber-900 border border-amber-300 text-xs font-bold px-2.5 py-1 rounded-lg shadow-xs"
               >
-                {w.subject}: {toPersianDigits(w.avg.toFixed(1))} از ۲۰
+                {w.subject}: {toPersianDigits(roundScore2(w.avg))} از ۲۰
               </span>
             ))}
           </div>
@@ -173,14 +178,14 @@ export default function KpiCards({
               <span className="text-xl">🏆</span>
               <span className="text-sm font-bold text-slate-800">پیشتاز کلاس: {best.name}</span>
               <span className="bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-black px-2 py-0.5 rounded-full">
-                معدل {toPersianDigits(best.avg?.toFixed(1))}
+                معدل {toPersianDigits(roundScore2(best.avg ?? 0))}
               </span>
             </div>
             <div className="flex items-center gap-2.5">
               <span className="text-xl">💡</span>
               <span className="text-sm font-bold text-slate-800">پشتیبانی ویژه: {worst.name}</span>
               <span className="bg-rose-50 text-rose-700 border border-rose-200 text-xs font-black px-2 py-0.5 rounded-full">
-                معدل {toPersianDigits(worst.avg?.toFixed(1))}
+                معدل {toPersianDigits(roundScore2(worst.avg ?? 0))}
               </span>
             </div>
           </div>

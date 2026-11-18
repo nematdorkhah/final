@@ -25,11 +25,13 @@ import {
   flushPendingExamSyncQueue,
   extractExamsFromPosts,
   isExamResultsReleased,
+  mergeSubmissionsDeduplicated,
+  buildCanonicalGradesList,
 } from '../utils/examStore'
 import { isItemExpiredForStudent } from '../utils/expiration'
 import { sanitizeTeacherFeedback } from '../utils/cleanFeedback'
 import { toPersianDigits } from '../utils/persianNumbers'
-import { getSubmissionEffectiveScore } from '../utils/persianSemanticGrader'
+import { roundScore2 } from '../utils/persianSemanticGrader'
 import { resolveCanonicalStudent, isSameStudent } from '../classStudents'
 import { realtimeSync } from '../services/realtimeSync'
 import {
@@ -155,6 +157,8 @@ export default function StudentDashboard({
   const [viewingAttachmentUrl, setViewingAttachmentUrl] = useState<string | null>(null)
   const [viewingAttachmentTitle, setViewingAttachmentTitle] = useState<string>('فایل پیوست')
   const [reviewExamData, setReviewExamData] = useState<{ exam: any; submission: any } | null>(null)
+  const [openingReviewId, setOpeningReviewId] = useState<string | null>(null)
+  const [reviewErrorMsg, setReviewErrorMsg] = useState<string | null>(null)
   const [myExamSubs, setMyExamSubs] = useState<StudentExamSubmission[]>([])
   const [showReportCardModal, setShowReportCardModal] = useState(false)
   const [currentTime, setCurrentTime] = useState(Date.now())
@@ -753,251 +757,21 @@ export default function StudentDashboard({
     if (onStudentUpdate) onStudentUpdate(data)
   }
 
-  // Combined grades merging Supabase grades, local exams, homework assignments, and submissions
+  // Combined grades merging Supabase grades, exams, homework assignments, and submissions via shared canonical builder
   const combinedGrades = useMemo(() => {
     const localExams = exams.length > 0 ? exams : getLocalExams()
-    const allSubs = myExamSubs.length > 0 ? myExamSubs : getLocalSubmissions()
-    const examSubs = allSubs.filter(
-      (s) => isSameStudent(s.studentId, student.id, s.studentName, student.full_name || (student as any).fullName)
-    )
-    const examMap = new Map(localExams.map((e) => [e.id, e]))
-    const subMap = new Map(examSubs.map((s) => [s.examId, s]))
-
-    const list: any[] = []
-    const seenExamIds = new Set<string>()
-    const seenTitles = new Set<string>()
-
-    // 1. Process existing Supabase grades (official database records)
-    for (const g of myGrades) {
-      let matchedExam = g.exam || (g.examId ? examMap.get(g.examId) : null)
-      let matchedSub = g.sub || (g.examId ? subMap.get(g.examId) : null)
-
-      if (!matchedExam) {
-        matchedExam =
-          localExams.find((e) => {
-            if (g.examId && e.id === g.examId) return true
-            if (g.id && (`exam_sub_${e.id}` === g.id || `exam_${e.id}` === g.id)) return true
-            const cleanE = sanitizeExamTitle(e.title, e.subject)
-            const cleanG = sanitizeExamTitle(g.skill || '', g.subject)
-            return cleanE && cleanG && (cleanE === cleanG || g.skill?.includes(cleanE))
-          }) || null
-      }
-
-      if (matchedExam && !matchedSub) {
-        matchedSub =
-          subMap.get(matchedExam.id) ||
-          allSubs.find(
-            (s) =>
-              (s.examId === matchedExam.id || s.examId === g.examId) &&
-              isSameStudent(s.studentId, student.id, s.studentName, student.full_name || (student as any).fullName)
-          ) ||
-          null
-      }
-
-      let officialScore = Number(g.score) || 0
-      let officialMaxScore = Number(g.max_score) || 20
-      let rawEarned: number | undefined = (g as any).raw_score
-      let rawTotal: number | undefined = (g as any).raw_max
-      let officialNotes = g.notes || ''
-      let itemStatus: 'graded' | 'pending_review' | 'pending_submission' = 'graded'
-
-      if (matchedExam && matchedSub) {
-        const eff = getSubmissionEffectiveScore(matchedExam, matchedSub)
-        const isApproved = Boolean(
-          matchedSub.teacherGrading?.approved ||
-          matchedSub.status === 'released' ||
-          matchedSub.status === 'approved' ||
-          (matchedSub.answers as any)?.teacher_approved ||
-          (matchedSub.answers as any)?.approved ||
-          eff.isApproved
-        )
-        const isReleased = isExamResultsReleased(matchedExam, matchedSub)
-
-        if (isApproved && isReleased) {
-          officialScore = eff.scaledScore20
-          officialMaxScore = 20
-          rawEarned = eff.totalScore
-          rawTotal = eff.maxPoints
-          officialNotes = matchedSub.teacherGrading?.teacherNotes || officialNotes
-          itemStatus = 'graded'
-        } else {
-          itemStatus = 'pending_review'
-          rawEarned = undefined
-          rawTotal = matchedExam.totalPoints
-        }
-      }
-
-      if (matchedExam && matchedExam.totalPoints && rawEarned === undefined && itemStatus === 'graded') {
-        rawEarned = Math.round(((officialScore / 20) * matchedExam.totalPoints) * 10) / 10
-        rawTotal = matchedExam.totalPoints
-      }
-
-      if (matchedExam) {
-        seenExamIds.add(matchedExam.id)
-      }
-      const cleanTitleKey = sanitizeExamTitle(g.skill || '', g.subject)
-      if (cleanTitleKey) seenTitles.add(cleanTitleKey)
-
-      list.push({
-        ...g,
-        status: itemStatus,
-        score: itemStatus === 'graded' ? officialScore : null,
-        max_score: officialMaxScore,
-        raw_score: rawEarned,
-        raw_max: rawTotal,
-        notes: officialNotes,
-        matchedExam,
-        matchedSub,
-      })
-    }
-
-    // 2. Process all student exam submissions not yet in list
-    for (const sub of examSubs) {
-      const exam = examMap.get(sub.examId)
-      if (!exam) continue
-      if (seenExamIds.has(exam.id)) continue
-
-      const cleanTitle = sanitizeTeacherFeedback(sanitizeExamTitle(exam.title, exam.subject))
-      if (seenTitles.has(cleanTitle)) continue
-
-      const eff = getSubmissionEffectiveScore(exam, sub)
-      const isApproved = Boolean(
-        sub.teacherGrading?.approved ||
-        (sub.status as string) === 'released' ||
-        (sub.status as string) === 'approved' ||
-        sub.status === 'graded' ||
-        (sub.answers as any)?.teacher_approved ||
-        (sub.answers as any)?.approved ||
-        eff.isApproved
-      )
-      const isReleased = isExamResultsReleased(exam, sub)
-
-      seenExamIds.add(exam.id)
-      seenTitles.add(cleanTitle)
-
-      if (isApproved && isReleased) {
-        list.push({
-          id: `exam_sub_${sub.id}`,
-          student_id: student.id,
-          subject: exam.subject || 'عمومی',
-          skill: exam.mode === 'assignment' ? `تکلیف: ${cleanTitle}` : `آزمون: ${cleanTitle}`,
-          status: 'graded',
-          score: eff.scaledScore20,
-          max_score: 20,
-          raw_score: eff.totalScore,
-          raw_max: eff.maxPoints,
-          recorded_at: sub.submittedAt || new Date().toISOString(),
-          is_exam: true,
-          examId: exam.id,
-          matchedExam: exam,
-          matchedSub: sub,
-          exam,
-          sub,
-        })
-      } else {
-        list.push({
-          id: `exam_sub_${sub.id}`,
-          student_id: student.id,
-          subject: exam.subject || 'عمومی',
-          skill: exam.mode === 'assignment' ? `تکلیف: ${cleanTitle}` : `آزمون: ${cleanTitle}`,
-          status: 'pending_review',
-          score: null,
-          max_score: 20,
-          raw_score: null,
-          raw_max: exam.totalPoints,
-          recorded_at: sub.submittedAt || new Date().toISOString(),
-          is_exam: true,
-          examId: exam.id,
-          matchedExam: exam,
-          matchedSub: sub,
-          exam,
-          sub,
-        })
-      }
-    }
-
-    // 3. Process all active published assignments and exams (unsubmitted by student)
-    for (const exam of localExams) {
-      if (!exam || exam.published === false) continue
-      if (seenExamIds.has(exam.id)) continue
-
-      const cleanTitle = sanitizeTeacherFeedback(sanitizeExamTitle(exam.title, exam.subject))
-      if (seenTitles.has(cleanTitle)) continue
-
-      seenExamIds.add(exam.id)
-      seenTitles.add(cleanTitle)
-
-      list.push({
-        id: `pending_exam_${exam.id}`,
-        student_id: student.id,
-        subject: exam.subject || 'عمومی',
-        skill: exam.mode === 'assignment' ? `تکلیف: ${cleanTitle}` : `آزمون: ${cleanTitle}`,
-        status: 'pending_submission',
-        score: null,
-        max_score: 20,
-        raw_score: null,
-        raw_max: exam.totalPoints,
-        recorded_at: exam.dueDate || exam.createdAt || new Date().toISOString(),
-        due_date: exam.dueDate,
-        is_exam: true,
-        examId: exam.id,
-        matchedExam: exam,
-        matchedSub: null,
-      })
-    }
-
-    // 4. Process traditional homework posts from teacher
-    const submittedHwMap = new Map<string, any>()
-    mySubmissions.forEach((s) => {
-      if (s.post_id) submittedHwMap.set(s.post_id, s)
+    const allSubs = mergeSubmissionsDeduplicated([], myExamSubs.length > 0 ? myExamSubs : getLocalSubmissions())
+    return buildCanonicalGradesList({
+      studentId: student.id,
+      studentName: student.full_name || (student as any).fullName,
+      dbGrades: myGrades,
+      exams: localExams,
+      examSubmissions: allSubs,
+      homeworkPosts: posts,
+      homeworkSubmissions: mySubmissions,
+      includePending: true,
     })
-
-    const hwPosts = posts.filter((p) => p && p.type === 'homework' && !isSystemRecord(p))
-    for (const hw of hwPosts) {
-      if (!hw || !hw.id) continue
-      const cleanHwTitle = sanitizeTeacherFeedback(hw.title || 'تکلیف کلاسی')
-      if (seenTitles.has(cleanHwTitle)) continue
-
-      const sub = submittedHwMap.get(hw.id)
-      if (sub) {
-        list.push({
-          id: `hw_sub_${sub.id || hw.id}`,
-          student_id: student.id,
-          subject: hw.subject || 'عمومی',
-          skill: `تکلیف: ${cleanHwTitle}`,
-          status: 'pending_review',
-          score: null,
-          max_score: 20,
-          recorded_at: sub.submitted_at || hw.created_at,
-          homeworkPost: hw,
-          homeworkSubmission: sub,
-        })
-        seenTitles.add(cleanHwTitle)
-      } else {
-        list.push({
-          id: `hw_pending_${hw.id}`,
-          student_id: student.id,
-          subject: hw.subject || 'عمومی',
-          skill: `تکلیف: ${cleanHwTitle}`,
-          status: 'pending_submission',
-          score: null,
-          max_score: 20,
-          recorded_at: hw.due_date || hw.created_at,
-          due_date: hw.due_date,
-          homeworkPost: hw,
-        })
-        seenTitles.add(cleanHwTitle)
-      }
-    }
-
-    // Sort: Graded first, then pending review, then pending submission
-    return list.sort((a, b) => {
-      const priority = { graded: 1, pending_review: 2, pending_submission: 3 }
-      const pDiff = (priority[a.status as keyof typeof priority] || 9) - (priority[b.status as keyof typeof priority] || 9)
-      if (pDiff !== 0) return pDiff
-      return new Date(b.recorded_at || 0).getTime() - new Date(a.recorded_at || 0).getTime()
-    })
-  }, [myGrades, student.id, exams, myExamSubs, posts, mySubmissions])
+  }, [myGrades, student.id, student.full_name, exams, myExamSubs, posts, mySubmissions])
 
   // Teacher report card recommendation note
   const reportNote = useMemo(() => {
@@ -1031,10 +805,10 @@ export default function StudentDashboard({
     })
   }, [posts])
 
-  // Memoized fast submission map by examId (avoids repeated localStorage scans on every 1s timer tick)
+  // Memoized fast submission map by examId (deduplicated so duplicate records always resolve deterministically)
   const mySubByExamId = useMemo(() => {
     const map = new Map<string, StudentExamSubmission>()
-    const source = myExamSubs.length > 0 ? myExamSubs : getLocalSubmissions()
+    const source = mergeSubmissionsDeduplicated([], myExamSubs.length > 0 ? myExamSubs : getLocalSubmissions())
     for (const s of source) {
       if (!s || !s.examId) continue
       if (isSameStudent(s.studentId, student.id, s.studentName, student?.full_name || (student as any)?.fullName)) {
@@ -1134,9 +908,81 @@ export default function StudentDashboard({
 
   const gpa = useMemo(() => {
     if (!gradedCombinedItems.length) return null
-    const total = gradedCombinedItems.reduce((sum, g) => sum + (Number(g.score) / (Number(g.max_score) || 20)) * 20, 0)
-    return (total / gradedCombinedItems.length).toFixed(1)
+    const total = gradedCombinedItems.reduce((sum, g) => {
+      const m = Number(g.max_score)
+      const s = Number(g.score) || 0
+      return sum + (m === 20 ? s : m > 0 ? (s / m) * 20 : s)
+    }, 0)
+    return String(roundScore2(total / gradedCombinedItems.length))
   }, [gradedCombinedItems])
+
+  async function handleOpenExamReview(g: any) {
+    const rowKey = String(g.id || g.examId || g.skill || 'review')
+    setReviewErrorMsg(null)
+    setOpeningReviewId(rowKey)
+
+    try {
+      const targetStudentName = student?.full_name || (student as any)?.fullName
+      let targetExam = g.matchedExam || g.exam || exams.find((e) => e.id === g.examId) || getLocalExams().find((e) => e.id === g.examId) || null
+      let targetSub =
+        g.matchedSub ||
+        g.sub ||
+        (targetExam
+          ? (myExamSubs.length > 0 ? myExamSubs : getLocalSubmissions()).find(
+              (s) =>
+                (s.examId === targetExam.id || s.examId === g.examId) &&
+                isSameStudent(s.studentId, student?.id, s.studentName, targetStudentName)
+            )
+          : null)
+
+      // Lazy-hydrate missing exam questions or submission from Supabase on demand
+      if (!targetExam || !Array.isArray(targetExam.questions) || targetExam.questions.length === 0) {
+        try {
+          const diag = await fetchPublishedExamsWithDiagnostics(true, true, { skipBackendApi: true })
+          if (diag.exams.length > 0) {
+            setExams(diag.exams)
+            targetExam =
+              diag.exams.find((e) => {
+                if (g.examId && e.id === g.examId) return true
+                if (targetExam?.id && e.id === targetExam.id) return true
+                const cleanE = sanitizeExamTitle(e.title, e.subject)
+                const cleanG = sanitizeExamTitle(g.skill || '', g.subject)
+                return Boolean(cleanE && cleanG && (cleanE === cleanG || g.skill?.includes(cleanE)))
+              }) || targetExam
+          }
+        } catch {}
+      }
+
+      if (targetExam && !targetSub) {
+        try {
+          const rosterInfo = resolveCanonicalStudent(student?.id || student?.access_code || targetStudentName)
+          const canonicalStudentId = rosterInfo?.id || student?.id
+          const fetchedSubs = await fetchExamSubmissions(targetExam.id, canonicalStudentId, true)
+          if (Array.isArray(fetchedSubs) && fetchedSubs.length > 0) {
+            targetSub =
+              fetchedSubs.find(
+                (s) =>
+                  s.examId === targetExam.id &&
+                  isSameStudent(s.studentId, canonicalStudentId, s.studentName, targetStudentName)
+              ) || null
+          }
+        } catch {}
+      }
+
+      if (targetExam && targetSub) {
+        setReviewExamData({
+          exam: targetExam,
+          submission: targetSub,
+        })
+      } else if (!targetExam) {
+        setReviewErrorMsg('اطلاعات سؤالات این آزمون در سامانه یافت نشد یا مربوط به ارزیابی کلاسی بدون برگه‌سؤال است.')
+      } else {
+        setReviewErrorMsg('برگه پاسخ ثبت‌شده شما برای این آزمون در دسترس نیست؛ لطفاً در صورت نیاز با آموزگار تماس بگیرید.')
+      }
+    } finally {
+      setOpeningReviewId(null)
+    }
+  }
 
   const attendanceStats = useMemo(() => {
     const present = myAttendance.filter((a) => a.status === 'present').length
@@ -2195,7 +2041,7 @@ export default function StudentDashboard({
                             <div className="flex items-center justify-between mb-2">
                               <span className="text-sm font-black text-slate-900">{sg.subject}</span>
                               <span className="text-xs font-black text-blue-700 bg-blue-50 px-2 py-0.5 rounded-md border border-blue-100">
-                                {toPersianDigits(avgNum.toFixed(1))} از ۲۰
+                                {toPersianDigits(roundScore2(avgNum))} از ۲۰
                               </span>
                             </div>
 
@@ -2246,7 +2092,7 @@ export default function StudentDashboard({
 
                       const rawEarned = Number(g.score) || 0
                       const rawTotal = Number(g.max_score) || 20
-                      const normalized = isGraded && rawTotal > 0 ? Math.round(((rawEarned / rawTotal) * 20) * 10) / 10 : rawEarned
+                      const normalized = isGraded && rawTotal > 0 ? roundScore2((rawEarned / rawTotal) * 20) : roundScore2(rawEarned)
 
                       let badgeColor = 'text-emerald-700 bg-emerald-50 border-emerald-200'
                       let badgeLabel = 'خیلی خوب'
@@ -2267,6 +2113,8 @@ export default function StudentDashboard({
                         badgeLabel = 'خوب'
                       }
 
+                      const rowKey = String(g.id || g.examId || g.skill || idx)
+                      const isOpeningThis = openingReviewId === rowKey
                       const hasReview = isGraded && Boolean(g.matchedExam)
                       const canViewPendingAnswers = isPendingReview && Boolean(g.matchedExam && g.matchedSub)
 
@@ -2282,20 +2130,7 @@ export default function StudentDashboard({
                           }`}
                           onClick={() => {
                             if (hasReview || canViewPendingAnswers) {
-                              const sub =
-                                g.matchedSub ||
-                                (myExamSubs.length > 0 ? myExamSubs : getLocalSubmissions()).find(
-                                  (s) =>
-                                    (s.examId === g.matchedExam?.id || s.examId === g.examId) &&
-                                    isSameStudent(s.studentId, student.id, s.studentName, student.full_name || (student as any).fullName)
-                                ) ||
-                                null
-                              if (sub && g.matchedExam) {
-                                setReviewExamData({
-                                  exam: g.matchedExam,
-                                  submission: sub,
-                                })
-                              }
+                              handleOpenExamReview(g)
                             } else if (isPendingSubmission) {
                               if (g.matchedExam) {
                                 setTakingExam(g.matchedExam)
@@ -2333,14 +2168,36 @@ export default function StudentDashboard({
                                 {sanitizeTeacherFeedback(g.skill || g.notes || 'تکلیف و ارزیابی کلاسی')}
                               </div>
                               {hasReview && (
-                                <div className="text-[11px] text-blue-600 font-black mt-1">
-                                  🔍 برای مشاهده سوالات و پاسخ‌نامه کلیک کنید
-                                </div>
+                                <button
+                                  type="button"
+                                  disabled={isOpeningThis}
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    handleOpenExamReview(g)
+                                  }}
+                                  className="mt-1.5 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-blue-50 hover:bg-blue-100 active:scale-95 text-[11px] text-blue-700 font-black border border-blue-200/80 transition-all cursor-pointer"
+                                >
+                                  <span>{isOpeningThis ? '⏳' : '🔍'}</span>
+                                  <span>
+                                    {isOpeningThis
+                                      ? 'در حال بارگذاری پاسخ‌نامه...'
+                                      : 'برای مشاهده سؤالات و پاسخ‌نامه کلیک کنید'}
+                                  </span>
+                                </button>
                               )}
                               {canViewPendingAnswers && (
-                                <div className="text-[11px] text-amber-600 font-bold mt-1">
-                                  👁️ پاسخ شما ثبت شده و در انتظار تایید آموزگار است (برای مشاهده کلیک کنید)
-                                </div>
+                                <button
+                                  type="button"
+                                  disabled={isOpeningThis}
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    handleOpenExamReview(g)
+                                  }}
+                                  className="mt-1.5 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-50 hover:bg-amber-100 text-[11px] text-amber-700 font-bold border border-amber-200 transition-all cursor-pointer"
+                                >
+                                  <span>👁️</span>
+                                  <span>پاسخ شما ثبت شده و در انتظار تایید آموزگار است (برای مشاهده کلیک کنید)</span>
+                                </button>
                               )}
                               {isPendingSubmission && (
                                 <div className="text-[11px] text-indigo-600 font-bold mt-1">
@@ -2595,6 +2452,7 @@ export default function StudentDashboard({
           grades={combinedGrades}
           attendanceRows={myAttendance}
           submissions={mySubmissions}
+          examSubmissions={myExamSubs}
           homeworkCount={homeworkPosts.length}
           reportNote={reportNote || undefined}
           onClose={() => setShowReportCardModal(false)}
@@ -2624,6 +2482,31 @@ export default function StudentDashboard({
           title={viewingAttachmentTitle || 'فایل پیوست'}
           onClose={() => setViewingAttachmentUrl(null)}
         />
+      )}
+
+      {/* Clear Error Dialog when Answer Sheet Cannot Be Loaded (Never Silent No-Op) */}
+      {reviewErrorMsg && (
+        <div
+          dir="rtl"
+          className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => setReviewErrorMsg(null)}
+        >
+          <div
+            className="w-full max-w-md bg-white border-2 border-slate-900 rounded-2xl p-5 shadow-2xl text-center"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="text-3xl mb-2">📋</div>
+            <h4 className="text-base font-black text-slate-900 mb-2">پاسخ‌نامه در دسترس نیست</h4>
+            <p className="text-xs sm:text-sm text-slate-600 leading-relaxed mb-4">{reviewErrorMsg}</p>
+            <button
+              type="button"
+              onClick={() => setReviewErrorMsg(null)}
+              className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-black cursor-pointer"
+            >
+              متوجه شدم
+            </button>
+          </div>
+        </div>
       )}
 
       {/* Student Exam Review Popup Modal */}

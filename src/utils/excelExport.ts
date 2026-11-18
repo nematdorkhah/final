@@ -1,6 +1,8 @@
 import * as XLSX from 'xlsx'
 import { toPersianDigits } from './persianNumbers'
 import { extractLastName } from './persianSort'
+import { isSameStudent, isTestStudentRecord } from '../classStudents'
+import { roundScore2 } from './persianSemanticGrader'
 
 export interface ExcelExportData {
   students: any[]
@@ -20,17 +22,20 @@ export function exportClassroomToExcel({
   try {
     const wb = XLSX.utils.book_new()
 
-    // 1. Students & GPA Sheet (Alphabetical by Last Name)
-    const sortedStudents = [...students].sort((a, b) => {
+    // 1. Students & GPA Sheet (Alphabetical by Last Name, excluding synthetic test accounts)
+    const realStudents = students.filter((s) => !isTestStudentRecord(s.id, s.full_name || s.name))
+    const realGrades = grades.filter((g) => !isTestStudentRecord(g.student_id, g.student_name))
+
+    const sortedStudents = [...realStudents].sort((a, b) => {
       const lastA = extractLastName(a.full_name || a.name || '')
       const lastB = extractLastName(b.full_name || b.name || '')
       return lastA.localeCompare(lastB, 'fa')
     })
 
     const studentsRows = sortedStudents.map((s, idx) => {
-      const studentGrades = grades.filter((g) => g.student_id === s.id)
-      const studentSubs = submissions.filter((sub) => sub.student_id === s.id)
-      const studentAtt = allAttendance.filter((att) => att.student_id === s.id)
+      const studentGrades = realGrades.filter((g) => isSameStudent(g.student_id, s.id, g.student_name, s.full_name || s.name))
+      const studentSubs = submissions.filter((sub) => isSameStudent(sub.student_id, s.id, sub.student_name, s.full_name || s.name))
+      const studentAtt = allAttendance.filter((att) => isSameStudent(att.student_id, s.id))
 
       let gpa = '-'
       if (studentGrades.length > 0) {
@@ -39,7 +44,7 @@ export function exportClassroomToExcel({
           const sc = Number(g.score) || 0
           return sum + (max > 0 ? (sc / max) * 20 : sc)
         }, 0)
-        gpa = (total / studentGrades.length).toFixed(2)
+        gpa = String(roundScore2(total / studentGrades.length))
       }
 
       const presentCount = studentAtt.filter((a) => a.status === 'present').length
@@ -63,11 +68,11 @@ export function exportClassroomToExcel({
     XLSX.utils.book_append_sheet(wb, wsStudents, 'دانش‌آموزان و معدل')
 
     // 2. Grades Sheet
-    const gradesRows = grades.map((g, idx) => {
-      const student = students.find((s) => s.id === g.student_id)
+    const gradesRows = realGrades.map((g, idx) => {
+      const student = realStudents.find((s) => isSameStudent(s.id, g.student_id, s.full_name || s.name, g.student_name))
       const max = Number(g.max_score) || 20
       const score = Number(g.score) || 0
-      const scaled = max > 0 ? Math.round(((score / max) * 20) * 10) / 10 : score
+      const scaled = max > 0 ? roundScore2((score / max) * 20) : roundScore2(score)
       return {
         'ردیف': idx + 1,
         'دانش‌آموز': student?.full_name || g.student_name || g.student_id,
@@ -84,8 +89,10 @@ export function exportClassroomToExcel({
     XLSX.utils.book_append_sheet(wb, wsGrades, 'ریز نمرات')
 
     // 3. Attendance Sheet
-    const attRows = allAttendance.map((a, idx) => {
-      const student = students.find((s) => s.id === a.student_id)
+    const attRows = allAttendance
+      .filter((a) => !isTestStudentRecord(a.student_id))
+      .map((a, idx) => {
+        const student = realStudents.find((s) => isSameStudent(s.id, a.student_id))
       const statusLabel = a.status === 'present' ? 'حاضر' : a.status === 'late' ? 'تأخیر' : 'غایب'
       return {
         'ردیف': idx + 1,

@@ -22,7 +22,9 @@ import StudentProfilePanel from '../components/StudentProfilePanel'
 import BackupRestoreModal from '../components/BackupRestoreModal'
 import LoadingScreen from '../components/LoadingScreen'
 import { exportClassroomToExcel } from '../utils/excelExport'
-import { getLocalExams, getLocalSubmissions } from '../utils/examStore'
+import { buildCanonicalGradesList } from '../utils/examStore'
+import { roundScore2 } from '../utils/persianSemanticGrader'
+import { isSameStudent, isTestStudentRecord } from '../classStudents'
 import { sortByLastName } from '../utils/persianSort'
 import { realtimeSync } from '../services/realtimeSync'
 
@@ -45,6 +47,8 @@ export default function TeacherDashboard({
     attendanceToday,
     allAttendance,
     grades,
+    exams,
+    examSubmissions,
     loading,
     error,
     reload,
@@ -59,7 +63,10 @@ export default function TeacherDashboard({
     return () => window.removeEventListener('exams-updated', handleExamsUpdated)
   }, [reload])
 
-  const sortedStudents = useMemo(() => sortByLastName(students), [students])
+  const sortedStudents = useMemo(
+    () => sortByLastName(students).filter((s) => !isTestStudentRecord(s.id, s.full_name)),
+    [students]
+  )
 
   const [activeTab, setActiveTab] = useState<TeacherTab>('home')
   const [showNewPost, setShowNewPost] = useState(false)
@@ -95,43 +102,32 @@ export default function TeacherDashboard({
   const homeworkPosts = publishedPosts.filter((p) => p.type === 'homework')
 
   const combinedGrades = useMemo(() => {
-    const list = [...grades]
-    const localExams = getLocalExams()
-    const examSubs = getLocalSubmissions()
-    const examMap = new Map(localExams.map((e) => [e.id, e]))
-    for (const sub of examSubs) {
-      const exam = examMap.get(sub.examId)
-      if (!exam) continue
-      const score = sub.teacherGrading?.totalScore ?? sub.aiGrading?.totalScore ?? (sub as any).studentScore
-      if (score === undefined || score === null) continue
-      const exists = list.some(
-        (g) => g.student_id === sub.studentId && (g.skill === `آزمون: ${exam.title}` || g.skill === exam.title)
-      )
-      if (!exists) {
-        list.push({
-          id: `exam_sub_${sub.id}`,
-          student_id: sub.studentId,
-          subject: exam.subject || 'عمومی',
-          skill: `آزمون: ${exam.title}`,
-          score: Number(score),
-          max_score: exam.totalPoints || 20,
-          recorded_at: sub.submittedAt || new Date().toISOString(),
-          is_exam: true,
-        })
-      }
-    }
-    return list
-  }, [grades])
+    const cleanDbGrades = grades.filter((g) => !isTestStudentRecord(g.student_id, g.student_name))
+    return sortedStudents.flatMap((st) =>
+      buildCanonicalGradesList({
+        studentId: st.id,
+        studentName: st.full_name,
+        dbGrades: cleanDbGrades.filter((g) => isSameStudent(g.student_id, st.id, g.student_name, st.full_name)),
+        exams,
+        examSubmissions,
+        includePending: false,
+      })
+    )
+  }, [grades, sortedStudents, exams, examSubmissions])
 
   const statsRows = useMemo(() => {
     return sortedStudents.map((s) => {
-      const myGrades = combinedGrades.filter((g) => g.student_id === s.id)
+      const myGrades = combinedGrades.filter((g) => isSameStudent(g.student_id, s.id))
       const avg = myGrades.length
-        ? myGrades.reduce((sum: number, g: any) => sum + (g.score / g.max_score) * 20, 0) / myGrades.length
+        ? roundScore2(myGrades.reduce((sum: number, g: any) => {
+            const m = Number(g.max_score)
+            const s = Number(g.score) || 0
+            return sum + (m === 20 ? s : m > 0 ? (s / m) * 20 : s)
+          }, 0) / myGrades.length)
         : null
-      const mySubmissionRows = submissions.filter((sub) => sub.student_id === s.id)
-      const myPresent = allAttendance.filter((a) => a.student_id === s.id && a.status === 'present').length
-      const myLate = allAttendance.filter((a) => a.student_id === s.id && a.status === 'late').length
+      const mySubmissionRows = submissions.filter((sub) => isSameStudent(sub.student_id, s.id))
+      const myPresent = allAttendance.filter((a) => isSameStudent(a.student_id, s.id) && a.status === 'present').length
+      const myLate = allAttendance.filter((a) => isSameStudent(a.student_id, s.id) && a.status === 'late').length
       const streak = computeStreak(homeworkPosts, mySubmissionRows)
       return {
         id: s.id,
@@ -204,7 +200,7 @@ export default function TeacherDashboard({
                     پنل مدیریت کلاس <span className="text-sky-300">ششم ابتدایی</span>
                   </h2>
                   <p className="text-[11px] sm:text-xs text-indigo-100 font-medium">
-                    {toPersianDigits(students.length)} دانش‌آموز فعال · {toPersianDigits(homeworkPosts.length)} تکلیف ثبت‌شده
+                    {toPersianDigits(sortedStudents.length)} دانش‌آموز فعال · {toPersianDigits(homeworkPosts.length)} تکلیف ثبت‌شده
                   </p>
                 </div>
               </div>
@@ -327,7 +323,7 @@ export default function TeacherDashboard({
                 attendanceToday={attendanceToday}
                 homeworkPosts={homeworkPosts}
                 submissions={submissions}
-                grades={grades}
+                grades={combinedGrades}
                 statsRows={statsRows}
                 weakSubjects={weakSubjects}
               />
@@ -495,6 +491,8 @@ export default function TeacherDashboard({
               submissions={submissions}
               allAttendance={allAttendance}
               homeworkPosts={homeworkPosts}
+              exams={exams}
+              examSubmissions={examSubmissions}
               onOpenStudent={(id) => setOpenStudentId(id)}
               initialSubTab={monitoringSubTab}
             />
@@ -670,9 +668,12 @@ export default function TeacherDashboard({
         >
           <StudentProfilePanel
             student={openStudent}
-            grades={combinedGrades.filter((g) => g.student_id === openStudent.id)}
-            submissions={submissions.filter((s) => s.student_id === openStudent.id)}
-            attendanceRows={allAttendance.filter((a) => a.student_id === openStudent.id)}
+            grades={combinedGrades.filter((g) => isSameStudent(g.student_id, openStudent.id, g.student_name, openStudent.full_name))}
+            rawDbGrades={grades.filter((g) => isSameStudent(g.student_id, openStudent.id, g.student_name, openStudent.full_name))}
+            exams={exams}
+            examSubmissions={examSubmissions}
+            submissions={submissions.filter((s) => isSameStudent(s.student_id, openStudent.id))}
+            attendanceRows={allAttendance.filter((a) => isSameStudent(a.student_id, openStudent.id))}
             homeworkPosts={homeworkPosts}
             teacherPassword={teacherPassword}
             onClose={() => setOpenStudentId(null)}

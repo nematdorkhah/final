@@ -86,12 +86,28 @@ export function safePercentage(earned: any, total: any): number {
   return Math.min(100, Math.max(0, Math.round((e / t) * 100)))
 }
 
+export function roundScore2(val: any, fallback = 0): number {
+  const n = safeNumber(val, fallback)
+  return Math.round(n * 100) / 100
+}
+
 export function safeScaled20(earned: any, total: any): number {
   const e = safeNumber(earned, 0)
   const t = safeNumber(total, 0)
   if (t <= 0) return 0
   const scaled = (e / t) * 20
-  return Math.min(20, Math.max(0, Math.round(scaled * 10) / 10))
+  return Math.min(20, Math.max(0, Math.round(scaled * 100) / 100))
+}
+
+export function getExamMaxPoints(exam: { questions?: ExamQuestion[]; totalPoints?: number } | null | undefined): number {
+  if (!exam) return 20
+  const qs = Array.isArray(exam.questions) ? exam.questions : []
+  const sumPts = qs.reduce((acc, q) => acc + safeScore(q?.points, 1000, 2), 0)
+  const explicit = safeNumber(exam.totalPoints, 0)
+  if (sumPts > 0) {
+    return Math.round(sumPts * 100) / 100
+  }
+  return explicit > 0 ? explicit : 20
 }
 
 // ----------------------------------------------------------------------
@@ -933,7 +949,7 @@ export interface QuestionGradingOutput {
 // ----------------------------------------------------------------------
 
 export function evaluateMultipleChoice(q: ExamQuestion, studentAns: any): QuestionGradingOutput {
-  const maxScore = safeScore(q.points, 10, 2)
+  const maxScore = safeScore(q.points, 1000, 2)
   const resolvedCorrect = resolveCorrectOptionIndex(q)
   const resolvedStudent = resolveStudentSelectedOption(studentAns, q.options)
 
@@ -1190,7 +1206,7 @@ export function checkIntraWordLetterCompletion(
  * 6. Contradiction rejection (negation words or opposing clusters)
  */
 export function evaluateFillInTheBlank(q: ExamQuestion, studentAns: any): QuestionGradingOutput {
-  const maxScore = safeScore(q.points, 10, 2)
+  const maxScore = safeScore(q.points, 1000, 2)
   const rawStudent = typeof studentAns === 'object' && studentAns !== null ? studentAns.textAnswer : studentAns
   const studentText = String(rawStudent || '').trim()
 
@@ -1788,7 +1804,7 @@ export function evaluateDescriptiveQuestion(
   studentAns: any,
   aiGradeProposal?: { score?: number; feedback?: string; status?: string }
 ): QuestionGradingOutput {
-  const maxScore = safeScore(q.points, 10, 3)
+  const maxScore = safeScore(q.points, 1000, 3)
   const rawStudent = typeof studentAns === 'object' && studentAns !== null ? studentAns.textAnswer : studentAns
   const studentText = String(rawStudent || '').trim()
   const hasAttachment = Boolean(typeof studentAns === 'object' && studentAns?.imageAttachment)
@@ -1996,7 +2012,7 @@ export function evaluateEntireExamSubmission(
   let calculatedMaxPoints = 0
 
   for (const q of questions) {
-    const qPoints = safeScore(q.points, 10, 2)
+    const qPoints = safeScore(q.points, 1000, 2)
     calculatedMaxPoints += qPoints
     const sAns = answers[q.id]
 
@@ -2072,6 +2088,32 @@ export interface EffectiveSubmissionScore {
   status: 'excellent' | 'good' | 'needs_practice'
 }
 
+export function isSubmissionApprovedByTeacher(
+  sub: StudentExamSubmission | null | undefined
+): boolean {
+  if (!sub) return false
+  const answersObj = (sub.answers as any) || {}
+  const hasAnswerLevelApproval = Boolean(
+    answersObj.teacher_approved || answersObj.approved || answersObj.is_released
+  )
+  const isExplicitlyPendingUnapproved = Boolean(
+    sub.teacherGrading?.approved === false &&
+    sub.status === 'pending_approval' &&
+    !sub.isReleased &&
+    !(sub as any).is_released &&
+    !hasAnswerLevelApproval
+  )
+  if (isExplicitlyPendingUnapproved) return false
+
+  return Boolean(
+    sub.teacherGrading?.approved === true ||
+    (sub.status as string) === 'released' ||
+    (sub.status as string) === 'approved' ||
+    sub.status === 'graded' ||
+    hasAnswerLevelApproval
+  )
+}
+
 export function getSubmissionEffectiveScore(
   exam: { questions: ExamQuestion[]; totalPoints?: number } | null | undefined,
   sub: StudentExamSubmission | null | undefined
@@ -2087,16 +2129,8 @@ export function getSubmissionEffectiveScore(
     }
   }
 
-  const maxPoints = Number(exam.totalPoints) || 20
-  const isApproved = Boolean(
-    sub.teacherGrading?.approved ||
-    (sub.status as string) === 'released' ||
-    (sub.status as string) === 'approved' ||
-    sub.status === 'graded' ||
-    (sub.answers as any)?.teacher_approved ||
-    (sub.answers as any)?.approved ||
-    (sub.answers as any)?.is_released
-  )
+  const maxPoints = getExamMaxPoints(exam)
+  const isApproved = isSubmissionApprovedByTeacher(sub)
 
   const officialTeacherScaled = Number(
     sub.teacherGrading?.scaledScore20 ??
@@ -2110,21 +2144,35 @@ export function getSubmissionEffectiveScore(
     (sub.answers as any)?.raw_score
   )
 
-  // 1. If approved with explicit per-question scores, calculate authoritative sum
-  if (isApproved && sub.teacherGrading?.questionScores) {
+  const isManualTeacherGrade = Boolean(
+    sub.teacherGrading?.manualOverride === true ||
+    sub.status === 'graded'
+  )
+
+  const qScoresObj = sub.teacherGrading?.questionScores
+  const hasExplicitQuestionScores = Boolean(
+    qScoresObj &&
+    typeof qScoresObj === 'object' &&
+    Object.keys(qScoresObj).length > 0 &&
+    (exam.questions || []).some((q) => qScoresObj[q.id] !== undefined && qScoresObj[q.id] !== null)
+  )
+
+  // 1. If approved with explicit non-empty per-question scores, calculate authoritative sum (manual 0s strictly preserved)
+  if (isApproved && hasExplicitQuestionScores && qScoresObj) {
     const questionScores: Record<string, number> = {}
     let sum = 0
     for (const q of exam.questions || []) {
-      let qScore = safeScore(sub.teacherGrading.questionScores[q.id], Number(q.points) || 10, 0)
+      const hasExplicitForQ = qScoresObj[q.id] !== undefined && qScoresObj[q.id] !== null
+      let qScore = safeScore(qScoresObj[q.id], Number(q.points) || 1000, 0)
       const isBonusQ = q.id === 'q2' ? false : Boolean(q.awardFullScoreToAll || q.allOptionsCorrect || q.allAnswersCorrect || q.isBonusToAll)
-      if (isBonusQ) {
-        qScore = safeScore(q.points, 10, 2)
+      if (isBonusQ && !isManualTeacherGrade && !hasExplicitForQ) {
+        qScore = safeScore(q.points, 1000, 2)
       }
       questionScores[q.id] = qScore
       sum += qScore
     }
-    let totalScore = Math.min(maxPoints, Math.max(0, Math.round(sum * 100) / 100))
-    let scaledScore20 = safeScaled20(totalScore, maxPoints)
+    const totalScore = Math.min(maxPoints, Math.max(0, Math.round(sum * 100) / 100))
+    const scaledScore20 = safeScaled20(totalScore, maxPoints)
 
     return {
       isApproved: true,
@@ -2136,32 +2184,68 @@ export function getSubmissionEffectiveScore(
     }
   }
 
-  // 2. Evaluate from student actual answers against rubrics
+  // 2. If approved with an explicit manual scalar grade of 0 (even without per-question breakdown), preserve 0
+  const hasExplicitManualZeroScalar = Boolean(
+    isApproved &&
+    (
+      sub.teacherGrading?.manualOverride === true ||
+      (sub.status === 'graded' && Boolean(sub.teacherGrading?.approvedAt))
+    ) &&
+    (isNaN(officialTeacherTotal) || officialTeacherTotal === 0) &&
+    (isNaN(officialTeacherScaled) || officialTeacherScaled === 0)
+  )
+  if (hasExplicitManualZeroScalar) {
+    const zeroMap: Record<string, number> = {}
+    for (const q of exam.questions || []) zeroMap[q.id] = 0
+    return {
+      isApproved: true,
+      totalScore: 0,
+      maxPoints,
+      scaledScore20: 0,
+      questionScores: zeroMap,
+      status: 'needs_practice',
+    }
+  }
+
+  // 3. Evaluate from student actual answers against rubrics
   const evalResult = evaluateEntireExamSubmission(exam, sub.answers || {})
 
-  // 3. If approved by teacher without per-question scores, or using stored scalar scores:
-  if (isApproved && (!isNaN(officialTeacherScaled) || !isNaN(officialTeacherTotal))) {
-    let scaledScore20 = !isNaN(officialTeacherScaled) && officialTeacherScaled > 0
-      ? officialTeacherScaled
-      : safeScaled20(officialTeacherTotal, maxPoints)
-    let totalScore = !isNaN(officialTeacherTotal) && officialTeacherTotal > 0
-      ? officialTeacherTotal
-      : safeScore(Math.round(((scaledScore20 / 20) * maxPoints) * 10) / 10, maxPoints)
+  const hasNonEmptyTeacherGrade =
+    (!isNaN(officialTeacherScaled) && officialTeacherScaled > 0) ||
+    (!isNaN(officialTeacherTotal) && officialTeacherTotal > 0)
 
-    // Detection: If totalScore exceeds maxPoints, it was stored on the 20-point scale!
-    if (totalScore > maxPoints) {
-      if (!scaledScore20 || scaledScore20 <= 0) scaledScore20 = Math.min(20, totalScore)
-      totalScore = Math.min(maxPoints, Math.round(((scaledScore20 / 20) * maxPoints) * 10) / 10)
+  // 4. If approved by teacher with explicit non-zero scalar scores (without per-question breakdown):
+  if (isApproved && hasNonEmptyTeacherGrade) {
+    let totalScore = 0
+    let scaledScore20 = 0
+
+    // Guard: detect if a /20 score was mistakenly duplicated into totalScore on a non-20-point exam
+    const looksLike20CopiedToRaw =
+      !isNaN(officialTeacherTotal) &&
+      !isNaN(officialTeacherScaled) &&
+      officialTeacherScaled > 0 &&
+      officialTeacherScaled <= 20 &&
+      maxPoints !== 20 &&
+      Math.abs(officialTeacherTotal - officialTeacherScaled) < 0.01
+
+    if (looksLike20CopiedToRaw || officialTeacherTotal > maxPoints) {
+      const authoritative20 = !isNaN(officialTeacherScaled) && officialTeacherScaled > 0
+        ? officialTeacherScaled
+        : officialTeacherTotal
+      scaledScore20 = roundScore2(Math.min(20, Math.max(0, authoritative20)))
+      totalScore = Math.min(maxPoints, roundScore2((scaledScore20 / 20) * maxPoints))
+    } else if (!isNaN(officialTeacherTotal) && officialTeacherTotal > 0) {
+      totalScore = safeScore(officialTeacherTotal, maxPoints)
+      scaledScore20 = safeScaled20(totalScore, maxPoints)
+    } else {
+      scaledScore20 = roundScore2(Math.min(20, Math.max(0, officialTeacherScaled)))
+      totalScore = Math.min(maxPoints, roundScore2((scaledScore20 / 20) * maxPoints))
     }
 
-    // Critical Sanity Check: If student had wrong answers in actual submitted answers (e.g. wrongCount > 0),
-    // but stored score was an old stale 20/20 from previous universal bonus, use evalResult!
-    if (evalResult.wrongCount > 0 && scaledScore20 >= 20 && evalResult.scaledScore20 < 20) {
+    // Legacy stale universal-bonus guard (never overrides an explicit manual teacher grade)
+    if (!isManualTeacherGrade && evalResult.wrongCount > 0 && scaledScore20 >= 20 && evalResult.scaledScore20 < 20) {
       scaledScore20 = evalResult.scaledScore20
       totalScore = evalResult.earnedPoints
-    } else if (evalResult.earnedPoints > 0 && Math.abs(evalResult.earnedPoints - totalScore) < 0.5) {
-      totalScore = evalResult.earnedPoints
-      scaledScore20 = evalResult.scaledScore20
     }
 
     return {
@@ -2171,6 +2255,18 @@ export function getSubmissionEffectiveScore(
       scaledScore20,
       questionScores: evalResult.questionScores,
       status: scaledScore20 >= 16 ? 'excellent' : scaledScore20 >= 12 ? 'good' : 'needs_practice',
+    }
+  }
+
+  // 5. Approved/released legacy placeholder 0s (empty questionScores, no manualOverride, status !== 'graded')
+  if (isApproved) {
+    return {
+      isApproved: true,
+      totalScore: evalResult.earnedPoints,
+      maxPoints,
+      scaledScore20: evalResult.scaledScore20,
+      questionScores: evalResult.questionScores,
+      status: evalResult.scaledScore20 >= 16 ? 'excellent' : evalResult.scaledScore20 >= 12 ? 'good' : 'needs_practice',
     }
   }
 

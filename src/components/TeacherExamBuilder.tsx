@@ -24,8 +24,12 @@ import {
   sanitizeExamTitle,
   isPromptLike,
   generateUuid,
+  isExamResultsReleased,
+  findGradebookRowForExamSubmission,
+  syncExamApprovedGradesToGradebook,
+  fetchTeacherGradebookRows,
 } from '../utils/examStore'
-import { CLASS_STUDENTS_ROSTER } from '../classStudents'
+import { CLASS_STUDENTS_ROSTER, isTestStudentRecord } from '../classStudents'
 import { sortByLastName } from '../utils/persianSort'
 import { toPersianDigits } from '../utils/persianNumbers'
 import { realtimeSync } from '../services/realtimeSync'
@@ -37,10 +41,14 @@ import {
   cleanOptionText,
   safeNumber,
   safeScore,
+  safeScaled20,
+  roundScore2,
+  getExamMaxPoints,
   validateExamQuestion,
   validateExam,
   evaluateEntireExamSubmission,
   getSubmissionEffectiveScore,
+  isSubmissionApprovedByTeacher,
 } from '../utils/persianSemanticGrader'
 
 
@@ -113,6 +121,11 @@ export default function TeacherExamBuilder({
   const [releaseFeedbackMsg, setReleaseFeedbackMsg] = useState('')
   const [, setSubsRefreshKey] = useState(0)
   const [subsDisplayLayout, setSubsDisplayLayout] = useState<'table' | 'cards'>('table')
+  const [gradebookRows, setGradebookRows] = useState<any[]>([])
+  const [gradebookFetchState, setGradebookFetchState] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle')
+  const [gradebookFetchError, setGradebookFetchError] = useState<string | null>(null)
+  const [gradeSyncErrorBanner, setGradeSyncErrorBanner] = useState<string | null>(null)
+  const [isSyncingGradesTable, setIsSyncingGradesTable] = useState(false)
 
   function handleExportWhatsappExam(exam: Exam) {
     setWhatsappModalData({
@@ -581,7 +594,7 @@ export default function TeacherExamBuilder({
       updatedList = draftExam.questions.map((q) => (q.id === sanitizedQ.id ? sanitizedQ : q))
     }
     const pts = updatedList.reduce((sum, q) => sum + safeScore(q.points, 10, 2), 0)
-    setDraftExam({ ...draftExam, questions: updatedList, totalPoints: Math.round(pts * 10) / 10 })
+    setDraftExam({ ...draftExam, questions: updatedList, totalPoints: roundScore2(pts) })
     setEditingQ(null)
     setIsNewQuestionModal(false)
   }
@@ -729,14 +742,33 @@ export default function TeacherExamBuilder({
     }
   }
 
+  async function loadGradebookStatus() {
+    setGradebookFetchState('loading')
+    setGradebookFetchError(null)
+    const res = await fetchTeacherGradebookRows(teacherPassword)
+    if (res.ok) {
+      setGradebookRows(res.rows)
+      setGradebookFetchState('loaded')
+      setGradebookFetchError(null)
+    } else {
+      setGradebookRows([])
+      setGradebookFetchState('error')
+      setGradebookFetchError(res.error || 'خطا در بررسی وضعیت جدول grades')
+    }
+  }
+
   function openSubmissionsView(exam: Exam) {
     setSelectedExamForSubs(exam)
     setSelectedSubForGrading(null)
     setActiveView('review_subs')
     setReleaseFeedbackMsg('')
-    // Fresh fetch from Supabase to load all student submissions
+    setGradeSyncErrorBanner(null)
+    // Fresh fetch from Supabase to load all student submissions & verify grades table
     setIsRefreshingSubs(true)
-    fetchExamSubmissions(exam.id)
+    Promise.all([
+      fetchExamSubmissions(exam.id),
+      loadGradebookStatus(),
+    ])
       .catch((err) => console.warn('Could not fetch submissions from Supabase:', err))
       .finally(() => setIsRefreshingSubs(false))
   }
@@ -745,13 +777,42 @@ export default function TeacherExamBuilder({
     if (!selectedExamForSubs) return
     setIsRefreshingSubs(true)
     setReleaseFeedbackMsg('')
+    setGradeSyncErrorBanner(null)
     try {
-      await fetchExamSubmissions(selectedExamForSubs.id)
-      setReleaseFeedbackMsg('✓ پاسخ‌های دانش‌آموزان از پایگاه‌داده همگام‌سازی و به‌روز شدند.')
+      await Promise.all([
+        fetchExamSubmissions(selectedExamForSubs.id),
+        loadGradebookStatus(),
+      ])
+      setReleaseFeedbackMsg('✓ پاسخ‌های دانش‌آموزان و وضعیت جدول grades از پایگاه‌داده به‌روز شدند.')
     } catch (err: any) {
-      alert('خطا در دریافت پاسخ‌ها از سرور: ' + err.message)
+      setGradeSyncErrorBanner('خطا در دریافت پاسخ‌ها از سرور: ' + (err?.message || 'خطای شبکه'))
     } finally {
       setIsRefreshingSubs(false)
+    }
+  }
+
+  async function handleSyncMissingGradesToTable(examId: string) {
+    if (isSyncingGradesTable) return
+    setIsSyncingGradesTable(true)
+    setGradeSyncErrorBanner(null)
+    setReleaseFeedbackMsg('')
+    try {
+      const summary = await syncExamApprovedGradesToGradebook(examId, teacherPassword)
+      await loadGradebookStatus()
+      if (summary.failed > 0 || !summary.verifiedInGradesTable) {
+        const errDetail = summary.errors.length > 0 ? summary.errors.slice(0, 3).join(' | ') : 'تأیید نهایی در جدول grades برقرار نشد.'
+        setGradeSyncErrorBanner(
+          `⚠️ همگام‌سازی جدول grades: ${toPersianDigits(summary.succeeded)} موفق، ${toPersianDigits(summary.failed)} ناموفق — ${errDetail}`
+        )
+      } else {
+        setReleaseFeedbackMsg(
+          `✓ ${toPersianDigits(summary.succeeded)} نمره تاییدشده با موفقیت در جدول اصلی grades ثبت و تأیید شد.`
+        )
+      }
+    } catch (err: any) {
+      setGradeSyncErrorBanner('خطا در ثبت نمرات در جدول grades: ' + (err?.message || 'خطای شبکه'))
+    } finally {
+      setIsSyncingGradesTable(false)
     }
   }
 
@@ -766,8 +827,9 @@ export default function TeacherExamBuilder({
 
     setIsReleasingResults(true)
     setReleaseFeedbackMsg('')
+    setGradeSyncErrorBanner(null)
     try {
-      await releaseExamResultsForAll(selectedExamForSubs.id, teacherPassword, isCurrentlyReleased)
+      const res = await releaseExamResultsForAll(selectedExamForSubs.id, teacherPassword, isCurrentlyReleased)
       setSelectedExamForSubs((prev) =>
         prev
           ? {
@@ -779,14 +841,68 @@ export default function TeacherExamBuilder({
           : null
       )
       await loadExams()
-      await fetchExamSubmissions(selectedExamForSubs.id)
-      setReleaseFeedbackMsg(
-        !isCurrentlyReleased
-          ? '🎉 کارنامه و کلید سوالات با موفقیت تایید و برای تمامی دانش‌آموزان منتشر شد.'
-          : '🔒 انتشار کارنامه لغو شد و دسترسی دانش‌آموزان مجدداً به حالت انتظار درآمد.'
-      )
+      await Promise.all([
+        fetchExamSubmissions(selectedExamForSubs.id),
+        loadGradebookStatus(),
+      ])
+      if (!isCurrentlyReleased) {
+        const gs = res.gradeSyncSummary
+        if (gs && (gs.failed > 0 || !gs.verifiedInGradesTable)) {
+          setGradeSyncErrorBanner(
+            `⚠️ کارنامه پاسخ‌نامه منتشر شد اما ثبت در جدول grades برای ${toPersianDigits(gs.failed)} مورد با خطا مواجه شد: ${gs.errors.slice(0, 2).join(' | ')}`
+          )
+          setReleaseFeedbackMsg('پاسخ‌نامه‌ها تایید شدند؛ برای ثبت کامل در جدول اصلی grades خطای بالا را بررسی کنید.')
+        } else {
+          setReleaseFeedbackMsg(
+            `🎉 کارنامه و کلید سوالات تایید و ${gs ? `(${toPersianDigits(gs.succeeded)} نمره در جدول grades) ` : ''}با موفقیت ثبت و منتشر شد.`
+          )
+        }
+      } else {
+        setReleaseFeedbackMsg('🔒 انتشار کارنامه لغو شد و دسترسی دانش‌آموزان مجدداً به حالت انتظار درآمد.')
+      }
     } catch (err: any) {
-      alert('خطا در انتشار کارنامه: ' + (err.message || 'مشکل در ارتباط با سرور'))
+      setGradeSyncErrorBanner('خطا در انتشار کارنامه: ' + (err?.message || 'مشکل در ارتباط با سرور'))
+    } finally {
+      setIsReleasingResults(false)
+    }
+  }
+
+  async function handleApproveAllPendingSubs() {
+    if (!selectedExamForSubs) return
+    if (!window.confirm('آیا مایلید تمامی پاسخ‌نامه‌هایی که هنوز در انتظار تأیید هستند، تأیید و نمره آن‌ها در کارنامه دانش‌آموزان ثبت و منتشر شود؟')) return
+
+    setIsReleasingResults(true)
+    setReleaseFeedbackMsg('')
+    setGradeSyncErrorBanner(null)
+    try {
+      const res = await releaseExamResultsForAll(selectedExamForSubs.id, teacherPassword, false)
+      setSelectedExamForSubs((prev) =>
+        prev
+          ? {
+              ...prev,
+              resultsPublished: true,
+              isResultsReleased: true,
+              results_published: true,
+            }
+          : null
+      )
+      await loadExams()
+      await Promise.all([
+        fetchExamSubmissions(selectedExamForSubs.id),
+        loadGradebookStatus(),
+      ])
+      const gs = res.gradeSyncSummary
+      if (gs && (gs.failed > 0 || !gs.verifiedInGradesTable)) {
+        setGradeSyncErrorBanner(
+          `⚠️ پاسخ‌نامه‌ها تأیید شدند اما ${toPersianDigits(gs.failed)} نمره در جدول grades ثبت نشد: ${gs.errors.slice(0, 2).join(' | ')}`
+        )
+      } else {
+        setReleaseFeedbackMsg(
+          `🎉 نمرات تمامی پاسخ‌نامه‌های در انتظار تایید و در جدول grades ثبت شد (${toPersianDigits(gs?.succeeded || 0)} مورد).`
+        )
+      }
+    } catch (err: any) {
+      setGradeSyncErrorBanner('خطا در تأیید پاسخ‌های در انتظار: ' + (err?.message || 'مشکل در ارتباط با سرور'))
     } finally {
       setIsReleasingResults(false)
     }
@@ -803,8 +919,9 @@ export default function TeacherExamBuilder({
   async function handleApproveGrading() {
     if (!selectedExamForSubs || !selectedSubForGrading) return
     setGradingSuccessMsg('')
+    setGradeSyncErrorBanner(null)
     try {
-      await approveExamSubmission({
+      const savedSub: any = await approveExamSubmission({
         submissionId: selectedSubForGrading.id,
         exam: selectedExamForSubs,
         studentId: selectedSubForGrading.studentId,
@@ -818,14 +935,24 @@ export default function TeacherExamBuilder({
         studentId: selectedSubForGrading.studentId,
         id: selectedExamForSubs.id,
       }).catch(() => {})
-      setGradingSuccessMsg('نمره با موفقیت تایید و در کارنامه دانش‌آموز ثبت شد ✓')
+
+      await loadGradebookStatus()
+      const gs = savedSub?.gradeSync
+      if (gs && !gs.ok) {
+        const errText = `تأیید پاسخ‌نامه ذخیره شد، اما ثبت در جدول اصلی grades ناموفق بود: ${gs.error || 'خطای نامشخص'}`
+        setGradeSyncErrorBanner(errText)
+        setGradingSuccessMsg(`⚠️ ${errText}`)
+      } else {
+        setGradingSuccessMsg('نمره با موفقیت تایید و در جدول اصلی کارنامه (grades) ثبت شد ✓')
+      }
       setSubsRefreshKey((k) => k + 1)
       // Update local state
       const updatedList = getExamSubmissions(selectedExamForSubs.id)
       const reloadedSub = updatedList.find((s) => s.id === selectedSubForGrading.id)
       if (reloadedSub) setSelectedSubForGrading(reloadedSub)
     } catch (err: any) {
-      alert('خطا در ثبت نمره: ' + err.message)
+      const errText = 'خطا در ثبت نمره: ' + (err?.message || 'خطای سرور')
+      setGradeSyncErrorBanner(errText)
     }
   }
 
@@ -846,14 +973,24 @@ export default function TeacherExamBuilder({
   async function handleApplyRegrade() {
     if (!regradePreview) return
     setIsApplyingRegrade(true)
+    setGradeSyncErrorBanner(null)
     try {
       const res = await applyRegradeExamSubmissions({
         examId: regradePreview.examId,
         overrideApproved: overrideApprovedRegrade,
         teacherPassword,
       })
+      await Promise.all([
+        fetchExamSubmissions(regradePreview.examId),
+        loadGradebookStatus(),
+      ])
+      const gs = res.gradeSyncSummary
+      if (gs && gs.failed > 0) {
+        setGradeSyncErrorBanner(
+          `⚠️ بازتصحیح اعمال شد اما بروزرسانی جدول grades برای ${toPersianDigits(gs.failed)} مورد با خطا مواجه شد: ${gs.errors.slice(0, 2).join(' | ')}`
+        )
+      }
       setRegradeResultSummary(`✓ بازتصحیح هوشمند با موفقیت روی ${res.updatedCount} پاسخ‌نامه اعمال و ذخیره شد.`)
-      await fetchExamSubmissions(regradePreview.examId)
       setTimeout(() => {
         setRegradePreview(null)
         setRegradeResultSummary(null)
@@ -2329,9 +2466,11 @@ export default function TeacherExamBuilder({
           {/* Release and Statistics Banner */}
           {(() => {
             const currentSubmissions = getExamSubmissions(selectedExamForSubs.id)
+            const realSubs = currentSubmissions.filter((s) => !isTestStudentRecord(s.studentId, s.studentName))
+            const pendingUnapprovedCount = realSubs.filter((s) => !isSubmissionApprovedByTeacher(s)).length
             const isReleased = !!(selectedExamForSubs.resultsPublished || selectedExamForSubs.isResultsReleased)
             const totalClassStudents = CLASS_STUDENTS_ROSTER.length || 40
-            const submissionCount = currentSubmissions.length
+            const submissionCount = realSubs.length
 
             return (
               <div
@@ -2342,69 +2481,163 @@ export default function TeacherExamBuilder({
                   padding: '14px 16px',
                   marginBottom: 16,
                   display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  flexWrap: 'wrap',
-                  gap: 12,
+                  flexDirection: 'column',
+                  gap: 10,
                 }}
               >
-                <div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                    <span
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    flexWrap: 'wrap',
+                    gap: 12,
+                  }}
+                >
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                      <span
+                        style={{
+                          fontSize: 12,
+                          fontWeight: 900,
+                          padding: '3px 10px',
+                          borderRadius: 999,
+                          background: isReleased ? '#DCFCE7' : '#FEF3C7',
+                          color: isReleased ? '#15803D' : '#B45309',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 4,
+                        }}
+                      >
+                        {isReleased ? '🟢 کارنامه منتشر شده است' : '🔒 کارنامه قفل است (در انتظار تایید معلم)'}
+                      </span>
+                      <span style={{ fontSize: 13, fontWeight: 800, color: '#1E293B' }}>
+                        تعداد پاسخ‌های دریافتی: <strong>{submissionCount}</strong> از <strong>{totalClassStudents}</strong> دانش‌آموز ({Math.round((submissionCount / totalClassStudents) * 100)}%)
+                      </span>
+                    </div>
+                    <p style={{ margin: 0, fontSize: 12, color: '#475569', lineHeight: 1.5 }}>
+                      {isReleased
+                        ? 'دانش‌آموزانی که پاسخ‌نامه آن‌ها تأیید شده باشد، کارنامه و نمره خود را مشاهده می‌کنند.'
+                        : 'تا زمانی که دکمه «تایید و انتشار کارنامه برای همه» را نزنید، دانش‌آموزان به نمرات و کلید سوالات دسترسی نخواهند داشت و پیام «در انتظار تایید معلم» می‌بینند.'}
+                    </p>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                    {isReleased && pendingUnapprovedCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleApproveAllPendingSubs}
+                        disabled={isReleasingResults}
+                        style={{
+                          background: '#16A34A',
+                          color: '#FFFFFF',
+                          border: '2px solid var(--black)',
+                          borderRadius: 10,
+                          padding: '8px 14px',
+                          fontSize: 12.5,
+                          fontWeight: 900,
+                          cursor: isReleasingResults ? 'wait' : 'pointer',
+                        }}
+                      >
+                        {`✅ تایید و انتشار ${pendingUnapprovedCount} پاسخ در انتظار`}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={handleToggleReleaseResults}
+                      disabled={isReleasingResults}
                       style={{
-                        fontSize: 12,
+                        background: isReleased ? '#DC2626' : '#16A34A',
+                        color: '#FFFFFF',
+                        border: '2px solid var(--black)',
+                        borderRadius: 10,
+                        padding: '8px 16px',
+                        fontSize: 13,
                         fontWeight: 900,
-                        padding: '3px 10px',
-                        borderRadius: 999,
-                        background: isReleased ? '#DCFCE7' : '#FEF3C7',
-                        color: isReleased ? '#15803D' : '#B45309',
+                        cursor: isReleasingResults ? 'wait' : 'pointer',
                         display: 'inline-flex',
                         alignItems: 'center',
-                        gap: 4,
+                        gap: 6,
                       }}
                     >
-                      {isReleased ? '🟢 کارنامه منتشر شده است' : '🔒 کارنامه قفل است (در انتظار تایید معلم)'}
-                    </span>
-                    <span style={{ fontSize: 13, fontWeight: 800, color: '#1E293B' }}>
-                      تعداد پاسخ‌های دریافتی: <strong>{submissionCount}</strong> از <strong>{totalClassStudents}</strong> دانش‌آموز ({Math.round((submissionCount / totalClassStudents) * 100)}%)
-                    </span>
+                      {isReleasingResults
+                        ? 'در حال اعمال...'
+                        : isReleased
+                        ? '🔒 لغو انتشار و مخفی‌سازی کارنامه'
+                        : '📢 تایید و انتشار کارنامه برای همه'}
+                    </button>
                   </div>
-                  <p style={{ margin: 0, fontSize: 12, color: '#475569', lineHeight: 1.5 }}>
-                    {isReleased
-                      ? 'هم‌اکنون تمامی دانش‌آموزانی که آزمون را ثبت کرده‌اند، می‌توانند کارنامه، نمره و کلید سوالات را مشاهده کنند.'
-                      : 'تا زمانی که دکمه «تایید و انتشار کارنامه برای همه» را نزنید، دانش‌آموزان به نمرات و کلید سوالات دسترسی نخواهند داشت و پیام «در انتظار تایید معلم» می‌بینند.'}
-                  </p>
                 </div>
 
-                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                  <button
-                    type="button"
-                    onClick={handleToggleReleaseResults}
-                    disabled={isReleasingResults}
-                    style={{
-                      background: isReleased ? '#DC2626' : '#16A34A',
-                      color: '#FFFFFF',
-                      border: '2px solid var(--black)',
-                      borderRadius: 10,
-                      padding: '8px 16px',
-                      fontSize: 13,
-                      fontWeight: 900,
-                      cursor: isReleasingResults ? 'wait' : 'pointer',
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: 6,
-                    }}
-                  >
-                    {isReleasingResults
-                      ? 'در حال اعمال...'
-                      : isReleased
-                      ? '🔒 لغو انتشار و مخفی‌سازی کارنامه'
-                      : '📢 تایید و انتشار کارنامه برای همه'}
-                  </button>
-                </div>
+                {isReleased && pendingUnapprovedCount > 0 && (
+                  <div style={{ background: '#FEF3C7', border: '1px solid #F59E0B', borderRadius: 10, padding: '8px 12px', fontSize: 12, fontWeight: 700, color: '#92400E' }}>
+                    ⚠️ توجه: {pendingUnapprovedCount} پاسخ‌نامه هنوز در وضعیت «در انتظار تأیید» هستند و تا زمان تأیید شما، نمره آن‌ها برای دانش‌آموزان مخفی می‌ماند.
+                  </div>
+                )}
+
+                {(() => {
+                  const approvedRealSubs = realSubs.filter((s) => isSubmissionApprovedByTeacher(s) && isExamResultsReleased(selectedExamForSubs, s))
+                  const missingInGradesCount =
+                    gradebookFetchState === 'loaded'
+                      ? approvedRealSubs.filter((s) => !findGradebookRowForExamSubmission(gradebookRows, selectedExamForSubs, s.studentId, s.studentName)).length
+                      : 0
+
+                  if (gradebookFetchState === 'error') {
+                    return (
+                      <div style={{ background: '#FEF2F2', border: '1px solid #FCA5A5', borderRadius: 10, padding: '8px 12px', fontSize: 12, fontWeight: 700, color: '#991B1B' }}>
+                        ⚠️ بررسی ثبت واقعی در جدول اصلی grades ممکن نشد: {gradebookFetchError}
+                      </div>
+                    )
+                  }
+
+                  if (gradebookFetchState === 'loaded' && missingInGradesCount > 0) {
+                    return (
+                      <div style={{ background: '#FFF7ED', border: '1.5px solid #FB923C', borderRadius: 10, padding: '10px 12px', fontSize: 12, fontWeight: 700, color: '#9A3412', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
+                        <span>
+                          ⚠️ برای {toPersianDigits(missingInGradesCount)} دانش‌آموز تأییدشده، رکوردی در جدول اصلی <code>grades</code> یافت نشد و نمره فعلاً از منبع جایگزین پاسخ‌نامه خوانده می‌شود.
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleSyncMissingGradesToTable(selectedExamForSubs.id)}
+                          disabled={isSyncingGradesTable}
+                          style={{
+                            background: '#EA580C',
+                            color: '#FFFFFF',
+                            border: '2px solid var(--black)',
+                            borderRadius: 8,
+                            padding: '6px 12px',
+                            fontSize: 12,
+                            fontWeight: 900,
+                            cursor: isSyncingGradesTable ? 'wait' : 'pointer',
+                          }}
+                        >
+                          {isSyncingGradesTable ? '⏳ در حال ثبت...' : '📥 ثبت نمرات تاییدشده در جدول اصلی grades'}
+                        </button>
+                      </div>
+                    )
+                  }
+                  return null
+                })()}
               </div>
             )
           })()}
+
+          {gradeSyncErrorBanner && (
+            <div
+              style={{
+                background: '#FEF2F2',
+                color: '#991B1B',
+                border: '1.5px solid #F87171',
+                borderRadius: 10,
+                padding: '8px 12px',
+                fontSize: 12.5,
+                fontWeight: 800,
+                marginBottom: 14,
+              }}
+            >
+              {gradeSyncErrorBanner}
+            </div>
+          )}
 
           {releaseFeedbackMsg && (
             <div
@@ -2437,20 +2670,49 @@ export default function TeacherExamBuilder({
                 </div>
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span
-                    style={{
-                      fontSize: 12,
-                      fontWeight: 800,
-                      padding: '4px 10px',
-                      borderRadius: 999,
-                      background: selectedSubForGrading.teacherGrading?.approved ? '#DCFCE7' : '#FEF3C7',
-                      color: selectedSubForGrading.teacherGrading?.approved ? '#166534' : '#92400E',
-                    }}
-                  >
-                    {selectedSubForGrading.teacherGrading?.approved
-                      ? '✓ تایید و در کارنامه ثبت شده'
-                      : '✅ ارسال شد (نیاز به بازبینی و تایید)'}
-                  </span>
+                  {(() => {
+                    const isSubApproved = isSubmissionApprovedByTeacher(selectedSubForGrading)
+                    const isSubReleased = isExamResultsReleased(selectedExamForSubs, selectedSubForGrading)
+                    const hasGradesRow =
+                      gradebookFetchState === 'loaded' &&
+                      Boolean(findGradebookRowForExamSubmission(gradebookRows, selectedExamForSubs, selectedSubForGrading.studentId, selectedSubForGrading.studentName))
+                    let badgeBg = '#FEF3C7'
+                    let badgeColor = '#92400E'
+                    let badgeText = '⏳ ارسال شد (نیاز به بازبینی و تایید)'
+                    if (isSubApproved && isSubReleased) {
+                      if (gradebookFetchState === 'loaded') {
+                        badgeBg = hasGradesRow ? '#DCFCE7' : '#FFEDD5'
+                        badgeColor = hasGradesRow ? '#166534' : '#9A3412'
+                        badgeText = hasGradesRow ? '✓ ثبت در کارنامه (جدول grades)' : '⚠️ نمایش از پاسخ‌نامه (در جدول grades ثبت نشده)'
+                      } else if (gradebookFetchState === 'error') {
+                        badgeBg = '#FEF2F2'
+                        badgeColor = '#991B1B'
+                        badgeText = '⚠️ تاییدشده (خطا در بررسی جدول grades)'
+                      } else {
+                        badgeBg = '#DBEAFE'
+                        badgeColor = '#1D4ED8'
+                        badgeText = '⏳ در حال بررسی ثبت در جدول grades...'
+                      }
+                    } else if (isSubApproved) {
+                      badgeBg = '#DBEAFE'
+                      badgeColor = '#1D4ED8'
+                      badgeText = '✔ تایید معلم (کارنامه قفل)'
+                    }
+                    return (
+                      <span
+                        style={{
+                          fontSize: 12,
+                          fontWeight: 800,
+                          padding: '4px 10px',
+                          borderRadius: 999,
+                          background: badgeBg,
+                          color: badgeColor,
+                        }}
+                      >
+                        {badgeText}
+                      </span>
+                    )
+                  })()}
                   <button
                     type="button"
                     className="btn secondary"
@@ -2605,12 +2867,24 @@ export default function TeacherExamBuilder({
                 )}
 
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 12, flexWrap: 'wrap', gap: 10 }}>
-                  <div style={{ fontSize: 15, fontWeight: 900 }}>
-                    مجموع نمره نهایی:{' '}
-                    <span style={{ color: '#2563EB' }}>
-                      {toPersianDigits(Math.round(Object.values(teacherScoresDraft).reduce((sum, v) => sum + (v || 0), 0) * 100) / 100)} از {toPersianDigits(selectedExamForSubs.totalPoints)}
-                    </span>
-                  </div>
+                  {(() => {
+                    const maxPts = getExamMaxPoints(selectedExamForSubs)
+                    const sumDraft = roundScore2(
+                      Object.values(teacherScoresDraft).reduce((sum, v) => sum + (v || 0), 0)
+                    )
+                    const scaledDraft = safeScaled20(sumDraft, maxPts)
+                    return (
+                      <div style={{ fontSize: 15, fontWeight: 900 }}>
+                        مجموع نمره نهایی:{' '}
+                        <span style={{ color: '#2563EB' }}>
+                          {toPersianDigits(sumDraft)} از {toPersianDigits(maxPts)}
+                        </span>{' '}
+                        <span style={{ fontSize: 13, color: '#059669' }}>
+                          (معادل {toPersianDigits(scaledDraft)} از ۲۰)
+                        </span>
+                      </div>
+                    )
+                  })()}
 
                   <button
                     type="button"
@@ -2687,10 +2961,10 @@ export default function TeacherExamBuilder({
                           <tr style={{ background: '#F8FAFC', borderBottom: '2px solid #CBD5E1', color: '#1E293B' }}>
                             <th style={{ padding: '10px 12px', width: 40, textAlign: 'center' }}>ردیف</th>
                             <th style={{ padding: '10px 12px' }}>نام دانش‌آموز</th>
-                            <th style={{ padding: '10px 12px', textAlign: 'center' }}>نمره قبلی سامانه</th>
-                            <th style={{ padding: '10px 12px', textAlign: 'center' }}>نمره پیشنهادی موتور اصلاح‌شده</th>
+                            <th style={{ padding: '10px 12px', textAlign: 'center' }}>نمره رسمی کارنامه</th>
+                            <th style={{ padding: '10px 12px', textAlign: 'center' }}>امتیاز پیشنهادی هوشمند</th>
                             <th style={{ padding: '10px 12px', textAlign: 'center' }}>مجموع نمرات سؤالات</th>
-                            <th style={{ padding: '10px 12px', textAlign: 'center' }}>وضعیت تایید</th>
+                            <th style={{ padding: '10px 12px', textAlign: 'center' }}>وضعیت تایید و انتشار</th>
                             <th style={{ padding: '10px 12px', textAlign: 'center' }}>عملیات</th>
                           </tr>
                         </thead>
@@ -2698,18 +2972,20 @@ export default function TeacherExamBuilder({
                           {sortByLastName(getExamSubmissions(selectedExamForSubs.id), 'studentName').map((sub, sIdx) => {
                             const eff = getSubmissionEffectiveScore(selectedExamForSubs, sub)
                             const isApproved = eff.isApproved
-                            const oldScore = sub.teacherGrading?.totalScore ?? sub.aiGrading?.totalScore ?? 0
+                            const isReleased = isExamResultsReleased(selectedExamForSubs, sub)
+                            const maxPts = eff.maxPoints
                             const freshEval = evaluateEntireExamSubmission(selectedExamForSubs, sub.answers || {})
                             const newProposedScore = freshEval.earnedPoints
-                            const sumQuestions = Object.values(freshEval.questionGrading).reduce((acc, qg: any) => acc + (qg?.score || 0), 0)
-                            const roundedSumQuestions = Math.round(sumQuestions * 100) / 100
+                            const sumQuestions = Object.values(eff.questionScores).reduce((acc, v: any) => acc + (Number(v) || 0), 0)
+                            const roundedSumQuestions = roundScore2(sumQuestions)
+                            const storedLegacyTotal = sub.teacherGrading?.totalScore
 
                             return (
                               <tr
                                 key={sub.id}
                                 style={{
                                   borderBottom: '1px solid #E2E8F0',
-                                  background: isApproved ? '#F0FDF4' : sIdx % 2 === 0 ? '#FFFFFF' : '#FAFAFA',
+                                  background: isApproved && isReleased ? '#F0FDF4' : isApproved ? '#EFF6FF' : sIdx % 2 === 0 ? '#FFFFFF' : '#FAFAFA',
                                 }}
                               >
                                 <td style={{ padding: '10px 12px', textAlign: 'center', color: '#64748B', fontWeight: 700 }}>
@@ -2717,35 +2993,93 @@ export default function TeacherExamBuilder({
                                 </td>
                                 <td style={{ padding: '10px 12px', fontWeight: 900, color: '#0F172A' }}>
                                   👤 {sub.studentName}
-                                  {(sub.studentId === 'test_preview_student' || sub.studentName?.includes('تست معلم')) && (
+                                  {isTestStudentRecord(sub.studentId, sub.studentName) && (
                                     <span style={{ marginRight: 6, fontSize: 10.5, padding: '2px 8px', borderRadius: 999, background: '#E0E7FF', color: '#4338CA', fontWeight: 800 }}>
                                       🧪 حساب آزمایشی معلم
                                     </span>
                                   )}
                                 </td>
-                                <td style={{ padding: '10px 12px', textAlign: 'center', color: '#64748B', fontWeight: 800 }}>
-                                  {toPersianDigits(oldScore)} از {toPersianDigits(selectedExamForSubs.totalPoints)}
+                                <td style={{ padding: '10px 12px', textAlign: 'center', fontWeight: 900 }}>
+                                  {isApproved ? (
+                                    <div style={{ color: isReleased ? '#166534' : '#1D4ED8' }}>
+                                      {toPersianDigits(eff.scaledScore20)} از ۲۰
+                                      <div style={{ fontSize: 11, color: '#64748B', fontWeight: 700 }}>
+                                        ({toPersianDigits(eff.totalScore)} از {toPersianDigits(maxPts)})
+                                      </div>
+                                    </div>
+                                  ) : (
+                                    <div style={{ color: '#92400E' }}>
+                                      ثبت‌نشده
+                                      {typeof storedLegacyTotal === 'number' && (
+                                        <div style={{ fontSize: 10.5, color: '#94A3B8', fontWeight: 700 }}>
+                                          (نمره قبلی سامانه: {toPersianDigits(storedLegacyTotal)} از {toPersianDigits(maxPts)})
+                                        </div>
+                                      )}
+                                    </div>
+                                  )}
                                 </td>
                                 <td style={{ padding: '10px 12px', textAlign: 'center', color: '#1E40AF', fontWeight: 900 }}>
-                                  {toPersianDigits(newProposedScore)} از {toPersianDigits(selectedExamForSubs.totalPoints)}
+                                  {toPersianDigits(freshEval.scaledScore20)} از ۲۰
+                                  <div style={{ fontSize: 11, color: '#64748B', fontWeight: 700 }}>
+                                    ({toPersianDigits(newProposedScore)} از {toPersianDigits(maxPts)})
+                                  </div>
                                 </td>
-                                <td style={{ padding: '10px 12px', textAlign: 'center', color: '#166534', fontWeight: 900 }}>
-                                  {toPersianDigits(roundedSumQuestions)} از {toPersianDigits(selectedExamForSubs.totalPoints)}
+                                <td style={{ padding: '10px 12px', textAlign: 'center', color: isApproved ? '#166534' : '#475569', fontWeight: 900 }}>
+                                  {toPersianDigits(isApproved ? roundedSumQuestions : newProposedScore)} از {toPersianDigits(maxPts)}
+                                  {!isApproved && (
+                                    <div style={{ fontSize: 10.5, color: '#94A3B8', fontWeight: 700 }}>
+                                      (پیشنهادی)
+                                    </div>
+                                  )}
                                 </td>
                                 <td style={{ padding: '10px 12px', textAlign: 'center' }}>
-                                  <span
-                                    style={{
-                                      fontSize: 11,
-                                      fontWeight: 800,
-                                      padding: '3px 8px',
-                                      borderRadius: 999,
-                                      background: isApproved ? '#DCFCE7' : '#FEF3C7',
-                                      color: isApproved ? '#166534' : '#92400E',
-                                      display: 'inline-block',
-                                    }}
-                                  >
-                                    {isApproved ? '✓ ثبت در کارنامه' : '⏳ نیازمند بررسی معلم'}
-                                  </span>
+                                  {(() => {
+                                    const isTestRow = isTestStudentRecord(sub.studentId, sub.studentName)
+                                    const hasGradesRow =
+                                      gradebookFetchState === 'loaded' &&
+                                      Boolean(findGradebookRowForExamSubmission(gradebookRows, selectedExamForSubs, sub.studentId, sub.studentName))
+                                    let bg = '#FEF3C7'
+                                    let fg = '#92400E'
+                                    let label = '⏳ نیازمند بررسی معلم'
+                                    if (isApproved && isReleased) {
+                                      if (isTestRow) {
+                                        bg = '#E0E7FF'
+                                        fg = '#4338CA'
+                                        label = '🧪 تاییدشده (حساب آزمایشی)'
+                                      } else if (gradebookFetchState === 'loaded') {
+                                        bg = hasGradesRow ? '#DCFCE7' : '#FFEDD5'
+                                        fg = hasGradesRow ? '#166534' : '#9A3412'
+                                        label = hasGradesRow ? '✓ ثبت در کارنامه' : '⚠️ نمایش از پاسخ‌نامه (در جدول grades ثبت نشده)'
+                                      } else if (gradebookFetchState === 'error') {
+                                        bg = '#FEF2F2'
+                                        fg = '#991B1B'
+                                        label = '⚠️ تاییدشده (خطا در بررسی grades)'
+                                      } else {
+                                        bg = '#DBEAFE'
+                                        fg = '#1D4ED8'
+                                        label = '⏳ در حال بررسی grades...'
+                                      }
+                                    } else if (isApproved) {
+                                      bg = '#DBEAFE'
+                                      fg = '#1D4ED8'
+                                      label = '✔ تایید معلم (کارنامه قفل)'
+                                    }
+                                    return (
+                                      <span
+                                        style={{
+                                          fontSize: 11,
+                                          fontWeight: 800,
+                                          padding: '3px 8px',
+                                          borderRadius: 999,
+                                          background: bg,
+                                          color: fg,
+                                          display: 'inline-block',
+                                        }}
+                                      >
+                                        {label}
+                                      </span>
+                                    )
+                                  })()}
                                 </td>
                                 <td style={{ padding: '10px 12px', textAlign: 'center' }}>
                                   <button
@@ -2769,7 +3103,8 @@ export default function TeacherExamBuilder({
                       {sortByLastName(getExamSubmissions(selectedExamForSubs.id), 'studentName').map((sub) => {
                         const eff = getSubmissionEffectiveScore(selectedExamForSubs, sub)
                         const isApproved = eff.isApproved
-                        const roundedDisplayedScore = eff.totalScore
+                        const isReleased = isExamResultsReleased(selectedExamForSubs, sub)
+                        const freshEval = evaluateEntireExamSubmission(selectedExamForSubs, sub.answers || {})
 
                         return (
                           <div
@@ -2780,8 +3115,8 @@ export default function TeacherExamBuilder({
                               alignItems: 'center',
                               padding: 12,
                               borderRadius: 12,
-                              background: isApproved ? '#F0FDF4' : '#FFFBEB',
-                              border: isApproved ? '1.5px solid #86EFAC' : '1.5px solid #FDE68A',
+                              background: isApproved && isReleased ? '#F0FDF4' : isApproved ? '#EFF6FF' : '#FFFBEB',
+                              border: isApproved && isReleased ? '1.5px solid #86EFAC' : isApproved ? '1.5px solid #93C5FD' : '1.5px solid #FDE68A',
                               flexWrap: 'wrap',
                               gap: 10,
                             }}
@@ -2789,32 +3124,78 @@ export default function TeacherExamBuilder({
                             <div>
                               <div style={{ fontSize: 14, fontWeight: 900, color: '#0F172A', display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
                                 <span>👤 {sub.studentName}</span>
-                                {(sub.studentId === 'test_preview_student' || sub.studentName?.includes('تست معلم')) && (
+                                {isTestStudentRecord(sub.studentId, sub.studentName) && (
                                   <span style={{ fontSize: 10.5, padding: '2px 8px', borderRadius: 999, background: '#E0E7FF', color: '#4338CA', fontWeight: 800 }}>
                                     🧪 حساب آزمایشی معلم
                                   </span>
                                 )}
                               </div>
                               <div style={{ fontSize: 12, color: '#64748B' }}>
-                                ارسال‌شده در {sub.submittedAt ? new Date(sub.submittedAt).toLocaleTimeString('fa-IR') : 'نامشخص'} • نمره:{' '}
-                                <strong>{toPersianDigits(roundedDisplayedScore)} از {toPersianDigits(selectedExamForSubs.totalPoints)}</strong>
-                                {!isApproved && ' (نیازمند بررسی و تایید)'}
+                                ارسال‌شده در {sub.submittedAt ? new Date(sub.submittedAt).toLocaleTimeString('fa-IR') : 'نامشخص'} •{' '}
+                                {isApproved ? (
+                                  <>
+                                    نمره رسمی:{' '}
+                                    <strong style={{ color: '#2563EB' }}>{toPersianDigits(eff.scaledScore20)} از ۲۰</strong>{' '}
+                                    <span>({toPersianDigits(eff.totalScore)} از {toPersianDigits(eff.maxPoints)})</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    پیشنهادی هوشمند:{' '}
+                                    <strong style={{ color: '#1E40AF' }}>{toPersianDigits(freshEval.scaledScore20)} از ۲۰</strong>{' '}
+                                    <span>({toPersianDigits(freshEval.earnedPoints)} از {toPersianDigits(eff.maxPoints)})</span>
+                                    {' '}• در انتظار تایید معلم
+                                  </>
+                                )}
                               </div>
                             </div>
 
                             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                              <span
-                                style={{
-                                  fontSize: 11,
-                                  fontWeight: 800,
-                                  padding: '2px 8px',
-                                  borderRadius: 999,
-                                  background: isApproved ? '#DCFCE7' : '#FEF3C7',
-                                  color: isApproved ? '#166534' : '#92400E',
-                                }}
-                              >
-                                {isApproved ? '✓ ثبت در کارنامه' : '⏳ نیازمند تایید معلم'}
-                              </span>
+                              {(() => {
+                                const isTestRow = isTestStudentRecord(sub.studentId, sub.studentName)
+                                const hasGradesRow =
+                                  gradebookFetchState === 'loaded' &&
+                                  Boolean(findGradebookRowForExamSubmission(gradebookRows, selectedExamForSubs, sub.studentId, sub.studentName))
+                                let bg = '#FEF3C7'
+                                let fg = '#92400E'
+                                let label = '⏳ نیازمند تایید معلم'
+                                if (isApproved && isReleased) {
+                                  if (isTestRow) {
+                                    bg = '#E0E7FF'
+                                    fg = '#4338CA'
+                                    label = '🧪 تاییدشده (حساب آزمایشی)'
+                                  } else if (gradebookFetchState === 'loaded') {
+                                    bg = hasGradesRow ? '#DCFCE7' : '#FFEDD5'
+                                    fg = hasGradesRow ? '#166534' : '#9A3412'
+                                    label = hasGradesRow ? '✓ ثبت در کارنامه' : '⚠️ نمایش از پاسخ‌نامه (در جدول grades ثبت نشده)'
+                                  } else if (gradebookFetchState === 'error') {
+                                    bg = '#FEF2F2'
+                                    fg = '#991B1B'
+                                    label = '⚠️ تاییدشده (خطا در بررسی grades)'
+                                  } else {
+                                    bg = '#DBEAFE'
+                                    fg = '#1D4ED8'
+                                    label = '⏳ در حال بررسی grades...'
+                                  }
+                                } else if (isApproved) {
+                                  bg = '#DBEAFE'
+                                  fg = '#1D4ED8'
+                                  label = '✔ تایید معلم (قفل)'
+                                }
+                                return (
+                                  <span
+                                    style={{
+                                      fontSize: 11,
+                                      fontWeight: 800,
+                                      padding: '2px 8px',
+                                      borderRadius: 999,
+                                      background: bg,
+                                      color: fg,
+                                    }}
+                                  >
+                                    {label}
+                                  </span>
+                                )
+                              })()}
 
                               <button
                                 type="button"

@@ -5,6 +5,14 @@ import { sortByLastName } from '../utils/persianSort'
 import { CLASS_STUDENTS_ROSTER } from '../classStudents'
 import { realtimeSync } from '../services/realtimeSync'
 import { fetchFilteredPublishedPosts } from '../utils/networkResilience'
+import { Exam, StudentExamSubmission } from '../types/examTypes'
+import {
+  fetchAllExams,
+  fetchExamSubmissions,
+  getLocalExams,
+  getLocalSubmissions,
+  mergeSubmissionsDeduplicated,
+} from '../utils/examStore'
 
 export function useClassroomData(teacherPassword: string) {
   // Safe initial state from roster so UI is never stuck on empty
@@ -40,6 +48,10 @@ export function useClassroomData(teacherPassword: string) {
   const [attendanceToday, setAttendanceToday] = useState<Record<string, string>>({})
   const [allAttendance, setAllAttendance] = useState<any[]>([])
   const [grades, setGrades] = useState<any[]>([])
+  const [exams, setExams] = useState<Exam[]>(() => getLocalExams())
+  const [examSubmissions, setExamSubmissions] = useState<StudentExamSubmission[]>(() =>
+    mergeSubmissionsDeduplicated([], getLocalSubmissions())
+  )
   const [loading, setLoading] = useState(() => {
     try {
       if (typeof localStorage !== 'undefined') {
@@ -88,9 +100,11 @@ export function useClassroomData(teacherPassword: string) {
         supabase.rpc('teacher_list_submissions', { p_password: effectivePassword }),
         supabase.rpc('teacher_list_attendance', { p_password: effectivePassword }),
         supabase.rpc('teacher_list_grades', { p_password: effectivePassword }),
+        fetchAllExams(effectivePassword).catch(() => getLocalExams()),
+        fetchExamSubmissions(undefined, undefined, true).catch(() => mergeSubmissionsDeduplicated([], getLocalSubmissions())),
       ])
 
-      const [s, p, sub, allAtt, g] = (await Promise.race([fetchPromise, timeoutPromise])) as any[]
+      const [s, p, sub, allAtt, g, loadedExams, loadedExamSubs] = (await Promise.race([fetchPromise, timeoutPromise])) as any[]
 
       // Update students roster with backend data or fallback
       if (s?.data && Array.isArray(s.data) && s.data.length > 0) {
@@ -136,6 +150,12 @@ export function useClassroomData(teacherPassword: string) {
       setAttendanceToday(attMap)
       setAllAttendance(allAtt?.data || [])
       setGrades(g?.data || [])
+      if (Array.isArray(loadedExams)) {
+        setExams(loadedExams)
+      }
+      if (Array.isArray(loadedExamSubs)) {
+        setExamSubmissions(mergeSubmissionsDeduplicated([], loadedExamSubs))
+      }
       hasLoadedOnce.current = true
     } catch (err: any) {
       console.warn('[useClassroomData] Error fetching classroom data:', err)
@@ -194,8 +214,8 @@ export function useClassroomData(teacherPassword: string) {
             return updated
           })
         }
-      } else if (event.type === 'submission' || event.type === 'grade' || event.type === 'attendance') {
-        // Silently refresh teacher data when students submit or grades change
+      } else if (event.type === 'submission' || event.type === 'grade' || event.type === 'attendance' || event.type === 'exam') {
+        // Silently refresh teacher data when students submit or exams/grades change
         loadAll()
       }
     })
@@ -212,6 +232,8 @@ export function useClassroomData(teacherPassword: string) {
     attendanceToday,
     allAttendance,
     grades,
+    exams,
+    examSubmissions,
     loading,
     error,
     reload: loadAll,

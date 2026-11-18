@@ -1,3 +1,5 @@
+import { roundScore2 } from './utils/persianSemanticGrader'
+
 export interface SkillGroup {
   subject: string
   avg: number
@@ -36,11 +38,11 @@ export function groupSkillMastery(grades: any[]): SkillGroup[] {
 
   const result: SkillGroup[] = []
   for (const [subject, data] of subjectMap.entries()) {
-    const avg = data.count > 0 ? Math.round((data.totalScaled / data.count) * 10) / 10 : 0
+    const avg = data.count > 0 ? roundScore2(data.totalScaled / data.count) : 0
     const skills: { skill: string; avg: number; color?: string }[] = []
 
     for (const [skillName, sData] of data.skillMap.entries()) {
-      const sAvg = sData.count > 0 ? Math.round((sData.totalScaled / sData.count) * 10) / 10 : 0
+      const sAvg = sData.count > 0 ? roundScore2(sData.totalScaled / sData.count) : 0
       const color = sAvg >= 17 ? '🟢' : sAvg >= 12 ? '🟡' : '🔴'
       skills.push({ skill: skillName, avg: sAvg, color })
     }
@@ -153,7 +155,7 @@ export function weakestSubjects(grades: any[], limit: number = 3): { subject: st
 
   const list: { subject: string; avg: number; count: number }[] = []
   for (const [subject, data] of subjectMap.entries()) {
-    const avg = data.count > 0 ? Math.round((data.totalScaled / data.count) * 10) / 10 : 0
+    const avg = data.count > 0 ? roundScore2(data.totalScaled / data.count) : 0
     list.push({ subject, avg, count: data.count })
   }
 

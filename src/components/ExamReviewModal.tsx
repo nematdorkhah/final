@@ -36,7 +36,66 @@ export default function ExamReviewModal({
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [onClose])
 
-  if (!exam || !submission) return null
+  if (!exam || !submission) {
+    return (
+      <div
+        style={{
+          position: 'fixed',
+          inset: 0,
+          zIndex: 99999,
+          background: 'rgba(15, 23, 42, 0.85)',
+          backdropFilter: 'blur(8px)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '14px',
+          direction: 'rtl',
+        }}
+        onClick={(e) => {
+          if (e.target === e.currentTarget) onClose()
+        }}
+      >
+        <div
+          style={{
+            background: '#FFFFFF',
+            borderRadius: 20,
+            width: '100%',
+            maxWidth: 440,
+            padding: '24px',
+            textAlign: 'center',
+            border: '2px solid #0F172A',
+          }}
+        >
+          <div style={{ fontSize: 40, marginBottom: 10 }}>📄</div>
+          <h3 style={{ fontSize: 16, fontWeight: 900, color: '#0F172A', margin: '0 0 8px 0' }}>
+            پاسخ‌نامه قابل نمایش نیست
+          </h3>
+          <p style={{ fontSize: 13, color: '#475569', lineHeight: 1.7, margin: '0 0 18px 0' }}>
+            {!exam
+              ? 'اطلاعات سؤالات این آزمون یافت نشد.'
+              : 'پاسخ ثبت‌شده دانش‌آموز برای این آزمون در دسترس نیست.'}
+          </p>
+          <button
+            type="button"
+            onClick={onClose}
+            style={{
+              width: '100%',
+              padding: '10px 16px',
+              background: '#0F172A',
+              color: '#FFFFFF',
+              borderRadius: 12,
+              fontSize: 13,
+              fontWeight: 800,
+              border: 'none',
+              cursor: 'pointer',
+            }}
+          >
+            بستن پنجره
+          </button>
+        </div>
+      </div>
+    )
+  }
 
   const isReleased = isExamResultsReleased(exam, submission)
   if (!isReleased) {
@@ -216,6 +275,7 @@ export default function ExamReviewModal({
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
+            flexWrap: 'wrap',
             gap: 12,
             borderBottom: '2px solid rgba(255,255,255,0.1)',
             flexShrink: 0,
@@ -336,13 +396,18 @@ export default function ExamReviewModal({
               // Question 1 (q2) of spelling exam is strictly graded per teacher instructions (only option 2 is correct)
               const isBonusToAll = q.id === 'q2' ? false : Boolean(q.awardFullScoreToAll || q.allOptionsCorrect || q.allAnswersCorrect || q.isBonusToAll)
 
-              // Earned score for question
+              // Earned score for question (authoritative teacher/effective score)
+              const explicitTeacherQ = submission.teacherGrading?.questionScores?.[q.id]
+              const effQScore = eff.questionScores?.[q.id]
               const earned = isBonusToAll
                 ? qPoints
                 : safeScore(
-                    submission.teacherGrading?.questionScores?.[q.id] ??
-                    submission.aiGrading?.questionScores?.[q.id] ??
-                    (isMultiChoice ? (mcEval?.score ?? 0) : (blankEval?.score ?? 0)),
+                    explicitTeacherQ !== undefined && explicitTeacherQ !== null
+                      ? explicitTeacherQ
+                      : effQScore !== undefined && effQScore !== null
+                      ? effQScore
+                      : submission.aiGrading?.questionScores?.[q.id] ??
+                        (isMultiChoice ? (mcEval?.score ?? 0) : (blankEval?.score ?? 0)),
                     qPoints
                   )
 
@@ -434,7 +499,7 @@ export default function ExamReviewModal({
                     <div
                       style={{
                         display: 'grid',
-                        gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+                        gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 200px), 1fr))',
                         gap: 8,
                         marginBottom: 12,
                       }}

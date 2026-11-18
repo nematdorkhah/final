@@ -587,7 +587,7 @@ export default function StudentExamTaker({
             ) : (
               <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-emerald-50 border border-emerald-200 text-emerald-800">
                 <span>✓</span>
-                <span>همگام‌سازی ابری و ثبت در کارنامه کلاسی کامل شد</span>
+                <span>همگام‌سازی ابری پاسخ‌ها کامل شد (در انتظار بررسی و تایید آموزگار)</span>
               </div>
             )}
           </div>

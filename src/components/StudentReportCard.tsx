@@ -1,8 +1,8 @@
 import { useState } from 'react'
 import { toPersianDigits } from '../utils/persianNumbers'
-import { sanitizeExamTitle, getLocalExams, getLocalSubmissions } from '../utils/examStore'
+import { sanitizeExamTitle, getLocalExams, getLocalSubmissions, isExamResultsReleased, mergeSubmissionsDeduplicated, deduplicateGradebookRows } from '../utils/examStore'
 import { sanitizeTeacherFeedback } from '../utils/cleanFeedback'
-import { getSubmissionEffectiveScore } from '../utils/persianSemanticGrader'
+import { getSubmissionEffectiveScore, isSubmissionApprovedByTeacher, roundScore2 } from '../utils/persianSemanticGrader'
 import { isSameStudent } from '../classStudents'
 import ExamReviewModal from './ExamReviewModal'
 import SchoolLogo from './SchoolLogo'
@@ -12,6 +12,7 @@ export default function StudentReportCard({
   grades,
   attendanceRows,
   submissions,
+  examSubmissions,
   homeworkCount,
   reportNote,
   onClose,
@@ -20,15 +21,17 @@ export default function StudentReportCard({
   grades: any[]
   attendanceRows: any[]
   submissions: any[]
+  examSubmissions?: any[]
   homeworkCount: number
   reportNote?: string
   onClose: () => void
 }) {
   const [reviewExamData, setReviewExamData] = useState<{ exam: any; submission: any } | null>(null)
+  const [reviewNotice, setReviewNotice] = useState<string | null>(null)
 
-  // Normalize every grade to 20 (Score = (Earned / Total) * 20)
-  // Normalize every grade to 20 (Score = (Earned / Total) * 20)
-  const normalizedGrades = grades.map((g: any) => {
+  // Normalize every grade to 20 (Score = (Earned / Total) * 20) after defensive deduplication
+  const dedupedInputGrades = deduplicateGradebookRows(grades || [])
+  const normalizedGrades = dedupedInputGrades.map((g: any) => {
     const isPendingReview = g.status === 'pending_review'
     const isPendingSubmission = g.status === 'pending_submission'
     const isPending = isPendingReview || isPendingSubmission
@@ -37,8 +40,8 @@ export default function StudentReportCard({
     let rawMax = Number(g.max_score) || 20
 
     // Match exam and submission if this represents an exam
-    let matchedExam = g.exam || null
-    let matchedSub = g.sub || null
+    let matchedExam = g.matchedExam || g.exam || null
+    let matchedSub = g.matchedSub || g.sub || null
 
     if (!matchedExam) {
       const allExams = getLocalExams()
@@ -53,7 +56,8 @@ export default function StudentReportCard({
     }
 
     if (!matchedSub && matchedExam) {
-      const allSubs = getLocalSubmissions()
+      const rawSubs = (Array.isArray(examSubmissions) && examSubmissions.length > 0 ? examSubmissions : getLocalSubmissions())
+      const allSubs = mergeSubmissionsDeduplicated([], rawSubs)
       matchedSub =
         allSubs.find(
           (s) =>
@@ -63,43 +67,71 @@ export default function StudentReportCard({
     }
 
     const officialDbScore = Number(g.score) || 0
-    if (matchedSub && matchedExam && !isPending) {
-      const isApprovedOrReleased = Boolean(
-        matchedSub.teacherGrading?.approved ||
-        matchedSub.status === 'released' ||
-        matchedExam.resultsPublished ||
-        matchedExam.isResultsReleased ||
-        matchedExam.results_published
-      )
-      if (isApprovedOrReleased) {
-        const eff = getSubmissionEffectiveScore(matchedExam, matchedSub)
-        rawScore = eff.totalScore
-        rawMax = eff.maxPoints
-      }
-    } else if (matchedExam && matchedExam.totalPoints && officialDbScore > 0 && !isPending) {
-      rawScore = Math.round(((officialDbScore / 20) * matchedExam.totalPoints) * 10) / 10
-      rawMax = matchedExam.totalPoints
+    const normalizedDb20 = rawMax > 0 && rawMax !== 20
+      ? roundScore2((officialDbScore / rawMax) * 20)
+      : roundScore2(officialDbScore)
+
+    const isExplicitDbRecord = Boolean(g.id && !String(g.id).startsWith('exam_sub_') && !String(g.id).startsWith('exam_'))
+    const gRecordedMs = g.recorded_at ? new Date(g.recorded_at).getTime() : 0
+    const subApprovedMs = matchedSub?.teacherGrading?.approvedAt ? new Date(matchedSub.teacherGrading.approvedAt).getTime() : 0
+
+    const isApprovedOrReleased =
+      matchedSub && matchedExam
+        ? isSubmissionApprovedByTeacher(matchedSub) && isExamResultsReleased(matchedExam, matchedSub)
+        : false
+
+    const subEff = matchedSub && matchedExam && isApprovedOrReleased
+      ? getSubmissionEffectiveScore(matchedExam, matchedSub)
+      : null
+    const isDifferentManualDbScore = subEff ? Math.abs(normalizedDb20 - subEff.scaledScore20) > 0.06 : false
+    const isNewerDbManualEdit = Boolean(
+      isExplicitDbRecord &&
+      isDifferentManualDbScore &&
+      gRecordedMs > 0 &&
+      subApprovedMs > 0 &&
+      gRecordedMs > subApprovedMs + 1000
+    )
+
+    const effectivePending = isPending || Boolean(matchedSub && matchedExam && !isApprovedOrReleased)
+    const effectivePendingReview = isPendingReview || Boolean(matchedSub && matchedExam && !isApprovedOrReleased)
+
+    let scaledScore: number | null = null
+
+    if (effectivePending) {
+      scaledScore = null
+    } else if (subEff && isApprovedOrReleased && !isNewerDbManualEdit) {
+      rawScore = subEff.totalScore
+      rawMax = subEff.maxPoints
+      scaledScore = subEff.scaledScore20
     }
 
-    const scaledScore = isPending
-      ? null
-      : rawMax > 0
-      ? Math.round(((rawScore / rawMax) * 20) * 10) / 10
-      : (officialDbScore || rawScore)
+    if (!effectivePending && scaledScore === null) {
+      if (g.raw_score !== undefined && g.raw_max !== undefined && Number(g.raw_max) > 0) {
+        rawScore = Number(g.raw_score)
+        rawMax = Number(g.raw_max)
+        scaledScore = rawMax === 20 ? roundScore2(rawScore) : roundScore2((rawScore / rawMax) * 20)
+      } else {
+        scaledScore = rawMax === 20
+          ? roundScore2(rawScore)
+          : rawMax > 0
+          ? roundScore2((rawScore / rawMax) * 20)
+          : roundScore2(officialDbScore || rawScore)
+      }
+    }
 
     const cleanLabel = sanitizeTeacherFeedback(sanitizeExamTitle(g.skill || g.subject || 'عمومی', g.subject))
 
     let qualitativeStatus = 'خیلی خوب'
     let qualitativeColor = 'text-emerald-700 bg-emerald-50 border-emerald-200'
 
-    if (isPendingReview) {
+    if (effectivePendingReview) {
       qualitativeStatus = 'در انتظار تصحیح'
       qualitativeColor = 'text-amber-700 bg-amber-50 border-amber-200'
     } else if (isPendingSubmission) {
       qualitativeStatus = 'در انتظار انجام'
       qualitativeColor = 'text-indigo-700 bg-indigo-50 border-indigo-200'
     } else if (scaledScore !== null) {
-      if (scaledScore < 10) {
+      if (scaledScore < 12) {
         qualitativeStatus = 'نیازمند تلاش'
         qualitativeColor = 'text-rose-700 bg-rose-50 border-rose-200'
       } else if (scaledScore < 15) {
@@ -113,7 +145,7 @@ export default function StudentReportCard({
 
     return {
       ...g,
-      status: g.status || (isPending ? (isPendingReview ? 'pending_review' : 'pending_submission') : 'graded'),
+      status: effectivePending ? (effectivePendingReview ? 'pending_review' : 'pending_submission') : (g.status || 'graded'),
       rawScore,
       rawMax,
       scaledScore,
@@ -129,7 +161,7 @@ export default function StudentReportCard({
     (g: any) => g.status === 'graded' && g.scaledScore !== null && !isNaN(g.scaledScore)
   )
   const gpaVal = gradedList.length
-    ? (gradedList.reduce((acc: number, g: any) => acc + g.scaledScore, 0) / gradedList.length).toFixed(2)
+    ? String(roundScore2(gradedList.reduce((acc: number, g: any) => acc + g.scaledScore, 0) / gradedList.length))
     : null
 
   const presents = attendanceRows.filter((a: any) => a.status === 'present').length
@@ -289,6 +321,19 @@ export default function StudentReportCard({
               </div>
             </div>
 
+            {reviewNotice && (
+              <div className="no-print mb-4 bg-amber-50 border border-amber-300 text-amber-900 rounded-xl px-4 py-2.5 text-xs font-bold flex items-center justify-between gap-2">
+                <span>⚠️ {reviewNotice}</span>
+                <button
+                  type="button"
+                  onClick={() => setReviewNotice(null)}
+                  className="text-amber-800 hover:text-amber-950 font-black cursor-pointer px-1.5"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+
             {/* Grades Table */}
             <div className="overflow-x-auto rounded-xl border border-slate-200 mb-6">
               <table className="w-full border-collapse text-right text-xs sm:text-sm">
@@ -310,22 +355,26 @@ export default function StudentReportCard({
                     </tr>
                   )}
                   {normalizedGrades.map((g: any, index: number) => {
-                    const hasReview = Boolean(g.matchedExam && g.matchedSub)
+                    const hasExamObj = Boolean(g.matchedExam)
+                    const openReview = () => {
+                      if (g.matchedExam && g.matchedSub) {
+                        setReviewNotice(null)
+                        setReviewExamData({
+                          exam: g.matchedExam,
+                          submission: g.matchedSub,
+                        })
+                      } else if (g.matchedExam) {
+                        setReviewNotice('برگه پاسخ ثبت‌شده برای این آزمون یافت نشد؛ ممکن است فقط نمره نهایی ثبت شده باشد.')
+                      }
+                    }
 
                     return (
                       <tr
                         key={g.id || index}
                         className={`hover:bg-slate-50 transition-colors ${
-                          hasReview ? 'cursor-pointer' : ''
+                          hasExamObj ? 'cursor-pointer' : ''
                         }`}
-                        onClick={() => {
-                          if (hasReview) {
-                            setReviewExamData({
-                              exam: g.matchedExam,
-                              submission: g.matchedSub,
-                            })
-                          }
-                        }}
+                        onClick={openReview}
                       >
                         <td className="py-2.5 px-3 text-center text-slate-500 font-mono">
                           {toPersianDigits(index + 1)}
@@ -363,15 +412,12 @@ export default function StudentReportCard({
                           </span>
                         </td>
                         <td className="no-print py-2.5 px-3 text-center">
-                          {hasReview ? (
+                          {hasExamObj ? (
                             <button
                               type="button"
                               onClick={(e) => {
                                 e.stopPropagation()
-                                setReviewExamData({
-                                  exam: g.matchedExam,
-                                  submission: g.matchedSub,
-                                })
+                                openReview()
                               }}
                               className="px-2.5 py-1 text-[11px] font-bold text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-lg border border-blue-200 transition-colors cursor-pointer inline-flex items-center gap-1"
                             >

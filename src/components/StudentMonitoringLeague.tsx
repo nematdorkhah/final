@@ -1,5 +1,15 @@
 import { useState, useMemo } from 'react'
-import { getLocalExams, getLocalSubmissions, sanitizeExamTitle } from '../utils/examStore'
+import {
+  getLocalExams,
+  getLocalSubmissions,
+  sanitizeExamTitle,
+  isExamResultsReleased,
+  mergeSubmissionsDeduplicated,
+  buildCanonicalGradesList,
+} from '../utils/examStore'
+import { getSubmissionEffectiveScore, isSubmissionApprovedByTeacher, roundScore2 } from '../utils/persianSemanticGrader'
+import { isSameStudent, isTestStudentRecord } from '../classStudents'
+import { Exam, StudentExamSubmission } from '../types/examTypes'
 import TeacherDuolingoTracker from './TeacherDuolingoTracker'
 import { sortByLastName, extractLastName } from '../utils/persianSort'
 
@@ -9,6 +19,8 @@ interface StudentMonitoringLeagueProps {
   submissions: any[]
   allAttendance: any[]
   homeworkPosts: any[]
+  exams?: Exam[]
+  examSubmissions?: StudentExamSubmission[]
   onOpenStudent: (studentId: string) => void
   initialSubTab?: 'league' | 'tizhooshan' | 'charts' | 'alerts'
 }
@@ -19,6 +31,8 @@ export default function StudentMonitoringLeague({
   submissions,
   allAttendance,
   homeworkPosts,
+  exams: propExams,
+  examSubmissions: propExamSubmissions,
   onOpenStudent,
   initialSubTab = 'league',
 }: StudentMonitoringLeagueProps) {
@@ -27,48 +41,53 @@ export default function StudentMonitoringLeague({
   const [filterSubject, setFilterSubject] = useState<string>('all')
   const [selectedExamId, setSelectedExamId] = useState<string>('all')
 
-  // Merge raw grades with exam submissions from local store to guarantee 100% sync
-  const effectiveGrades = useMemo(() => {
-    const list = [...grades]
-    const localExams = getLocalExams()
-    const examSubs = getLocalSubmissions()
-    const examMap = new Map(localExams.map((e) => [e.id, e]))
-    for (const sub of examSubs) {
-      const exam = examMap.get(sub.examId)
-      if (!exam) continue
-      const score = sub.teacherGrading?.totalScore ?? sub.aiGrading?.totalScore ?? (sub as any).studentScore
-      if (score === undefined || score === null) continue
-      const exists = list.some(
-        (g) => g.student_id === sub.studentId && (g.skill === `آزمون: ${exam.title}` || g.skill === exam.title)
-      )
-      if (!exists) {
-        list.push({
-          id: `exam_sub_${sub.id}`,
-          student_id: sub.studentId,
-          subject: exam.subject || 'عمومی',
-          skill: `آزمون: ${exam.title}`,
-          score: Number(score),
-          max_score: exam.totalPoints || 20,
-          recorded_at: sub.submittedAt || new Date().toISOString(),
-          is_exam: true,
-          exam_id: exam.id,
-        })
-      }
-    }
-    return list
-  }, [grades])
+  const realStudents = useMemo(
+    () => students.filter((s) => !isTestStudentRecord(s.id, s.full_name)),
+    [students]
+  )
 
-  const publishedExams = useMemo(() => getLocalExams(), [])
+  const publishedExams = useMemo(
+    () => (propExams && propExams.length > 0 ? propExams : getLocalExams()),
+    [propExams]
+  )
+
+  const dedupedExamSubmissions = useMemo(
+    () =>
+      mergeSubmissionsDeduplicated(
+        [],
+        propExamSubmissions && propExamSubmissions.length > 0 ? propExamSubmissions : getLocalSubmissions()
+      ),
+    [propExamSubmissions]
+  )
+
+  // Merge raw grades with approved/released exam submissions using shared canonical builder
+  const effectiveGrades = useMemo(() => {
+    const cleanDbGrades = grades.filter((g) => !isTestStudentRecord(g.student_id, g.student_name))
+    return realStudents.flatMap((st) =>
+      buildCanonicalGradesList({
+        studentId: st.id,
+        studentName: st.full_name,
+        dbGrades: cleanDbGrades.filter((g) => isSameStudent(g.student_id, st.id, g.student_name, st.full_name)),
+        exams: publishedExams,
+        examSubmissions: dedupedExamSubmissions,
+        includePending: false,
+      })
+    )
+  }, [grades, realStudents, publishedExams, dedupedExamSubmissions])
 
   // Calculate rich metrics for each student using effectiveGrades
   const studentMetrics = useMemo(() => {
-    return students.map((s) => {
-      const studentGrades = effectiveGrades.filter((g) => g.student_id === s.id)
+    return realStudents.map((s) => {
+      const studentGrades = effectiveGrades.filter((g) => isSameStudent(g.student_id, s.id))
       const avg = studentGrades.length
-        ? studentGrades.reduce((sum, g) => sum + (g.score / g.max_score) * 20, 0) / studentGrades.length
+        ? roundScore2(studentGrades.reduce((sum, g) => {
+            const m = Number(g.max_score)
+            const s = Number(g.score) || 0
+            return sum + (m === 20 ? s : m > 0 ? (s / m) * 20 : s)
+          }, 0) / studentGrades.length)
         : null
 
-      const studentSubs = submissions.filter((sub) => sub.student_id === s.id)
+      const studentSubs = submissions.filter((sub) => isSameStudent(sub.student_id, s.id))
       const subCount = studentSubs.length
       const totalHomework = homeworkPosts.length
       const homeworkRate = totalHomework > 0 ? Math.round((subCount / totalHomework) * 100) : 100
@@ -161,14 +180,16 @@ export default function StudentMonitoringLeague({
     for (const g of effectiveGrades) {
       const sub = g.subject || 'عمومی'
       if (!map[sub]) map[sub] = { total: 0, count: 0, grades: [] }
-      const normalizedScore = (g.score / g.max_score) * 20
+      const m = Number(g.max_score)
+      const s = Number(g.score) || 0
+      const normalizedScore = m === 20 ? s : m > 0 ? (s / m) * 20 : s
       map[sub].total += normalizedScore
       map[sub].count += 1
       map[sub].grades.push(normalizedScore)
     }
     return Object.entries(map).map(([subject, data]) => ({
       subject,
-      avg: Number((data.total / data.count).toFixed(1)),
+      avg: data.count > 0 ? roundScore2(data.total / data.count) : 0,
       count: data.count,
     })).sort((a, b) => b.avg - a.avg)
   }, [effectiveGrades])
@@ -192,7 +213,7 @@ export default function StudentMonitoringLeague({
     const valid = studentMetrics.filter((s) => s.avg !== null)
     if (!valid.length) return null
     const sum = valid.reduce((acc, s) => acc + (s.avg || 0), 0)
-    return Number((sum / valid.length).toFixed(1))
+    return roundScore2(sum / valid.length)
   }, [studentMetrics])
 
   const classHomeworkRate = useMemo(() => {
@@ -232,7 +253,7 @@ export default function StudentMonitoringLeague({
               </h2>
             </div>
             <p style={{ fontSize: 13, color: '#94A3B8', margin: '4px 0 0 0' }}>
-              تحلیل عملکرد تحصیلی، رتبه‌بندی لیگ کلاسی، نمودارهای مقایسه‌ای و پایش وضعیت {students.length} دانش‌آموز
+              تحلیل عملکرد تحصیلی، رتبه‌بندی لیگ کلاسی، نمودارهای مقایسه‌ای و پایش وضعیت {realStudents.length} دانش‌آموز
             </p>
           </div>
 
@@ -419,7 +440,7 @@ export default function StudentMonitoringLeague({
                     {sortedStudents[1].totalPoints} امتیاز
                   </div>
                   <div style={{ fontSize: 10, color: '#64748B', marginTop: 2 }}>
-                    تکالیف: {sortedStudents[1].subCount} | معدل: {sortedStudents[1].avg?.toFixed(1) ?? '—'}
+                    تکالیف: {sortedStudents[1].subCount} | معدل: {sortedStudents[1].avg !== null ? roundScore2(sortedStudents[1].avg) : '—'}
                   </div>
                 </div>
 
@@ -445,7 +466,7 @@ export default function StudentMonitoringLeague({
                     {sortedStudents[0].totalPoints} امتیاز
                   </div>
                   <div style={{ fontSize: 10.5, color: '#713F12', marginTop: 2 }}>
-                    تکالیف: {sortedStudents[0].subCount} | معدل: {sortedStudents[0].avg?.toFixed(1) ?? '—'}
+                    تکالیف: {sortedStudents[0].subCount} | معدل: {sortedStudents[0].avg !== null ? roundScore2(sortedStudents[0].avg) : '—'}
                   </div>
                 </div>
 
@@ -469,7 +490,7 @@ export default function StudentMonitoringLeague({
                     {sortedStudents[2].totalPoints} امتیاز
                   </div>
                   <div style={{ fontSize: 10, color: '#7C2D12', marginTop: 2 }}>
-                    تکالیف: {sortedStudents[2].subCount} | معدل: {sortedStudents[2].avg?.toFixed(1) ?? '—'}
+                    تکالیف: {sortedStudents[2].subCount} | معدل: {sortedStudents[2].avg !== null ? roundScore2(sortedStudents[2].avg) : '—'}
                   </div>
                 </div>
               </div>
@@ -601,7 +622,7 @@ export default function StudentMonitoringLeague({
                       <div style={{ display: 'flex', gap: 8, fontSize: 11.5, color: '#64748B', marginTop: 3 }}>
                         <span>تکالیف: <strong>{s.subCount}</strong> از {s.totalHomework} ({s.homeworkRate}٪)</span>
                         <span>•</span>
-                        <span>معدل: <strong>{s.avg?.toFixed(1) ?? 'ثبت نشده'}</strong></span>
+                        <span>معدل: <strong>{s.avg !== null ? roundScore2(s.avg) : 'ثبت نشده'}</strong></span>
                         <span>•</span>
                         <span>حضور: <strong>{s.attendanceRate}٪</strong></span>
                       </div>
@@ -683,22 +704,28 @@ export default function StudentMonitoringLeague({
                 let score = s.avg ?? 0
                 let maxScore = 20
                 let hasTaken = s.avg !== null
-                let displayScore = s.avg !== null ? s.avg.toFixed(1) : '—'
+                let displayScore = s.avg !== null ? String(roundScore2(s.avg)) : '—'
 
                 if (selectedExamId !== 'all') {
-                  const exam = publishedExams.find(e => e.id === selectedExamId)
-                  maxScore = exam?.totalPoints || 20
-                  const examSubs = getLocalSubmissions().filter(sub => sub.examId === selectedExamId && sub.studentId === s.id)
-                  if (examSubs.length > 0) {
-                    const sub = examSubs[0]
-                    const rawScore = sub.teacherGrading?.totalScore ?? sub.aiGrading?.totalScore ?? (sub as any).studentScore
-                    if (rawScore !== undefined && rawScore !== null) {
-                      score = Number(rawScore)
+                  const exam = publishedExams.find((e) => e.id === selectedExamId)
+                  const matchedSub = dedupedExamSubmissions.find(
+                    (sub) =>
+                      sub.examId === selectedExamId &&
+                      isSameStudent(sub.studentId, s.id, sub.studentName, s.name)
+                  )
+                  if (matchedSub && exam) {
+                    const eff = getSubmissionEffectiveScore(exam, matchedSub)
+                    const isApprovedAndReleased =
+                      isSubmissionApprovedByTeacher(matchedSub) && eff.isApproved && isExamResultsReleased(exam, matchedSub)
+                    if (isApprovedAndReleased) {
+                      score = eff.scaledScore20
+                      maxScore = 20
                       hasTaken = true
-                      displayScore = `${score} از ${maxScore}`
+                      displayScore = `${eff.scaledScore20} از ۲۰`
                     } else {
                       hasTaken = false
-                      displayScore = 'در حال تصحیح'
+                      score = 0
+                      displayScore = eff.isApproved ? 'در انتظار انتشار' : 'در حال تصحیح'
                     }
                   } else {
                     hasTaken = false
@@ -931,7 +958,7 @@ export default function StudentMonitoringLeague({
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
                       {s.avg !== null && s.avg < 14 && (
                         <span style={{ fontSize: 11, background: '#FEE2E2', color: '#991B1B', padding: '2px 8px', borderRadius: 999, fontWeight: 800 }}>
-                          افت میانگین نمرات: {s.avg.toFixed(1)}
+                          افت میانگین نمرات: {roundScore2(s.avg)}
                         </span>
                       )}
                       {s.absentCount >= 2 && (
@@ -989,7 +1016,7 @@ export default function StudentMonitoringLeague({
           ========================================================= */}
       {subTab === 'tizhooshan' && (
         <div style={{ marginTop: 12 }}>
-          <TeacherDuolingoTracker students={students} />
+          <TeacherDuolingoTracker students={realStudents} />
         </div>
       )}
     </div>

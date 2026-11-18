@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react'
 import { toPersianDigits } from '../utils/persianNumbers'
 import { sortByLastName, normalizePersianText } from '../utils/persianSort'
+import { isSameStudent } from '../classStudents'
+import { roundScore2 } from '../utils/persianSemanticGrader'
 
 export default function Gradebook({
   students,
@@ -25,21 +27,25 @@ export default function Gradebook({
 
   const studentRows = useMemo(() => {
     return sortedStudents.map((st) => {
-      const stGrades = grades.filter((g) => g.student_id === st.id)
-      const stAttendance = attendanceRows.filter((a) => a.student_id === st.id)
+      const stGrades = grades.filter((g) => isSameStudent(g.student_id, st.id, g.student_name, st.full_name))
+      const stAttendance = attendanceRows.filter((a) => isSameStudent(a.student_id, st.id))
 
-      const totalNormalized = stGrades.reduce((acc, g) => acc + (g.score / g.max_score) * 20, 0)
-      const gpa = stGrades.length ? (totalNormalized / stGrades.length).toFixed(1) : null
+      const normScore = (g: any) => {
+        const m = Number(g.max_score)
+        const s = Number(g.score) || 0
+        return m === 20 ? s : m > 0 ? (s / m) * 20 : s
+      }
+      const totalNormalized = stGrades.reduce((acc, g) => acc + normScore(g), 0)
+      const gpa = stGrades.length ? String(roundScore2(totalNormalized / stGrades.length)) : null
 
       const sortedGrades = [...stGrades].sort(
         (a, b) => new Date(a.recorded_at).getTime() - new Date(b.recorded_at).getTime()
       )
       let isDropping = false
       if (sortedGrades.length >= 3) {
-        const norm = (g: any) => (g.score / g.max_score) * 20
-        const last = norm(sortedGrades[sortedGrades.length - 1])
-        const prev = norm(sortedGrades[sortedGrades.length - 2])
-        const beforePrev = norm(sortedGrades[sortedGrades.length - 3])
+        const last = normScore(sortedGrades[sortedGrades.length - 1])
+        const prev = normScore(sortedGrades[sortedGrades.length - 2])
+        const beforePrev = normScore(sortedGrades[sortedGrades.length - 3])
         if (last < prev && prev < beforePrev) isDropping = true
       }
 
@@ -204,7 +210,11 @@ export default function Gradebook({
                   {subjects.slice(0, 4).map((sub) => {
                     const subGrades = st.gradesBySubject.filter((g: any) => g.subject === sub)
                     const subAvg = subGrades.length
-                      ? (subGrades.reduce((a: number, b: any) => a + (b.score / b.max_score) * 20, 0) / subGrades.length).toFixed(1)
+                      ? String(roundScore2(subGrades.reduce((a: number, b: any) => {
+                          const m = Number(b.max_score)
+                          const s = Number(b.score) || 0
+                          return a + (m === 20 ? s : m > 0 ? (s / m) * 20 : s)
+                        }, 0) / subGrades.length))
                       : null
                     return (
                       <div key={sub} className="bg-slate-100 text-slate-700 px-2 py-0.5 rounded-md text-[11px] font-bold flex items-center gap-1">
@@ -250,7 +260,11 @@ export default function Gradebook({
                   {subjects.map((sub: string) => {
                     const subGrades = st.gradesBySubject.filter((g: any) => g.subject === sub)
                     const subAvg = subGrades.length
-                      ? (subGrades.reduce((a: number, b: any) => a + (b.score / b.max_score) * 20, 0) / subGrades.length).toFixed(1)
+                      ? String(roundScore2(subGrades.reduce((a: number, b: any) => {
+                          const m = Number(b.max_score)
+                          const s = Number(b.score) || 0
+                          return a + (m === 20 ? s : m > 0 ? (s / m) * 20 : s)
+                        }, 0) / subGrades.length))
                       : '—'
                     return <td key={sub} className="p-3 text-slate-700">{toPersianDigits(subAvg)}</td>
                   })}

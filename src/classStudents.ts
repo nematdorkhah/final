@@ -97,3 +97,12 @@ export function isSameStudent(
   return false
 }
 
+export function isTestStudentRecord(id?: string | null, name?: string | null): boolean {
+  const cleanId = id ? String(id).trim().toLowerCase() : ''
+  const cleanName = name ? String(name).trim() : ''
+  if (cleanId === 'test_preview_student' || cleanId.includes('test_preview')) return true
+  if (cleanName.includes('تست معلم') || cleanName.includes('حساب آزمایشی')) return true
+  return false
+}
+
+

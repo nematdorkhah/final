@@ -9,17 +9,16 @@ import {
   RegradeQuestionDiff,
 } from '../types/examTypes'
 import { supabase } from '../supabaseClient'
-import { CLASS_STUDENTS_ROSTER, ClassStudentInfo, resolveCanonicalStudent, isSameStudent } from '../classStudents'
+import { CLASS_STUDENTS_ROSTER, ClassStudentInfo, resolveCanonicalStudent, isSameStudent, isTestStudentRecord } from '../classStudents'
 import {
   generateExamQuestionsHybrid,
   regenerateSingleQuestionHybrid,
   convertPracticeToQuestionsHybrid,
   gradeSubmissionHybrid,
-  isClientGeminiEnabled,
-  callGeminiDirectClient,
   translateGeminiError,
   getStoredTeacherPassword,
 } from '../services/geminiHybridService'
+export { getStoredTeacherPassword }
 import {
   evaluateEntireExamSubmission,
   evaluateMultipleChoice,
@@ -27,6 +26,10 @@ import {
   evaluateDescriptiveQuestion,
   resolveCorrectOptionIndex,
   resolveStudentSelectedOption,
+  getExamMaxPoints,
+  getSubmissionEffectiveScore,
+  isSubmissionApprovedByTeacher,
+  roundScore2,
   safeNumber,
   safeScore,
   safeScaled20,
@@ -51,6 +54,7 @@ const SUBMISSIONS_STORAGE_KEY = 'school_classroom_exam_subs_v1'
 
 export function getLocalExams(): Exam[] {
   try {
+    if (typeof localStorage === 'undefined') return []
     const raw = localStorage.getItem(EXAMS_STORAGE_KEY)
     if (!raw) return []
     const parsed = JSON.parse(raw)
@@ -77,6 +81,7 @@ export function getLocalExams(): Exam[] {
 
 export function saveLocalExams(exams: Exam[]) {
   try {
+    if (typeof localStorage === 'undefined') return
     localStorage.setItem(EXAMS_STORAGE_KEY, JSON.stringify(exams))
   } catch (e) {
     console.error('Failed to save local exams', e)
@@ -670,6 +675,7 @@ export async function deleteExam(examId: string, teacherPassword?: string): Prom
 
 export function getLocalSubmissions(): StudentExamSubmission[] {
   try {
+    if (typeof localStorage === 'undefined') return []
     const raw = localStorage.getItem(SUBMISSIONS_STORAGE_KEY)
     if (!raw) return []
     return JSON.parse(raw)
@@ -681,6 +687,7 @@ export function getLocalSubmissions(): StudentExamSubmission[] {
 
 export function saveLocalSubmissions(subs: StudentExamSubmission[]) {
   try {
+    if (typeof localStorage === 'undefined') return
     localStorage.setItem(SUBMISSIONS_STORAGE_KEY, JSON.stringify(subs))
   } catch (e) {
     console.error('Failed to save local exam submissions', e)
@@ -695,27 +702,33 @@ export function saveLocalSubmissions(subs: StudentExamSubmission[]) {
 export function isExamResultsReleased(exam: Exam, submission?: StudentExamSubmission): boolean {
   if (!exam) return false
 
-  // 1. Explicit release flags set by teacher on the exam or submission:
-  if (exam.resultsPublished || exam.results_published || exam.isResultsReleased) {
-    if (submission) {
-      return submission.teacherGrading?.approved === true || submission.isReleased === true
+  // When evaluating access for a specific student's submission, STRICTLY require teacher approval on that submission!
+  // Never reveal an unapproved/pending_approval score just because exam.resultsPublished / isResultsReleased is true.
+  if (submission) {
+    const subApproved = isSubmissionApprovedByTeacher(submission)
+    if (!subApproved) {
+      return false
     }
-    return true
-  }
-  if (submission?.isReleased || submission?.is_released) {
-    return true
-  }
 
-  // 2. Untimed exams / homework / assignments:
-  // Strictly requires teacher release!
-  const isUntimed = exam.mode === 'assignment' || Boolean(exam.isUntimed) || Number(exam.durationMinutes) <= 0
-  if (isUntimed) {
-    return false
-  }
+    if (
+      exam.resultsPublished ||
+      exam.results_published ||
+      exam.isResultsReleased ||
+      (exam as any).resultsReleased ||
+      submission.isReleased ||
+      submission.is_released ||
+      submission.status === 'released' ||
+      (submission.status as string) === 'approved' ||
+      submission.status === 'graded'
+    ) {
+      return true
+    }
 
-  // 3. Timed exams with deadline / schedule:
-  // Only release automatically if submission is approved by teacher AND exam deadline has passed
-  if (submission && submission.teacherGrading?.approved) {
+    const isUntimed = exam.mode === 'assignment' || Boolean(exam.isUntimed) || Number(exam.durationMinutes) <= 0
+    if (isUntimed) {
+      return false
+    }
+
     if (exam.dueDate) {
       const dueTime = new Date(exam.dueDate).getTime()
       if (!isNaN(dueTime) && Date.now() > dueTime) {
@@ -731,35 +744,76 @@ export function isExamResultsReleased(exam: Exam, submission?: StudentExamSubmis
         return true
       }
     }
+
+    return false
   }
 
-  return false
+  return Boolean(exam.resultsPublished || exam.results_published || exam.isResultsReleased || (exam as any).resultsReleased)
 }
 
 /**
- * Syncs the entire exam submissions array to Supabase __SYSTEM_EXAM_SUBMISSIONS__ row.
+ * Syncs exam submissions to Supabase __SYSTEM_EXAM_SUBMISSIONS__ row safely:
+ * - ALWAYS fetches the latest remote snapshot first and merges by canonical (examId, studentId) key,
+ *   so partial local caches can NEVER wipe out other students or other exams.
+ * - When `preserveExplicitUpdates` is true (e.g. teacher approve/unpublish), incoming items replace
+ *   their matching keys explicitly instead of being overwritten by older remote states.
  */
 export async function syncExamSubmissionsToSupabase(
   submissions: StudentExamSubmission[],
-  teacherPassword?: string
+  teacherPassword?: string,
+  options: { preserveExplicitUpdates?: boolean } = {}
 ): Promise<boolean> {
   const teacherPass = getStoredTeacherPassword(teacherPassword)
-  const bodyJson = JSON.stringify(submissions)
+  const preserveExplicitUpdates = Boolean(options.preserveExplicitUpdates)
   let directSuccess = false
 
-  console.log(`[ExamStore:syncExamSubmissionsToSupabase] Syncing ${submissions.length} exam submissions to Supabase...`)
+  console.log(`[ExamStore:syncExamSubmissionsToSupabase] Safe-merging ${submissions.length} exam submissions to Supabase...`)
 
-  // 1. Update or Insert into __SYSTEM_EXAM_SUBMISSIONS__ row in posts table
+  // 1. Fetch latest remote snapshot FIRST so we NEVER overwrite class data with a partial array
+  let existingRowId: string | null = null
+  let remoteSubs: StudentExamSubmission[] = []
   try {
-    const { data: existingRows } = await supabase
+    const { data: existingRows, error: fetchErr } = await supabase
       .from('posts')
-      .select('id, title')
+      .select('id, title, body')
       .eq('title', '__SYSTEM_EXAM_SUBMISSIONS__')
       .order('created_at', { ascending: false })
       .limit(1)
 
-    const existingRow = existingRows?.[0]
-    if (existingRow?.id) {
+    if (!fetchErr && existingRows?.[0]) {
+      existingRowId = existingRows[0].id
+      const parsed = typeof existingRows[0].body === 'string'
+        ? JSON.parse(existingRows[0].body)
+        : existingRows[0].body
+      if (Array.isArray(parsed)) {
+        remoteSubs = parsed
+      }
+    }
+  } catch (err) {
+    console.warn('[ExamStore:syncExamSubmissionsToSupabase] Remote snapshot pre-fetch warning:', err)
+  }
+
+  let mergedToPersist: StudentExamSubmission[]
+  if (preserveExplicitUpdates && submissions.length > 0) {
+    const incomingMap = new Map<string, StudentExamSubmission>()
+    for (const s of mergeSubmissionsDeduplicated([], submissions)) {
+      if (s && s.examId && s.studentId) {
+        incomingMap.set(getSubmissionCanonicalKey(s.examId, s.studentId, s.studentName), s)
+      }
+    }
+    const preservedRemote = mergeSubmissionsDeduplicated([], remoteSubs).filter(
+      (rs) => rs && rs.examId && rs.studentId && !incomingMap.has(getSubmissionCanonicalKey(rs.examId, rs.studentId, rs.studentName))
+    )
+    mergedToPersist = [...preservedRemote, ...Array.from(incomingMap.values())]
+  } else {
+    mergedToPersist = mergeSubmissionsDeduplicated(remoteSubs, submissions)
+  }
+
+  const bodyJson = JSON.stringify(mergedToPersist)
+
+  // 2. Update or Insert into __SYSTEM_EXAM_SUBMISSIONS__ row in posts table
+  try {
+    if (existingRowId) {
       const { error: updErr } = await supabase
         .from('posts')
         .update({
@@ -767,11 +821,13 @@ export async function syncExamSubmissionsToSupabase(
           type: 'announcement', // Allowed by posts_type_check!
           publish_at: new Date().toISOString(),
         })
-        .eq('id', existingRow.id)
+        .eq('id', existingRowId)
 
       if (!updErr) {
         console.log('[ExamStore:syncExamSubmissionsToSupabase] Successfully updated __SYSTEM_EXAM_SUBMISSIONS__')
         directSuccess = true
+      } else {
+        console.warn('[ExamStore:syncExamSubmissionsToSupabase] Update error:', updErr)
       }
     } else {
       const { error: insErr } = await supabase
@@ -786,16 +842,18 @@ export async function syncExamSubmissionsToSupabase(
       if (!insErr) {
         console.log('[ExamStore:syncExamSubmissionsToSupabase] Successfully inserted __SYSTEM_EXAM_SUBMISSIONS__')
         directSuccess = true
+      } else {
+        console.warn('[ExamStore:syncExamSubmissionsToSupabase] Insert error:', insErr)
       }
     }
   } catch (err) {
     console.warn('[ExamStore:syncExamSubmissionsToSupabase] Direct posts table sync error:', err)
   }
 
-  // 2. Backup to teacher RPC ONLY if direct row update/insert failed (prevents duplicate 200KB rows!)
+  // 3. Backup to teacher RPC ONLY if direct row update/insert failed
   if (!directSuccess && teacherPass) {
     try {
-      await supabase.rpc('teacher_create_post', {
+      const { error: rpcErr } = await supabase.rpc('teacher_create_post', {
         p_password: teacherPass,
         p_type: 'announcement',
         p_title: '__SYSTEM_EXAM_SUBMISSIONS__',
@@ -804,8 +862,14 @@ export async function syncExamSubmissionsToSupabase(
         p_publish_at: new Date().toISOString(),
         p_attachment_path: null,
       })
-      directSuccess = true
-    } catch {}
+      if (!rpcErr) {
+        directSuccess = true
+      } else {
+        console.warn('[ExamStore:syncExamSubmissionsToSupabase] RPC fallback error:', rpcErr)
+      }
+    } catch (rpcCatchErr) {
+      console.warn('[ExamStore:syncExamSubmissionsToSupabase] RPC fallback exception:', rpcCatchErr)
+    }
   }
 
   return directSuccess
@@ -820,31 +884,47 @@ export async function saveExamSubmissionDirectToSupabase(
   teacherPassword?: string
 ): Promise<boolean> {
   let success = false
-  console.log(`[ExamStore:saveExamSubmissionDirectToSupabase] Direct Supabase persistence for student ${submission.studentName} (${submission.studentId})...`)
+  const canonSubStudent = resolveCanonicalStudent(submission.studentId || submission.studentName)
+  const canonicalStudentId = canonSubStudent?.id || String(submission.studentId).trim()
+  const canonicalStudentName = canonSubStudent?.fullName || submission.studentName
+  const normalizedSubmission: StudentExamSubmission = {
+    ...submission,
+    studentId: canonicalStudentId,
+    studentName: canonicalStudentName,
+  }
+
+  console.log(`[ExamStore:saveExamSubmissionDirectToSupabase] Direct Supabase persistence for student ${canonicalStudentName} (${canonicalStudentId})...`)
 
   const syncBody = JSON.stringify({
-    ...submission,
+    ...normalizedSubmission,
     syncStatus: 'synced',
     clientExamTitle: exam.title,
     clientSubject: exam.subject,
   })
 
-  // 1. Direct Supabase posts table: Upsert/Insert individual student submission post (__EXAM_SUB__:${exam.id}:${studentId})
+  // 1. Direct Supabase posts table: Upsert/Insert individual student submission post (__EXAM_SUB__:${exam.id}:${canonicalStudentId})
   try {
-    const postTitle = `__EXAM_SUB__:${exam.id}:${submission.studentId}`
-    const { data: existingPost } = await supabase
+    const postTitle = `__EXAM_SUB__:${exam.id}:${canonicalStudentId}`
+    const candidateTitles = [postTitle]
+    if (canonSubStudent?.nationalCode && canonSubStudent.nationalCode !== canonicalStudentId) {
+      candidateTitles.push(`__EXAM_SUB__:${exam.id}:${canonSubStudent.nationalCode}`)
+    }
+    const { data: existingPosts } = await supabase
       .from('posts')
-      .select('id')
-      .eq('title', postTitle)
+      .select('id, title')
+      .in('title', candidateTitles)
       .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle()
+      .limit(10)
+
+    const existingPost = Array.isArray(existingPosts) && existingPosts.length > 0
+      ? (existingPosts.find((p: any) => p.title === postTitle) || existingPosts[0])
+      : null
 
     let postErr: any = null
     if (existingPost?.id) {
       const upd = await supabase
         .from('posts')
-        .update({ body: syncBody, publish_at: new Date().toISOString() })
+        .update({ title: postTitle, body: syncBody, publish_at: new Date().toISOString() })
         .eq('id', existingPost.id)
       postErr = upd.error
       if (postErr) {
@@ -878,27 +958,21 @@ export async function saveExamSubmissionDirectToSupabase(
 
   // 2. Update local submissions cache ONLY (never overwrite class-wide __SYSTEM_EXAM_SUBMISSIONS__ from student client!)
   try {
-    const allSubs = getLocalSubmissions()
-    const idx = allSubs.findIndex((s) => s.id === submission.id || (s.examId === submission.examId && String(s.studentId) === String(submission.studentId)))
-    if (idx >= 0) {
-      allSubs[idx] = submission
-    } else {
-      allSubs.push(submission)
-    }
+    const allSubs = mergeSubmissionsDeduplicated(getLocalSubmissions(), [normalizedSubmission])
     saveLocalSubmissions(allSubs)
   } catch (err) {
     console.warn('[ExamStore:saveExamSubmissionDirectToSupabase] Error updating local submissions:', err)
   }
 
-  // 3. Direct Supabase quiz_submissions table: Insert row with student foreign key resolution
+  // 3. Direct Supabase quiz_submissions table: Upsert row with student foreign key resolution
   try {
     let studentUUID: string | null = null
-    const isValidStudentUuid = isValidUuid(submission.studentId)
+    const isValidStudentUuid = isValidUuid(canonicalStudentId)
     if (isValidStudentUuid) {
-      studentUUID = submission.studentId
+      studentUUID = canonicalStudentId
     } else {
       // 1. Try canonical roster or public student list RPC
-      const rosterMatch = resolveCanonicalStudent(submission.studentId || submission.studentName)
+      const rosterMatch = resolveCanonicalStudent(canonicalStudentId || canonicalStudentName)
       if (rosterMatch?.id && isValidUuid(rosterMatch.id)) {
         studentUUID = rosterMatch.id
       }
@@ -908,7 +982,7 @@ export async function saveExamSubmissionDirectToSupabase(
           if (Array.isArray(pubStudents) && pubStudents.length > 0) {
             const matchedPub = pubStudents.find(
               (ps: any) =>
-                ps.full_name === submission.studentName ||
+                ps.full_name === canonicalStudentName ||
                 (rosterMatch && ps.full_name === rosterMatch.fullName)
             )
             if (matchedPub?.id) studentUUID = matchedPub.id
@@ -922,7 +996,7 @@ export async function saveExamSubmissionDirectToSupabase(
           const { data: stRow } = await supabase
             .from('students')
             .select('id')
-            .eq('access_code', String(submission.studentId))
+            .eq('access_code', String(canonicalStudentId))
             .order('created_at', { ascending: false })
             .limit(1)
             .maybeSingle()
@@ -936,49 +1010,71 @@ export async function saveExamSubmissionDirectToSupabase(
     if (studentUUID) {
       const isExamUuid = isValidUuid(exam.id)
       const earned = Number(
-        submission.instantStats?.scaledScore20 ??
-        submission.aiGrading?.scaledScore20 ??
-        submission.instantStats?.earnedPoints ??
+        normalizedSubmission.instantStats?.scaledScore20 ??
+        normalizedSubmission.aiGrading?.scaledScore20 ??
+        normalizedSubmission.instantStats?.earnedPoints ??
         0
       )
       const submissionAnswers = {
-        ...submission.answers,
+        ...normalizedSubmission.answers,
         exam_id: exam.id,
         quiz_id: exam.id,
-        student_name: submission.studentName,
-        student_national_code: submission.studentId,
+        student_name: canonicalStudentName,
+        student_national_code: canonSubStudent?.nationalCode || canonicalStudentId,
         score: earned,
-        submitted_at: submission.submittedAt || new Date().toISOString(),
+        submitted_at: normalizedSubmission.submittedAt || new Date().toISOString(),
       }
 
-      // PRIMARY DIRECT CALL: supabase.from('quiz_submissions').insert(...)
-      let { error: qsErr } = await supabase.from('quiz_submissions').insert({
-        student_id: studentUUID,
-        quiz_id: isExamUuid ? exam.id : null,
-        answers: submissionAnswers,
-        score: earned,
-        submitted_at: submission.submittedAt || new Date().toISOString(),
-      })
+      const { data: existingQs } = await supabase
+        .from('quiz_submissions')
+        .select('id, quiz_id, answers')
+        .eq('student_id', studentUUID)
+        .order('submitted_at', { ascending: false })
+        .limit(20)
+      const matchingQs = (existingQs || []).find((r: any) => (r.quiz_id || r.answers?.quiz_id || r.answers?.exam_id) === exam.id)
 
-      // If foreign key constraint failed on quiz_id (e.g. quiz was created outside quizzes table),
-      // retry with quiz_id: null to guarantee answers are safely stored in quiz_submissions table!
-      if (qsErr && isExamUuid && qsErr.code === '23503') {
-        console.warn('[ExamStore:saveExamSubmissionDirectToSupabase] FK on quiz_id, retrying with quiz_id: null...')
-        const fallbackRes = await supabase.from('quiz_submissions').insert({
+      let qsErr: any = null
+      if (matchingQs?.id) {
+        const updRes = await supabase
+          .from('quiz_submissions')
+          .update({
+            answers: { ...(matchingQs.answers || {}), ...submissionAnswers },
+            score: earned,
+            submitted_at: normalizedSubmission.submittedAt || new Date().toISOString(),
+          })
+          .eq('id', matchingQs.id)
+        qsErr = updRes.error
+      } else {
+        // PRIMARY DIRECT CALL: supabase.from('quiz_submissions').insert(...)
+        const insRes = await supabase.from('quiz_submissions').insert({
           student_id: studentUUID,
-          quiz_id: null,
+          quiz_id: isExamUuid ? exam.id : null,
           answers: submissionAnswers,
           score: earned,
-          submitted_at: submission.submittedAt || new Date().toISOString(),
+          submitted_at: normalizedSubmission.submittedAt || new Date().toISOString(),
         })
-        qsErr = fallbackRes.error
+        qsErr = insRes.error
+
+        // If foreign key constraint failed on quiz_id (e.g. quiz was created outside quizzes table),
+        // retry with quiz_id: null to guarantee answers are safely stored in quiz_submissions table!
+        if (qsErr && isExamUuid && qsErr.code === '23503') {
+          console.warn('[ExamStore:saveExamSubmissionDirectToSupabase] FK on quiz_id, retrying with quiz_id: null...')
+          const fallbackRes = await supabase.from('quiz_submissions').insert({
+            student_id: studentUUID,
+            quiz_id: null,
+            answers: submissionAnswers,
+            score: earned,
+            submitted_at: normalizedSubmission.submittedAt || new Date().toISOString(),
+          })
+          qsErr = fallbackRes.error
+        }
       }
 
       if (!qsErr) {
-        console.log('[ExamStore:saveExamSubmissionDirectToSupabase] Successfully inserted into quiz_submissions table!')
+        console.log('[ExamStore:saveExamSubmissionDirectToSupabase] Successfully synced quiz_submissions table!')
         success = true
       } else {
-        console.warn('[ExamStore:saveExamSubmissionDirectToSupabase] quiz_submissions insert warning:', qsErr)
+        console.warn('[ExamStore:saveExamSubmissionDirectToSupabase] quiz_submissions save warning:', qsErr)
       }
     }
   } catch (err) {
@@ -1009,6 +1105,568 @@ export async function saveExamSubmissionDirectToSupabase(
   return success
 }
 
+export interface GradebookUpsertResult {
+  ok: boolean
+  action: 'inserted' | 'updated' | 'skipped' | 'failed'
+  studentId: string
+  studentName?: string
+  gradeId?: string
+  scaledScore20: number
+  error?: string
+}
+
+export interface GradebookBatchSyncSummary {
+  total: number
+  succeeded: number
+  failed: number
+  skipped: number
+  verifiedInGradesTable: boolean
+  results: GradebookUpsertResult[]
+  errors: string[]
+}
+
+export async function fetchTeacherGradebookRows(
+  teacherPassword?: string
+): Promise<{ ok: boolean; rows: any[]; error?: string }> {
+  const effectivePass = getStoredTeacherPassword(teacherPassword)
+  if (!effectivePass) {
+    return {
+      ok: false,
+      rows: [],
+      error: 'رمز عبور معلم برای خواندن جدول اصلی grades موجود نیست.',
+    }
+  }
+  try {
+    const { data, error } = await supabase.rpc('teacher_list_grades', {
+      p_password: effectivePass,
+    })
+    if (error) {
+      return {
+        ok: false,
+        rows: [],
+        error: error.message || 'خطا در خواندن جدول grades از سرور',
+      }
+    }
+    if (!Array.isArray(data)) {
+      return {
+        ok: false,
+        rows: [],
+        error: 'پاسخ نامعتبر از teacher_list_grades (احتمالاً رمز معلم نادرست است).',
+      }
+    }
+    return { ok: true, rows: data }
+  } catch (err: any) {
+    return {
+      ok: false,
+      rows: [],
+      error: err?.message || 'خطای غیرمنتظره هنگام خواندن جدول grades',
+    }
+  }
+}
+
+function normalizeGradeSkillKey(val: string): string {
+  return String(val || '')
+    .replace(/^آزمون:\s*/u, '')
+    .replace(/^تکلیف:\s*/u, '')
+    .replace(/[\u200c\s]+/g, '')
+    .trim()
+}
+
+/**
+ * Finds the canonical (newest) row in PostgreSQL `grades` for a specific student & exam.
+ * Used identically across Teacher UI badges, upsert deduplication, and parity checks.
+ */
+export function findGradebookRowForExamSubmission(
+  gradesList: any[],
+  exam: Pick<Exam, 'id' | 'title' | 'subject'>,
+  studentId: string,
+  studentName?: string
+): any | null {
+  if (!Array.isArray(gradesList) || gradesList.length === 0 || !exam) return null
+  const rosterStudent = resolveCanonicalStudent(studentId || studentName)
+  const canonicalStudentId = rosterStudent?.id || String(studentId || '').trim()
+  const canonicalName = rosterStudent?.fullName || studentName
+  const cleanTitle = sanitizeExamTitle(exam.title, exam.subject)
+  const targetNormSkill = normalizeGradeSkillKey(cleanTitle)
+  const subjectNorm = String(exam.subject || 'عمومی').trim()
+
+  const matching = gradesList.filter((g: any) => {
+    if (!g) return false
+    const studentMatches =
+      isSameStudent(g.student_id, canonicalStudentId, g.student_name, canonicalName) ||
+      String(g.student_id) === String(canonicalStudentId)
+    if (!studentMatches) return false
+    if (g.examId && g.examId === exam.id) return true
+    const gSkillNorm = normalizeGradeSkillKey(g.skill || '')
+    if (!gSkillNorm || !targetNormSkill) return false
+    const gSubjectNorm = String(g.subject || 'عمومی').trim()
+    const skillExactOrContains =
+      gSkillNorm === targetNormSkill ||
+      (targetNormSkill.length >= 5 && (gSkillNorm.includes(targetNormSkill) || targetNormSkill.includes(gSkillNorm)))
+    return skillExactOrContains && (!exam.subject || gSubjectNorm === subjectNorm || gSkillNorm === targetNormSkill)
+  })
+
+  if (matching.length === 0) return null
+  matching.sort((a: any, b: any) => {
+    const ta = a?.recorded_at ? new Date(a.recorded_at).getTime() : 0
+    const tb = b?.recorded_at ? new Date(b.recorded_at).getTime() : 0
+    return tb - ta
+  })
+  return matching[0]
+}
+
+/**
+ * Deduplicates raw PostgreSQL `grades` rows by (canonical studentId + subject + normalized skill),
+ * always keeping the newest row by `recorded_at` without deleting any DB records.
+ */
+export function deduplicateGradebookRows(gradesList: any[]): any[] {
+  if (!Array.isArray(gradesList) || gradesList.length === 0) return []
+  const sorted = [...gradesList].sort((a: any, b: any) => {
+    const ta = a?.recorded_at ? new Date(a.recorded_at).getTime() : 0
+    const tb = b?.recorded_at ? new Date(b.recorded_at).getTime() : 0
+    return tb - ta
+  })
+  const seen = new Set<string>()
+  const deduped: any[] = []
+  for (const g of sorted) {
+    if (!g) continue
+    const canon = resolveCanonicalStudent(g.student_id || g.student_name)
+    const stKey = canon?.id || String(g.student_id || '').trim()
+    const skKey = normalizeGradeSkillKey(g.skill || '')
+    const subjKey = String(g.subject || 'عمومی').trim()
+    const key = skKey ? `${stKey}::${subjKey}::${skKey}` : `${stKey}::${g.id || Math.random()}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    deduped.push(g)
+  }
+  return deduped
+}
+
+/**
+ * Upserts a single exam grade in Supabase `grades` table independently per canonical student ID.
+ * Checks EVERY Supabase RPC error and returns an explicit status object — NEVER swallows errors silently.
+ */
+export async function upsertGradebookExamRow(params: {
+  teacherPassword: string
+  studentId: string
+  studentName?: string
+  exam: Exam
+  scaledScore20: number
+  existingGradesCache?: any[]
+}): Promise<GradebookUpsertResult> {
+  const { teacherPassword, studentId, studentName, exam, scaledScore20, existingGradesCache } = params
+  const rosterStudent = resolveCanonicalStudent(studentId || studentName)
+  const canonicalStudentId = rosterStudent?.id || String(studentId || '').trim()
+  const resolvedName = rosterStudent?.fullName || studentName
+  const cleanScaled20 = Math.min(20, Math.max(0, roundScore2(scaledScore20)))
+
+  if (!canonicalStudentId || isTestStudentRecord(canonicalStudentId, resolvedName)) {
+    return {
+      ok: true,
+      action: 'skipped',
+      studentId: canonicalStudentId || String(studentId || ''),
+      studentName: resolvedName,
+      scaledScore20: cleanScaled20,
+    }
+  }
+
+  const effectivePass = String(teacherPassword || '').trim()
+  if (!effectivePass) {
+    return {
+      ok: false,
+      action: 'failed',
+      studentId: canonicalStudentId,
+      studentName: resolvedName,
+      scaledScore20: cleanScaled20,
+      error: 'رمز عبور معلم برای ثبت نمره در جدول اصلی grades وارد نشده است.',
+    }
+  }
+
+  const subject = exam.subject || 'عمومی'
+  const cleanTitle = sanitizeExamTitle(exam.title, exam.subject)
+  const skill = exam.mode === 'assignment' ? `تکلیف: ${cleanTitle}` : `آزمون: ${cleanTitle}`
+
+  try {
+    let gradesList = existingGradesCache
+    if (!gradesList) {
+      const { data: listData, error: listErr } = await supabase.rpc('teacher_list_grades', {
+        p_password: effectivePass,
+      })
+      if (listErr) {
+        return {
+          ok: false,
+          action: 'failed',
+          studentId: canonicalStudentId,
+          studentName: resolvedName,
+          scaledScore20: cleanScaled20,
+          error: `خطا در خواندن جدول grades: ${listErr.message || 'خطای RPC'}`,
+        }
+      }
+      if (!Array.isArray(listData)) {
+        return {
+          ok: false,
+          action: 'failed',
+          studentId: canonicalStudentId,
+          studentName: resolvedName,
+          scaledScore20: cleanScaled20,
+          error: 'پاسخ نامعتبر از teacher_list_grades (احتمالاً رمز معلم نادرست است).',
+        }
+      }
+      gradesList = listData
+    }
+
+    const existingRow = findGradebookRowForExamSubmission(gradesList, exam, canonicalStudentId, resolvedName)
+
+    if (existingRow?.id) {
+      const { error: updErr } = await supabase.rpc('teacher_update_grade', {
+        p_password: effectivePass,
+        p_grade_id: existingRow.id,
+        p_score: cleanScaled20,
+        p_max_score: 20,
+      })
+      if (updErr) {
+        return {
+          ok: false,
+          action: 'failed',
+          studentId: canonicalStudentId,
+          studentName: resolvedName,
+          gradeId: String(existingRow.id),
+          scaledScore20: cleanScaled20,
+          error: `خطا در بروزرسانی نمره در جدول grades: ${updErr.message || 'خطای RPC'}`,
+        }
+      }
+      return {
+        ok: true,
+        action: 'updated',
+        studentId: canonicalStudentId,
+        studentName: resolvedName,
+        gradeId: String(existingRow.id),
+        scaledScore20: cleanScaled20,
+      }
+    }
+
+    const { data: addData, error: addErr } = await supabase.rpc('teacher_add_grade', {
+      p_password: effectivePass,
+      p_student_id: canonicalStudentId,
+      p_subject: subject,
+      p_skill: skill,
+      p_score: cleanScaled20,
+      p_max_score: 20,
+    })
+    if (addErr) {
+      return {
+        ok: false,
+        action: 'failed',
+        studentId: canonicalStudentId,
+        studentName: resolvedName,
+        scaledScore20: cleanScaled20,
+        error: `خطا در درج نمره در جدول grades: ${addErr.message || 'خطای RPC'}`,
+      }
+    }
+
+    const insertedId =
+      typeof addData === 'string'
+        ? addData
+        : Array.isArray(addData)
+        ? addData[0]?.id
+        : addData?.id
+
+    return {
+      ok: true,
+      action: 'inserted',
+      studentId: canonicalStudentId,
+      studentName: resolvedName,
+      gradeId: insertedId ? String(insertedId) : undefined,
+      scaledScore20: cleanScaled20,
+    }
+  } catch (e: any) {
+    return {
+      ok: false,
+      action: 'failed',
+      studentId: canonicalStudentId,
+      studentName: resolvedName,
+      scaledScore20: cleanScaled20,
+      error: e?.message || 'خطای غیرمنتظره هنگام ارتباط با جدول grades',
+    }
+  }
+}
+
+/**
+ * Syncs an individual __EXAM_SUB__ post in Supabase posts table strictly by (examId, canonicalStudentId).
+ */
+async function syncIndividualExamSubPost(
+  submission: StudentExamSubmission,
+  exam: Exam
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const canon = resolveCanonicalStudent(submission.studentId || submission.studentName)
+    const canonStudentId = canon?.id || String(submission.studentId).trim()
+    const normalizedSub: StudentExamSubmission = {
+      ...submission,
+      studentId: canonStudentId,
+      studentName: canon?.fullName || submission.studentName,
+    }
+    const postTitle = `__EXAM_SUB__:${exam.id}:${canonStudentId}`
+    const syncBody = JSON.stringify({
+      ...normalizedSub,
+      syncStatus: 'synced',
+      clientExamTitle: exam.title,
+      clientSubject: exam.subject,
+    })
+
+    const candidateTitles = [postTitle]
+    if (canon?.nationalCode && canon.nationalCode !== canonStudentId) {
+      candidateTitles.push(`__EXAM_SUB__:${exam.id}:${canon.nationalCode}`)
+    }
+
+    const { data: existingPosts, error: selErr } = await supabase
+      .from('posts')
+      .select('id, title')
+      .in('title', candidateTitles)
+      .order('created_at', { ascending: false })
+      .limit(10)
+
+    if (selErr) {
+      return { ok: false, error: selErr.message }
+    }
+
+    if (Array.isArray(existingPosts) && existingPosts.length > 0) {
+      const target = existingPosts.find((p: any) => p.title === postTitle) || existingPosts[0]
+      const { error: updErr } = await supabase
+        .from('posts')
+        .update({ title: postTitle, body: syncBody, publish_at: new Date().toISOString() })
+        .eq('id', target.id)
+      if (updErr) {
+        const { error: insFallbackErr } = await supabase.from('posts').insert({
+          title: postTitle,
+          body: syncBody,
+          type: 'announcement',
+          publish_at: new Date().toISOString(),
+        })
+        if (insFallbackErr) return { ok: false, error: insFallbackErr.message }
+      }
+    } else {
+      const { error: insErr } = await supabase.from('posts').insert({
+        title: postTitle,
+        body: syncBody,
+        type: 'announcement',
+        publish_at: new Date().toISOString(),
+      })
+      if (insErr) return { ok: false, error: insErr.message }
+    }
+    return { ok: true }
+  } catch (err: any) {
+    return { ok: false, error: err?.message || 'syncIndividualExamSubPost error' }
+  }
+}
+
+/**
+ * Syncs teacher approval/regrade into Supabase quiz_submissions table per student UUID.
+ */
+async function syncQuizSubmissionScoreToSupabase(
+  submission: StudentExamSubmission,
+  exam: Exam
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const canon = resolveCanonicalStudent(submission.studentId || submission.studentName)
+    const studentUuid = canon?.id && isValidUuid(canon.id) ? canon.id : (isValidUuid(submission.studentId) ? submission.studentId : null)
+    if (!studentUuid) return { ok: true }
+
+    const eff = getSubmissionEffectiveScore(exam, submission)
+    const isApproved = isSubmissionApprovedByTeacher(submission) && eff.isApproved
+    const { data: rows, error: selErr } = await supabase
+      .from('quiz_submissions')
+      .select('id, quiz_id, answers')
+      .eq('student_id', studentUuid)
+      .order('submitted_at', { ascending: false })
+      .limit(20)
+
+    if (selErr) return { ok: false, error: selErr.message }
+
+    const matching = (rows || []).filter((r: any) => (r.quiz_id || r.answers?.quiz_id || r.answers?.exam_id) === exam.id)
+    if (matching.length === 0) return { ok: true }
+
+    const target = matching[0]
+    const updatedAnswers = {
+      ...(target.answers || submission.answers || {}),
+      exam_id: exam.id,
+      quiz_id: exam.id,
+      student_name: canon?.fullName || submission.studentName,
+      student_national_code: canon?.nationalCode || submission.studentId,
+      score: eff.scaledScore20,
+      raw_score: eff.totalScore,
+      scaledScore20: eff.scaledScore20,
+      totalScore: eff.totalScore,
+      approved: isApproved,
+      teacher_approved: isApproved,
+      is_released: Boolean(submission.isReleased || isApproved),
+      approved_at: submission.teacherGrading?.approvedAt,
+      questionScores: eff.questionScores,
+      teacherGrading: submission.teacherGrading,
+    }
+
+    const { error: updErr } = await supabase
+      .from('quiz_submissions')
+      .update({
+        score: isApproved ? eff.scaledScore20 : 0,
+        answers: updatedAnswers,
+      })
+      .eq('id', target.id)
+
+    if (updErr) return { ok: false, error: updErr.message }
+    return { ok: true }
+  } catch (err: any) {
+    return { ok: false, error: err?.message || 'syncQuizSubmissionScoreToSupabase error' }
+  }
+}
+
+/**
+ * Persists a batch of approved exam submissions into PostgreSQL `grades` table
+ * independently per canonical student ID, verifies persistence via `teacher_list_grades`,
+ * and returns exact per-student results & errors without silent failures.
+ */
+export async function syncApprovedSubmissionsBatchToGradebook(params: {
+  exam: Exam
+  submissions: StudentExamSubmission[]
+  teacherPassword: string
+}): Promise<GradebookBatchSyncSummary> {
+  const { exam, submissions, teacherPassword } = params
+  const effectivePass = getStoredTeacherPassword(teacherPassword)
+  const results: GradebookUpsertResult[] = []
+  const errors: string[] = []
+
+  const realSubs = mergeSubmissionsDeduplicated([], submissions).filter(
+    (s) => s && s.examId === exam.id && !isTestStudentRecord(s.studentId, s.studentName)
+  )
+
+  if (!effectivePass) {
+    const errMsg = 'رمز عبور معلم برای ثبت نمرات در جدول اصلی grades موجود نیست.'
+    return {
+      total: realSubs.length,
+      succeeded: 0,
+      failed: realSubs.length,
+      skipped: 0,
+      verifiedInGradesTable: false,
+      results: realSubs.map((s) => ({
+        ok: false,
+        action: 'failed',
+        studentId: s.studentId,
+        studentName: s.studentName,
+        scaledScore20: getSubmissionEffectiveScore(exam, s).scaledScore20,
+        error: errMsg,
+      })),
+      errors: [errMsg],
+    }
+  }
+
+  const { data: existingGrades, error: listErr } = await supabase.rpc('teacher_list_grades', {
+    p_password: effectivePass,
+  })
+  if (listErr || !Array.isArray(existingGrades)) {
+    const errMsg = listErr?.message
+      ? `خطا در خواندن جدول grades: ${listErr.message}`
+      : 'دریافت فهرست جدول grades ناموفق بود (رمز معلم را بررسی کنید).'
+    return {
+      total: realSubs.length,
+      succeeded: 0,
+      failed: realSubs.length,
+      skipped: 0,
+      verifiedInGradesTable: false,
+      results: realSubs.map((s) => ({
+        ok: false,
+        action: 'failed',
+        studentId: s.studentId,
+        studentName: s.studentName,
+        scaledScore20: getSubmissionEffectiveScore(exam, s).scaledScore20,
+        error: errMsg,
+      })),
+      errors: [errMsg],
+    }
+  }
+
+  const gradesCache = [...existingGrades]
+  for (const s of realSubs) {
+    const eff = getSubmissionEffectiveScore(exam, s)
+    if (!isSubmissionApprovedByTeacher(s) || !eff.isApproved) {
+      results.push({
+        ok: true,
+        action: 'skipped',
+        studentId: s.studentId,
+        studentName: s.studentName,
+        scaledScore20: eff.scaledScore20,
+      })
+      continue
+    }
+    const res = await upsertGradebookExamRow({
+      teacherPassword: effectivePass,
+      studentId: s.studentId,
+      studentName: s.studentName,
+      exam,
+      scaledScore20: eff.scaledScore20,
+      existingGradesCache: gradesCache,
+    })
+    results.push(res)
+    if (!res.ok && res.error) {
+      errors.push(`${s.studentName || s.studentId}: ${res.error}`)
+    }
+  }
+
+  const succeeded = results.filter((r) => r.ok && r.action !== 'skipped').length
+  const failed = results.filter((r) => !r.ok).length
+  const skipped = results.filter((r) => r.ok && r.action === 'skipped').length
+
+  // Re-read `grades` table to verify actual persistence
+  let verifiedInGradesTable = false
+  if (succeeded > 0) {
+    try {
+      const { data: verifyRows, error: verifyErr } = await supabase.rpc('teacher_list_grades', {
+        p_password: effectivePass,
+      })
+      if (!verifyErr && Array.isArray(verifyRows)) {
+        const expectedSucceeded = results.filter((r) => r.ok && r.action !== 'skipped')
+        verifiedInGradesTable = expectedSucceeded.every((r) =>
+          Boolean(findGradebookRowForExamSubmission(verifyRows, exam, r.studentId, r.studentName))
+        )
+      }
+    } catch {}
+  }
+
+  return {
+    total: realSubs.length,
+    succeeded,
+    failed,
+    skipped,
+    verifiedInGradesTable,
+    results,
+    errors,
+  }
+}
+
+/**
+ * Syncs all already-approved & released submissions of an exam into PostgreSQL `grades` table
+ * without modifying any unapproved/pending submission.
+ */
+export async function syncExamApprovedGradesToGradebook(
+  examId: string,
+  teacherPassword?: string
+): Promise<GradebookBatchSyncSummary> {
+  const teacherPass = getStoredTeacherPassword(teacherPassword)
+  const exams = await fetchAllExams(teacherPass)
+  const exam = exams.find((e) => e.id === examId)
+  if (!exam) {
+    throw new Error(`آزمون با شناسه ${examId} یافت نشد.`)
+  }
+  const subs = await fetchExamSubmissions(examId, undefined, true)
+  const approvedAndReleased = subs.filter(
+    (s) => isSubmissionApprovedByTeacher(s) && isExamResultsReleased(exam, s)
+  )
+  return syncApprovedSubmissionsBatchToGradebook({
+    exam,
+    submissions: approvedAndReleased,
+    teacherPassword: teacherPass,
+  })
+}
+
 /**
  * Releases report cards and answer keys for all students in an exam.
  */
@@ -1016,12 +1674,26 @@ export async function releaseExamResultsForAll(
   examId: string,
   teacherPassword?: string,
   unpublish = false
-): Promise<{ success: boolean; exam?: Exam }> {
+): Promise<{ success: boolean; exam?: Exam; gradeSyncSummary?: GradebookBatchSyncSummary }> {
   const teacherPass = getStoredTeacherPassword(teacherPassword)
-  const allExams = getLocalExams()
-  const examIdx = allExams.findIndex((e) => e.id === examId)
+  let allExams = getLocalExams()
+  let examIdx = allExams.findIndex((e) => e.id === examId)
+
+  // Hydrate authoritative exam (with correctAnswer keys) from Supabase if missing or stripped
+  const localExam = examIdx >= 0 ? allExams[examIdx] : undefined
+  const localHasKeys = Boolean(localExam && Array.isArray(localExam.questions) && localExam.questions.some((q) => q.correctAnswer !== undefined))
+  if (!localExam || !localHasKeys) {
+    try {
+      const remoteExams = await fetchAllExams(teacherPass)
+      if (remoteExams.length > 0) {
+        allExams = remoteExams
+        examIdx = allExams.findIndex((e) => e.id === examId)
+      }
+    } catch {}
+  }
+
   if (examIdx === -1) {
-    console.warn('[ExamStore:releaseExamResultsForAll] Exam not found locally:', examId)
+    console.warn('[ExamStore:releaseExamResultsForAll] Exam not found:', examId)
     return { success: false }
   }
 
@@ -1037,30 +1709,115 @@ export async function releaseExamResultsForAll(
   // Update in Supabase __SYSTEM_EXAMS__
   await saveExam(updatedExam, teacherPass)
 
-  // Update all submissions for this exam
-  const allSubs = getLocalSubmissions()
+  // Hydrate all submissions for this exam before updating
+  let examSubsFresh: StudentExamSubmission[] = []
+  try {
+    examSubsFresh = await fetchExamSubmissions(examId, undefined, true)
+  } catch {
+    examSubsFresh = getLocalSubmissions().filter((s) => s.examId === examId)
+  }
+
+  const allSubs = mergeSubmissionsDeduplicated(getLocalSubmissions(), examSubsFresh)
+  const maxExamPts = getExamMaxPoints(updatedExam)
+  const nowIso = new Date().toISOString()
+
+  const updatedExamSubsOnly: StudentExamSubmission[] = []
   const updatedSubs = allSubs.map((sub) => {
-    if (sub.examId === examId) {
-      return {
+    if (sub.examId !== examId) return sub
+
+    if (unpublish) {
+      const lockedSub: StudentExamSubmission = {
         ...sub,
-        isReleased: !unpublish,
-        is_released: !unpublish,
-        status: !unpublish ? ('released' as const) : ('pending_approval' as const),
+        isReleased: false,
+        is_released: false,
+        status: 'pending_approval' as const,
         teacherGrading: {
           ...(sub.teacherGrading || {}),
-          approved: !unpublish,
-          approvedAt: !unpublish ? new Date().toISOString() : undefined,
-          totalScore: sub.teacherGrading?.totalScore ?? sub.aiGrading?.totalScore ?? sub.instantStats?.earnedPoints ?? 0,
-          scaledScore20: sub.teacherGrading?.scaledScore20 ?? sub.aiGrading?.scaledScore20 ?? sub.instantStats?.scaledScore20 ?? 0,
+          approved: false,
+          approvedAt: undefined,
         },
       }
+      updatedExamSubsOnly.push(lockedSub)
+      return lockedSub
     }
-    return sub
+
+    // Recompute authoritative effective score while honoring any explicit manual teacher scores
+    const eff = getSubmissionEffectiveScore(updatedExam, {
+      ...sub,
+      status: 'released',
+      isReleased: true,
+      teacherGrading: {
+        ...(sub.teacherGrading || {}),
+        approved: true,
+      },
+    })
+    const evalResult = evaluateEntireExamSubmission(updatedExam, sub.answers || {})
+
+    const nextSub: StudentExamSubmission = {
+      ...sub,
+      isReleased: true,
+      is_released: true,
+      status: 'released' as const,
+      earnedPoints: eff.totalScore,
+      totalScore: eff.totalScore,
+      scaledScore20: eff.scaledScore20,
+      instantStats: {
+        totalQuestions: evalResult.totalQuestions,
+        answeredCount: evalResult.answeredCount,
+        unansweredCount: evalResult.unansweredCount,
+        correctCount: evalResult.correctCount,
+        wrongCount: evalResult.wrongCount,
+        percentage: Math.round((eff.totalScore / (maxExamPts || 20)) * 100),
+        scaledScore20: eff.scaledScore20,
+        earnedPoints: eff.totalScore,
+        maxPoints: maxExamPts,
+        status: eff.status,
+      },
+      aiGrading: {
+        ...(sub.aiGrading || {}),
+        questionScores: evalResult.questionScores,
+        questionFeedbacks: sub.aiGrading?.questionFeedbacks || evalResult.questionFeedbacks,
+        totalScore: evalResult.earnedPoints,
+        scaledScore20: evalResult.scaledScore20,
+        gradedAt: sub.aiGrading?.gradedAt || nowIso,
+      },
+      teacherGrading: {
+        ...(sub.teacherGrading || {}),
+        approved: true,
+        approvedAt: sub.teacherGrading?.approvedAt || nowIso,
+        questionScores: eff.questionScores,
+        questionFeedbacks: sub.teacherGrading?.questionFeedbacks || evalResult.questionFeedbacks,
+        totalScore: eff.totalScore,
+        scaledScore20: eff.scaledScore20,
+      },
+    }
+    updatedExamSubsOnly.push(nextSub)
+    return nextSub
   })
   saveLocalSubmissions(updatedSubs)
 
-  // Sync updated submissions array to Supabase
-  await syncExamSubmissionsToSupabase(updatedSubs, teacherPass)
+  // Merge ONLY this exam's updated submissions into remote __SYSTEM_EXAM_SUBMISSIONS__
+  await syncExamSubmissionsToSupabase(updatedExamSubsOnly, teacherPass, { preserveExplicitUpdates: true })
+
+  // Sync per-student individual submission posts & quiz_submissions
+  if (updatedExamSubsOnly.length > 0) {
+    await Promise.allSettled(
+      updatedExamSubsOnly.flatMap((s) => [
+        syncIndividualExamSubPost(s, updatedExam),
+        syncQuizSubmissionScoreToSupabase(s, updatedExam),
+      ])
+    )
+  }
+
+  // Persist to PostgreSQL `grades` table per canonical student & collect honest result/errors
+  let gradeSyncSummary: GradebookBatchSyncSummary | undefined
+  if (!unpublish && updatedExamSubsOnly.length > 0) {
+    gradeSyncSummary = await syncApprovedSubmissionsBatchToGradebook({
+      exam: updatedExam,
+      submissions: updatedExamSubsOnly,
+      teacherPassword: teacherPass,
+    })
+  }
 
   // Dispatch events to refresh both student views and teacher views
   if (typeof window !== 'undefined') {
@@ -1068,18 +1825,67 @@ export async function releaseExamResultsForAll(
     window.dispatchEvent(new CustomEvent('exam_submission_updated', { detail: { examId } }))
   }
 
-  return { success: true, exam: updatedExam }
+  return { success: true, exam: updatedExam, gradeSyncSummary }
 }
 
-export function getSubmissionCanonicalKey(examId: string, studentId: string): string {
-  const canon = resolveCanonicalStudent(studentId)
+export function getSubmissionCanonicalKey(examId: string, studentId: string, studentName?: string): string {
+  const canon = resolveCanonicalStudent(studentId || studentName)
   const canonId = canon ? canon.id : String(studentId).trim()
   return `${examId}::${canonId}`
 }
 
+function getSubmissionQualityScore(sub: StudentExamSubmission) {
+  const canon = resolveCanonicalStudent(sub.studentId || sub.studentName)
+  const isApproved = isSubmissionApprovedByTeacher(sub)
+  const hasManualOverride = Boolean(sub.teacherGrading?.manualOverride)
+  const approvedAtMs = sub.teacherGrading?.approvedAt ? new Date(sub.teacherGrading.approvedAt).getTime() : 0
+  const submittedAtMs = sub.submittedAt ? new Date(sub.submittedAt).getTime() : 0
+  const qScores = sub.teacherGrading?.questionScores
+  const qKeys = qScores && typeof qScores === 'object' ? Object.keys(qScores) : []
+  const qSum = qKeys.length > 0
+    ? roundScore2(qKeys.reduce((acc, k) => acc + (Number((qScores as any)[k]) || 0), 0))
+    : 0
+  const fbText = sub.teacherGrading?.questionFeedbacks ? JSON.stringify(sub.teacherGrading.questionFeedbacks) : ''
+  const hasStaleAiFeedback = fbText.includes('تفاوت در واژگان') || fbText.includes('نمره اولیه:')
+  const hasTeacherApprovedNote = String(sub.teacherGrading?.teacherNotes || '').includes('تایید شده توسط آموزگار')
+  const scalarScore = Number(sub.teacherGrading?.scaledScore20 ?? sub.teacherGrading?.totalScore ?? sub.scaledScore20 ?? 0)
+  const effectiveRankScore = qKeys.length > 0 && qSum > 0 ? qSum : scalarScore
+  const isCanonicalUuid = Boolean(canon && String(sub.studentId).trim() === canon.id)
+  const ansCount = Object.keys(sub.answers || {}).length
+  return {
+    isApproved,
+    hasManualOverride,
+    approvedAtMs,
+    submittedAtMs,
+    qCount: qKeys.length,
+    qSum,
+    hasStaleAiFeedback,
+    hasTeacherApprovedNote,
+    effectiveRankScore,
+    isCanonicalUuid,
+    ansCount,
+  }
+}
+
+function compareApprovedSubPriority(a: StudentExamSubmission, b: StudentExamSubmission): number {
+  const qa = getSubmissionQualityScore(a)
+  const qb = getSubmissionQualityScore(b)
+
+  if (qa.hasManualOverride !== qb.hasManualOverride) return qa.hasManualOverride ? 1 : -1
+  if (qa.hasStaleAiFeedback !== qb.hasStaleAiFeedback) return qa.hasStaleAiFeedback ? -1 : 1
+  if (qa.hasTeacherApprovedNote !== qb.hasTeacherApprovedNote) return qa.hasTeacherApprovedNote ? 1 : -1
+  if (Math.abs(qa.approvedAtMs - qb.approvedAtMs) > 1000) return qa.approvedAtMs > qb.approvedAtMs ? 1 : -1
+  if (Math.abs(qa.effectiveRankScore - qb.effectiveRankScore) > 0.01) return qa.effectiveRankScore > qb.effectiveRankScore ? 1 : -1
+  if (qa.qCount !== qb.qCount) return qa.qCount > qb.qCount ? 1 : -1
+  if (qa.isCanonicalUuid !== qb.isCanonicalUuid) return qa.isCanonicalUuid ? 1 : -1
+  if (qa.ansCount !== qb.ansCount) return qa.ansCount > qb.ansCount ? 1 : -1
+  return qa.submittedAtMs >= qb.submittedAtMs ? 1 : -1
+}
+
 /**
- * Deduplicates submissions by (examId, studentId) composite key.
- * Preserves teacher approvals, merges answer sets, and retains audit history.
+ * Deduplicates submissions by (examId, canonicalStudentId) composite key.
+ * Preserves teacher approvals, prioritizes genuine teacher-graded records over stale AI fallbacks,
+ * merges answer sets cleanly, and retains audit history.
  */
 export function mergeSubmissionsDeduplicated(
   baseList: StudentExamSubmission[],
@@ -1087,53 +1893,51 @@ export function mergeSubmissionsDeduplicated(
 ): StudentExamSubmission[] {
   const map = new Map<string, StudentExamSubmission>()
 
-  const processSub = (sub: StudentExamSubmission) => {
-    if (!sub || !sub.examId || !sub.studentId) return
-    const canon = resolveCanonicalStudent(sub.studentId || sub.studentName)
-    if (canon) {
-      sub.studentId = canon.id
-      sub.studentName = canon.fullName
+  const processSub = (rawSub: StudentExamSubmission) => {
+    if (!rawSub || !rawSub.examId || !rawSub.studentId) return
+    const canon = resolveCanonicalStudent(rawSub.studentId || rawSub.studentName)
+    const normalizedSub: StudentExamSubmission = {
+      ...rawSub,
+      studentId: canon ? canon.id : String(rawSub.studentId).trim(),
+      studentName: canon ? canon.fullName : rawSub.studentName,
     }
-    const key = getSubmissionCanonicalKey(sub.examId, sub.studentId)
+    const key = getSubmissionCanonicalKey(normalizedSub.examId, normalizedSub.studentId, normalizedSub.studentName)
     const existing = map.get(key)
     if (!existing) {
-      map.set(key, { ...sub })
+      map.set(key, normalizedSub)
       return
     }
 
-    const existingTime = existing.submittedAt ? new Date(existing.submittedAt).getTime() : 0
-    const incomingTime = sub.submittedAt ? new Date(sub.submittedAt).getTime() : 0
-    const isIncomingNewer = incomingTime >= existingTime
+    const qExisting = getSubmissionQualityScore(existing)
+    const qIncoming = getSubmissionQualityScore(normalizedSub)
 
-    const isExistingApproved = Boolean(existing.teacherGrading?.approved)
-    const isIncomingApproved = Boolean(sub.teacherGrading?.approved)
-    const existingScore = Number(existing.teacherGrading?.scaledScore20 ?? existing.scaledScore20 ?? 0)
-    const incomingScore = Number(sub.teacherGrading?.scaledScore20 ?? sub.scaledScore20 ?? 0)
+    let primary = qIncoming.submittedAtMs >= qExisting.submittedAtMs ? normalizedSub : existing
+    let secondary = primary === normalizedSub ? existing : normalizedSub
 
-    let primary = isIncomingNewer ? sub : existing
-    let secondary = isIncomingNewer ? existing : sub
-
-    if (isExistingApproved && !isIncomingApproved) {
+    if (qExisting.isApproved && !qIncoming.isApproved) {
       primary = existing
-      secondary = sub
-    } else if (isIncomingApproved && !isExistingApproved) {
-      primary = sub
+      secondary = normalizedSub
+    } else if (qIncoming.isApproved && !qExisting.isApproved) {
+      primary = normalizedSub
       secondary = existing
-    } else if (isExistingApproved && isIncomingApproved) {
-      if (existingScore > incomingScore) {
-        primary = existing
-        secondary = sub
-      } else {
-        primary = sub
-        secondary = existing
-      }
+    } else if (qExisting.isApproved && qIncoming.isApproved) {
+      const cmp = compareApprovedSubPriority(normalizedSub, existing)
+      primary = cmp >= 0 ? normalizedSub : existing
+      secondary = primary === normalizedSub ? existing : normalizedSub
+    } else if (qIncoming.ansCount !== qExisting.ansCount) {
+      primary = qIncoming.ansCount > qExisting.ansCount ? normalizedSub : existing
+      secondary = primary === normalizedSub ? existing : normalizedSub
     }
 
     // Combine regrade history without duplicates
     const combinedHistory = [
       ...(existing.regradeHistory || []),
-      ...(sub.regradeHistory || []),
+      ...(normalizedSub.regradeHistory || []),
     ].filter((v, i, a) => a.findIndex((t) => t.regradedAt === v.regradedAt) === i)
+
+    // Prefer richer answers map (preserving question answers from primary while filling missing keys from secondary)
+    const mergedAnswers = { ...(secondary.answers || {}), ...(primary.answers || {}) }
+    const anyApproved = qExisting.isApproved || qIncoming.isApproved
 
     const merged: StudentExamSubmission = {
       ...secondary,
@@ -1146,49 +1950,80 @@ export function mergeSubmissionsDeduplicated(
           ? primary.studentName
           : secondary.studentName || primary.studentName,
       submittedAt: primary.submittedAt || secondary.submittedAt,
-      answers: { ...(secondary.answers || {}), ...(primary.answers || {}) },
+      answers: mergedAnswers,
       syncStatus:
         primary.syncStatus === 'synced' || secondary.syncStatus === 'synced'
           ? 'synced'
           : primary.syncStatus,
       isReleased: Boolean(primary.isReleased || secondary.isReleased),
       is_released: Boolean(primary.is_released || secondary.is_released),
-      status: isExistingApproved || isIncomingApproved ? 'graded' : primary.status || secondary.status,
-      teacherGrading:
-        isExistingApproved || isIncomingApproved
-          ? {
+      status: anyApproved ? 'graded' : primary.status || secondary.status,
+      teacherGrading: anyApproved
+        ? (() => {
+            const pQ = primary.teacherGrading?.questionScores
+            const sQ = secondary.teacherGrading?.questionScores
+            const pickedFromPrimaryQ = Boolean(pQ && typeof pQ === 'object' && Object.keys(pQ).length > 0)
+            const pickedQScores = pickedFromPrimaryQ
+              ? pQ
+              : sQ && typeof sQ === 'object' && Object.keys(sQ).length > 0
+              ? sQ
+              : pQ || sQ
+
+            const pFb = primary.teacherGrading?.questionFeedbacks
+            const sFb = secondary.teacherGrading?.questionFeedbacks
+            const pickedFeedbacks =
+              pickedFromPrimaryQ && pFb && typeof pFb === 'object' && Object.keys(pFb).length > 0
+                ? pFb
+                : !pickedFromPrimaryQ && sFb && typeof sFb === 'object' && Object.keys(sFb).length > 0
+                ? sFb
+                : (pFb && typeof pFb === 'object' && Object.keys(pFb).length > 0 ? pFb : sFb)
+
+            const pTot = primary.teacherGrading?.totalScore
+            const sTot = secondary.teacherGrading?.totalScore
+            const pScaled = primary.teacherGrading?.scaledScore20
+            const sScaled = secondary.teacherGrading?.scaledScore20
+
+            const resolvedTotal = (() => {
+              if (pickedQScores && typeof pickedQScores === 'object' && Object.keys(pickedQScores).length > 0) {
+                const sum = Object.values(pickedQScores).reduce(
+                  (acc: number, v: any) => acc + (Number(v) || 0),
+                  0
+                )
+                return roundScore2(sum)
+              }
+              if (typeof pTot === 'number' && pTot > 0) return pTot
+              if (typeof sTot === 'number' && sTot > 0) return sTot
+              return pTot !== undefined ? pTot : sTot
+            })()
+
+            // Avoid locking a stale 0 scaledScore20 when questionScores sum > 0 (let getSubmissionEffectiveScore compute /20 from questionScores)
+            const resolvedScaled = (() => {
+              if (pickedFromPrimaryQ) {
+                if (typeof pScaled === 'number' && pScaled > 0) return pScaled
+                if (resolvedTotal && resolvedTotal > 0) return undefined
+              }
+              if (typeof pScaled === 'number' && pScaled > 0) return pScaled
+              if (typeof sScaled === 'number' && sScaled > 0) return sScaled
+              return pScaled !== undefined ? pScaled : sScaled
+            })()
+
+            return {
               ...(secondary.teacherGrading || {}),
               ...(primary.teacherGrading || {}),
-              questionScores:
-                primary.teacherGrading?.questionScores ||
-                secondary.teacherGrading?.questionScores,
-              questionFeedbacks:
-                primary.teacherGrading?.questionFeedbacks ||
-                secondary.teacherGrading?.questionFeedbacks,
+              manualOverride: Boolean(
+                primary.teacherGrading?.manualOverride || secondary.teacherGrading?.manualOverride
+              ),
+              questionScores: pickedQScores,
+              questionFeedbacks: pickedFeedbacks,
               teacherNotes:
                 primary.teacherGrading?.teacherNotes ||
                 secondary.teacherGrading?.teacherNotes,
-              totalScore: (() => {
-                const qScores =
-                  primary.teacherGrading?.questionScores ||
-                  secondary.teacherGrading?.questionScores
-                if (qScores && typeof qScores === 'object') {
-                  const sum = Object.values(qScores).reduce(
-                    (acc: number, v: any) => acc + (Number(v) || 0),
-                    0
-                  )
-                  if (sum > 0) return Math.round(sum * 100) / 100
-                }
-                const pTot = primary.teacherGrading?.totalScore
-                const sTot = secondary.teacherGrading?.totalScore
-                return pTot !== undefined ? pTot : (sTot !== undefined ? sTot : 0)
-              })(),
-              scaledScore20:
-                primary.teacherGrading?.scaledScore20 ??
-                secondary.teacherGrading?.scaledScore20 ?? 0,
+              totalScore: resolvedTotal,
+              scaledScore20: resolvedScaled,
               approved: true,
             }
-          : primary.teacherGrading || secondary.teacherGrading,
+          })()
+        : primary.teacherGrading || secondary.teacherGrading,
       aiGrading: primary.aiGrading || secondary.aiGrading,
       instantStats: primary.instantStats || secondary.instantStats,
       regradeHistory: combinedHistory.length > 0 ? combinedHistory : undefined,
@@ -1220,7 +2055,7 @@ export async function fetchExamSubmissions(
 
   const lastAt = recentSubsFetchAt.get(dedupeKey) || 0
   if (!force && Date.now() - lastAt < SUBS_DEDUPE_TTL_MS) {
-    let cached = getLocalSubmissions()
+    let cached = mergeSubmissionsDeduplicated([], getLocalSubmissions())
     if (examId) cached = cached.filter((s) => s.examId === examId)
     if (studentId) cached = cached.filter((s) => isSameStudent(s.studentId, studentId, s.studentName))
     if (cached.length > 0) return cached
@@ -1244,7 +2079,9 @@ export async function fetchExamSubmissions(
         )
         if (json && json.success && Array.isArray(json.submissions)) {
           json.submissions.forEach((s: StudentExamSubmission) => {
-            if (s && s.examId && s.studentId) fetchedList.push(s)
+            if (s && s.examId && s.studentId && (!examId || s.examId === examId)) {
+              fetchedList.push(s)
+            }
           })
         }
       } catch (apiErr) {
@@ -1252,16 +2089,20 @@ export async function fetchExamSubmissions(
       }
     }
 
-    // Build targeted Supabase queries in parallel (never pull 200KB class-wide blob unless teacher view or pending fallback)
+    // Build targeted Supabase queries in parallel
     const canonStudent = studentId ? resolveCanonicalStudent(studentId) : undefined
     const targetStudentUuid = canonStudent?.id && isValidUuid(canonStudent.id)
       ? canonStudent.id
       : (studentId && isValidUuid(studentId) ? studentId : null)
 
-    const individualPattern = examId && studentId
+    const individualPattern = examId && targetStudentUuid
+      ? `__EXAM_SUB__:${examId}:${targetStudentUuid}%`
+      : examId && studentId
       ? `__EXAM_SUB__:${examId}:${studentId}%`
       : examId
       ? `__EXAM_SUB__:${examId}:%`
+      : targetStudentUuid
+      ? `__EXAM_SUB__:%:${targetStudentUuid}%`
       : studentId
       ? `__EXAM_SUB__:%:${studentId}%`
       : '__EXAM_SUB__:%'
@@ -1282,14 +2123,22 @@ export async function fetchExamSubmissions(
       .select('id, title, body')
       .like('title', individualPattern)
       .order('created_at', { ascending: false })
-      .limit(studentId ? 25 : 100)
+      .limit(studentId ? 30 : 200)
 
     const altNationalPattern =
-      studentId && canonStudent?.nationalCode && canonStudent.nationalCode !== studentId
+      studentId && canonStudent?.nationalCode && canonStudent.nationalCode !== targetStudentUuid
         ? (examId ? `__EXAM_SUB__:${examId}:${canonStudent.nationalCode}%` : `__EXAM_SUB__:%:${canonStudent.nationalCode}%`)
         : null
 
-    const [indRes, altIndRes, qSubsRes] = await Promise.allSettled([
+    const sysSubsQuery = supabase
+      .from('posts')
+      .select('id, title, body')
+      .eq('title', '__SYSTEM_EXAM_SUBMISSIONS__')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+
+    const [indRes, altIndRes, qSubsRes, sysRes] = await Promise.allSettled([
       indQuery,
       altNationalPattern
         ? supabase
@@ -1297,34 +2146,33 @@ export async function fetchExamSubmissions(
             .select('id, title, body')
             .like('title', altNationalPattern)
             .order('created_at', { ascending: false })
-            .limit(25)
+            .limit(30)
         : Promise.resolve({ data: [], error: null }),
       qSubsQuery,
+      sysSubsQuery,
     ])
 
+    const pushValidatedIndPost = (row: any) => {
+      if (!row?.body) return
+      try {
+        const titleParts = String(row.title || '').split(':')
+        const titleExamId = titleParts[1]
+        const parsed = typeof row.body === 'string' ? JSON.parse(row.body) : row.body
+        if (!parsed || !parsed.examId || !parsed.studentId) return
+        // Reject cross-exam corrupted posts where title prefix examId disagrees with body.examId
+        if (titleExamId && parsed.examId !== titleExamId) return
+        if (examId && parsed.examId !== examId) return
+        fetchedList.push(parsed)
+      } catch {}
+    }
+
     if (altIndRes.status === 'fulfilled' && !altIndRes.value.error && Array.isArray(altIndRes.value.data)) {
-      altIndRes.value.data.forEach((row: any) => {
-        if (row?.body) {
-          try {
-            const parsed = typeof row.body === 'string' ? JSON.parse(row.body) : row.body
-            if (parsed && parsed.examId && parsed.studentId) fetchedList.push(parsed)
-          } catch {}
-        }
-      })
+      altIndRes.value.data.forEach(pushValidatedIndPost)
     }
 
     // 2. Individual submissions __EXAM_SUB__:%
     if (indRes.status === 'fulfilled' && !indRes.value.error && Array.isArray(indRes.value.data)) {
-      indRes.value.data.forEach((row: any) => {
-        if (row?.body) {
-          try {
-            const parsed = typeof row.body === 'string' ? JSON.parse(row.body) : row.body
-            if (parsed && parsed.examId && parsed.studentId) {
-              fetchedList.push(parsed)
-            }
-          } catch {}
-        }
-      })
+      indRes.value.data.forEach(pushValidatedIndPost)
     }
 
     // 3. Primary quiz_submissions table
@@ -1343,11 +2191,15 @@ export async function fetchExamSubmissions(
       qSubs.forEach((qs: any) => {
         const answersObj = qs.answers || {}
         const targetExamId = qs.quiz_id || answersObj.quiz_id || answersObj.exam_id || examId
-        const targetStudentId = answersObj.student_national_code || qs.student_id
+        if (!targetExamId) return
+        if (examId && targetExamId !== examId) return
+
+        const rawStudentName = answersObj.student_name || studentMap.get(qs.student_id)
+        const canonRowStudent = resolveCanonicalStudent(qs.student_id || answersObj.student_national_code || rawStudentName)
+        const targetStudentId = canonRowStudent?.id || qs.student_id || answersObj.student_national_code
         const targetStudentName =
-          answersObj.student_name ||
-          studentMap.get(qs.student_id) ||
-          CLASS_STUDENTS_ROSTER.find((c: ClassStudentInfo) => c.nationalCode === targetStudentId)?.fullName ||
+          canonRowStudent?.fullName ||
+          rawStudentName ||
           'دانش‌آموز'
 
         if (targetExamId && targetStudentId) {
@@ -1375,14 +2227,12 @@ export async function fetchExamSubmissions(
           const qFeedbacks = answersObj.questionFeedbacks || existingTeacherGrading.questionFeedbacks
           const teacherNotes = answersObj.teacherNotes || existingTeacherGrading.teacherNotes
 
-          let calculatedRaw = !isNaN(rawScore) && rawScore > 0 ? rawScore : 0
-          if (qScores && typeof qScores === 'object') {
+          let calculatedRaw: number | undefined = !isNaN(rawScore) && rawScore > 0 ? rawScore : undefined
+          if (qScores && typeof qScores === 'object' && Object.keys(qScores).length > 0) {
             const sum = Object.values(qScores).reduce((acc: number, v: any) => acc + (Number(v) || 0), 0)
-            if (sum > 0) calculatedRaw = Math.round(sum * 100) / 100
+            if (sum > 0) calculatedRaw = roundScore2(sum)
           }
-          if (calculatedRaw <= 0 && !isNaN(scaledScore) && scaledScore > 0) {
-            calculatedRaw = scaledScore
-          }
+          const validScaled = !isNaN(scaledScore) && scaledScore > 0 ? roundScore2(scaledScore) : undefined
 
           fetchedList.push({
             id: subId,
@@ -1396,50 +2246,39 @@ export async function fetchExamSubmissions(
             is_released: isApproved,
             status: isApproved ? 'graded' : 'pending_approval',
             teacherGrading: {
+              ...existingTeacherGrading,
               totalScore: calculatedRaw,
-              scaledScore20: !isNaN(scaledScore) && scaledScore > 0 ? scaledScore : calculatedRaw,
+              scaledScore20: validScaled,
               questionScores: qScores,
               questionFeedbacks: qFeedbacks,
               teacherNotes: teacherNotes,
               approved: isApproved,
-              approvedAt: answersObj.approved_at,
+              approvedAt: answersObj.approved_at || existingTeacherGrading.approvedAt,
             },
           })
         }
       })
     }
 
-    // 4. Only pull 200KB __SYSTEM_EXAM_SUBMISSIONS__ snapshot for teacher views (!studentId) OR when student has submissions needing teacher-approved metadata not yet reflected in quiz_submissions
-    const hasUnapprovedStudentSub =
-      Boolean(studentId) &&
-      fetchedList.some((s) => !s.teacherGrading?.approved && s.status !== 'graded' && !s.isReleased)
-
-    if (!studentId || hasUnapprovedStudentSub) {
+    // 4. Authoritative __SYSTEM_EXAM_SUBMISSIONS__ snapshot (always checked in parallel so newer teacher approvals/regrades reach students immediately)
+    if (sysRes.status === 'fulfilled' && !sysRes.value.error && sysRes.value.data?.body) {
       try {
-        const { data: sysRow, error: sysErr } = await supabase
-          .from('posts')
-          .select('id, title, body')
-          .eq('title', '__SYSTEM_EXAM_SUBMISSIONS__')
-          .order('created_at', { ascending: false })
-          .limit(1)
-          .maybeSingle()
-
-        if (!sysErr && sysRow?.body) {
-          const parsed = typeof sysRow.body === 'string' ? JSON.parse(sysRow.body) : sysRow.body
-          if (Array.isArray(parsed)) {
-            parsed.forEach((s: StudentExamSubmission) => {
-              if (s && s.examId && s.studentId) {
-                if (!studentId || isSameStudent(s.studentId, studentId, s.studentName)) {
-                  fetchedList.push(s)
-                }
-              }
-            })
-          }
+        const parsed = typeof sysRes.value.data.body === 'string'
+          ? JSON.parse(sysRes.value.data.body)
+          : sysRes.value.data.body
+        if (Array.isArray(parsed)) {
+          parsed.forEach((s: StudentExamSubmission) => {
+            if (s && s.examId && s.studentId) {
+              if (examId && s.examId !== examId) return
+              if (studentId && !isSameStudent(s.studentId, studentId, s.studentName)) return
+              fetchedList.push(s)
+            }
+          })
         }
       } catch {}
     }
 
-    const deduplicated = mergeSubmissionsDeduplicated(local, fetchedList)
+    const deduplicated = mergeSubmissionsDeduplicated(getLocalSubmissions(), fetchedList)
     saveLocalSubmissions(deduplicated)
     recentSubsFetchAt.set(dedupeKey, Date.now())
 
@@ -1572,16 +2411,17 @@ export async function applyRegradeExamSubmissions(params: {
   examId: string
   overrideApproved?: boolean
   teacherPassword?: string
-}): Promise<{ updatedCount: number; submissions: StudentExamSubmission[] }> {
+}): Promise<{ updatedCount: number; submissions: StudentExamSubmission[]; gradeSyncSummary?: GradebookBatchSyncSummary }> {
   const { examId, overrideApproved = false, teacherPassword } = params
   const exams = await fetchAllExams(teacherPassword)
   const exam = exams.find((e) => e.id === examId)
   if (!exam) throw new Error(`آزمون با شناسه ${examId} یافت نشد.`)
 
-  const submissions = await fetchExamSubmissions(examId)
-  const allLocal = getLocalSubmissions()
+  const submissions = await fetchExamSubmissions(examId, undefined, true)
+  const allLocal = mergeSubmissionsDeduplicated(getLocalSubmissions(), submissions)
   let updatedCount = 0
   const nowIso = new Date().toISOString()
+  const syncedApprovedSubs: StudentExamSubmission[] = []
 
   for (let i = 0; i < allLocal.length; i++) {
     const sub = allLocal[i]
@@ -1650,6 +2490,7 @@ export async function applyRegradeExamSubmissions(params: {
       if (isApproved && overrideApproved) {
         sub.teacherGrading = {
           ...(sub.teacherGrading || {}),
+          manualOverride: true,
           questionScores: evalResult.questionScores,
           questionFeedbacks: evalResult.questionFeedbacks,
           totalScore: newScore,
@@ -1658,6 +2499,7 @@ export async function applyRegradeExamSubmissions(params: {
           approvedAt: nowIso,
           teacherNotes: `${sub.teacherGrading?.teacherNotes || ''} (بازتصحیح هوشمند با اجازه آموزگار اعمال شد)`.trim(),
         }
+        syncedApprovedSubs.push(sub)
       } else if (!isApproved) {
         sub.teacherGrading = {
           ...(sub.teacherGrading || {}),
@@ -1678,10 +2520,26 @@ export async function applyRegradeExamSubmissions(params: {
   const cleanSubs = mergeSubmissionsDeduplicated([], allLocal)
   saveLocalSubmissions(cleanSubs)
 
-  // Direct sync to Supabase
-  await syncExamSubmissionsToSupabase(cleanSubs, teacherPassword).catch((e) =>
+  // Merge ONLY this exam's submissions into remote __SYSTEM_EXAM_SUBMISSIONS__
+  const updatedForThisExam = cleanSubs.filter((s) => s.examId === examId)
+  const teacherPass = getStoredTeacherPassword(teacherPassword)
+  await syncExamSubmissionsToSupabase(updatedForThisExam, teacherPass, { preserveExplicitUpdates: true }).catch((e) =>
     console.warn('[applyRegradeExamSubmissions] Supabase sync warning:', e)
   )
+  let gradeSyncSummary: GradebookBatchSyncSummary | undefined
+  if (syncedApprovedSubs.length > 0) {
+    await Promise.allSettled(
+      syncedApprovedSubs.flatMap((s) => [
+        syncIndividualExamSubPost(s, exam),
+        syncQuizSubmissionScoreToSupabase(s, exam),
+      ])
+    )
+    gradeSyncSummary = await syncApprovedSubmissionsBatchToGradebook({
+      exam,
+      submissions: syncedApprovedSubs,
+      teacherPassword: teacherPass,
+    })
+  }
 
   const updatedForExam = cleanSubs.filter((s) => s.examId === examId)
   if (typeof window !== 'undefined') {
@@ -1691,6 +2549,7 @@ export async function applyRegradeExamSubmissions(params: {
   return {
     updatedCount,
     submissions: updatedForExam,
+    gradeSyncSummary,
   }
 }
 
@@ -1740,7 +2599,7 @@ export async function convertPracticeTextToQuestions(
   teacherPassword?: string
 ): Promise<ExamQuestion[]> {
   try {
-    return await convertPracticeToQuestionsHybrid(text, subject)
+    return await convertPracticeToQuestionsHybrid(text, subject, teacherPassword)
   } catch (err: any) {
     throw new Error(translateGeminiError(err))
   }
@@ -2087,7 +2946,7 @@ export async function gradeExamWithAI(
   return {
     questionScores,
     questionFeedbacks,
-    totalScore: Math.round(totalScore * 10) / 10,
+    totalScore: roundScore2(totalScore),
     scaledScore20,
     gradedAt: new Date().toISOString(),
     summary: serverTeacherNote,
@@ -2213,6 +3072,7 @@ export function submitStudentExamOptimistic(params: {
   // Check if exam questions have correct answers available (e.g. offline/teacher mode).
   // If keys were stripped for student exam security, do NOT calculate instant 0 scores!
   const hasKeys = Array.isArray(exam.questions) && exam.questions.some((q) => q.correctAnswer !== undefined)
+  const maxExamPoints = getExamMaxPoints(exam)
   const instant = hasKeys
     ? computeInstantExamResult(exam, answers)
     : {
@@ -2222,7 +3082,7 @@ export function submitStudentExamOptimistic(params: {
         correctCount: 0,
         wrongCount: 0,
         earnedPoints: 0,
-        maxPoints: Number(exam.totalPoints) || 20,
+        maxPoints: maxExamPoints,
         percentage: 0,
         scaledScore20: 0,
         questionScores: {} as Record<string, number>,
@@ -2230,12 +3090,15 @@ export function submitStudentExamOptimistic(params: {
         status: 'good' as const,
       }
 
-  const submissionId = `sub_${exam.id}_${studentId}_${Date.now()}`
+  const canonSubmitter = resolveCanonicalStudent(studentId || studentName)
+  const canonicalStudentId = canonSubmitter?.id || String(studentId).trim()
+  const canonicalStudentName = canonSubmitter?.fullName || studentName
+  const submissionId = `sub_${exam.id}_${canonicalStudentId}_${Date.now()}`
   const optimisticSubmission: StudentExamSubmission = {
     id: submissionId,
     examId: exam.id,
-    studentId: String(studentId),
-    studentName,
+    studentId: canonicalStudentId,
+    studentName: canonicalStudentName,
     submittedAt: new Date().toISOString(),
     answers,
     syncStatus: 'syncing',
@@ -2243,40 +3106,66 @@ export function submitStudentExamOptimistic(params: {
     isReleased: false,
     is_released: false,
     status: 'pending_approval',
-    instantStats: {
-      totalQuestions: instant.totalQuestions,
-      answeredCount: instant.answeredCount,
-      unansweredCount: instant.unansweredCount,
-      correctCount: instant.correctCount,
-      wrongCount: instant.wrongCount,
-      percentage: instant.percentage,
-      scaledScore20: instant.scaledScore20,
-      earnedPoints: instant.earnedPoints,
-      maxPoints: instant.maxPoints,
-      status: instant.status,
-    },
-    aiGrading: {
-      questionScores: instant.questionScores,
-      questionFeedbacks: instant.questionFeedbacks,
-      totalScore: instant.earnedPoints,
-      scaledScore20: instant.scaledScore20,
-      gradedAt: new Date().toISOString(),
-      summary: hasKeys
-        ? instant.status === 'excellent'
-          ? `آفرین ${studentName} عزیزم! عملکردت در این آزمون بسیار عالی بود (${instant.percentage}٪ پاسخ درست). پاسخ‌نامه شما با موفقیت ثبت شد.`
-          : instant.status === 'good'
-          ? `خسته نباشی ${studentName} جان؛ تلاش خوبی در آزمون داشتی (${instant.percentage}٪ پاسخ درست). پاسخ‌نامه شما با موفقیت ثبت شد.`
-          : `${studentName} عزیز، پاسخ‌های شما دریافت شد. با مرور مباحث نتایج بهتری کسب خواهی کرد.`
-        : `پاسخ‌های شما با موفقیت دریافت شد و پس از بررسی و تایید آموزگار در کارنامه درج خواهد شد.`,
-    },
-    teacherGrading: {
-      approved: false,
-      questionScores: instant.questionScores,
-      questionFeedbacks: instant.questionFeedbacks,
-      totalScore: instant.earnedPoints,
-      scaledScore20: instant.scaledScore20,
-      teacherNotes: `پاسخ‌های ${studentName} دریافت و در صف بازبینی آموزگار قرار گرفت.`,
-    },
+    instantStats: hasKeys
+      ? {
+          totalQuestions: instant.totalQuestions,
+          answeredCount: instant.answeredCount,
+          unansweredCount: instant.unansweredCount,
+          correctCount: instant.correctCount,
+          wrongCount: instant.wrongCount,
+          percentage: instant.percentage,
+          scaledScore20: instant.scaledScore20,
+          earnedPoints: instant.earnedPoints,
+          maxPoints: instant.maxPoints,
+          status: instant.status,
+        }
+      : {
+          totalQuestions: instant.totalQuestions,
+          answeredCount: instant.answeredCount,
+          unansweredCount: instant.unansweredCount,
+          correctCount: 0,
+          wrongCount: 0,
+          percentage: 0,
+          scaledScore20: 0,
+          earnedPoints: 0,
+          maxPoints: maxExamPoints,
+          status: 'good',
+        },
+    aiGrading: hasKeys
+      ? {
+          questionScores: instant.questionScores,
+          questionFeedbacks: instant.questionFeedbacks,
+          totalScore: instant.earnedPoints,
+          scaledScore20: instant.scaledScore20,
+          gradedAt: new Date().toISOString(),
+          summary:
+            instant.status === 'excellent'
+              ? `آفرین ${studentName} عزیزم! عملکردت در این آزمون بسیار عالی بود (${instant.percentage}٪ پاسخ درست). پاسخ‌نامه شما با موفقیت ثبت شد.`
+              : instant.status === 'good'
+              ? `خسته نباشی ${studentName} جان؛ تلاش خوبی در آزمون داشتی (${instant.percentage}٪ پاسخ درست). پاسخ‌نامه شما با موفقیت ثبت شد.`
+              : `${studentName} عزیز، پاسخ‌های شما دریافت شد. با مرور مباحث نتایج بهتری کسب خواهی کرد.`,
+        }
+      : {
+          questionScores: {},
+          questionFeedbacks: {},
+          totalScore: 0,
+          scaledScore20: 0,
+          gradedAt: new Date().toISOString(),
+          summary: `پاسخ‌های شما با موفقیت دریافت شد و پس از بررسی و تایید آموزگار در کارنامه درج خواهد شد.`,
+        },
+    teacherGrading: hasKeys
+      ? {
+          approved: false,
+          questionScores: instant.questionScores,
+          questionFeedbacks: instant.questionFeedbacks,
+          totalScore: instant.earnedPoints,
+          scaledScore20: instant.scaledScore20,
+          teacherNotes: `پاسخ‌های ${studentName} دریافت و در صف بازبینی آموزگار قرار گرفت.`,
+        }
+      : {
+          approved: false,
+          teacherNotes: `پاسخ‌های ${studentName} دریافت و در صف بازبینی آموزگار قرار گرفت.`,
+        },
   }
 
   // 2. Persist in localStorage immediately so tab close / disconnect loses nothing
@@ -2393,27 +3282,45 @@ export async function approveExamSubmission(params: {
   approvedScores: Record<string, number>
   teacherNotes?: string
   teacherPassword?: string
-}): Promise<StudentExamSubmission> {
+}): Promise<StudentExamSubmission & { gradeSync?: GradebookUpsertResult }> {
   const { submissionId, exam, studentId, approvedScores, teacherNotes, teacherPassword } = params
 
-  const teacherPass =
-    teacherPassword ||
-    (typeof window !== 'undefined' ? sessionStorage.getItem('teacherPassword') || '' : '')
+  const teacherPass = getStoredTeacherPassword(teacherPassword)
 
-  const all = getLocalSubmissions()
-  const sub = all.find((s) => s.id === submissionId)
+  let all = mergeSubmissionsDeduplicated([], getLocalSubmissions())
+  let sub = all.find(
+    (s) =>
+      s.id === submissionId ||
+      (s.examId === exam.id && isSameStudent(s.studentId, studentId, s.studentName))
+  )
+  if (!sub) {
+    try {
+      const remote = await fetchExamSubmissions(exam.id, undefined, true)
+      all = mergeSubmissionsDeduplicated(all, remote)
+      sub = all.find(
+        (s) =>
+          s.id === submissionId ||
+          (s.examId === exam.id && isSameStudent(s.studentId, studentId, s.studentName))
+      )
+    } catch {}
+  }
   if (!sub) throw new Error('پاسخ آزمون یافت نشد.')
+
+  const rosterStudent = resolveCanonicalStudent(studentId || sub.studentId || sub.studentName)
+  const canonicalStudentId = rosterStudent?.id || sub.studentId || studentId
+  sub.studentId = canonicalStudentId
+  if (rosterStudent?.fullName) sub.studentName = rosterStudent.fullName
 
   let totalScore = 0
   const cleanScores: Record<string, number> = {}
   for (const q of exam.questions) {
-    const qPts = safeScore(q.points, 10, 2)
+    const qPts = safeScore(q.points, 1000, 2)
     const val = approvedScores[q.id] ?? (sub.aiGrading?.questionScores?.[q.id] || 0)
     const valid = safeScore(val, qPts)
     cleanScores[q.id] = valid
     totalScore += valid
   }
-  const maxExamPts = safeNumber(exam.totalPoints, 20) || 20
+  const maxExamPts = getExamMaxPoints(exam)
   totalScore = safeScore(totalScore, maxExamPts)
   const scaledScore20 = safeScaled20(totalScore, maxExamPts)
 
@@ -2440,12 +3347,14 @@ export async function approveExamSubmission(params: {
   } else {
     sub.instantStats.earnedPoints = totalScore
     sub.instantStats.scaledScore20 = scaledScore20
+    sub.instantStats.maxPoints = maxExamPts
     sub.instantStats.percentage = Math.round((totalScore / maxExamPts) * 100)
     sub.instantStats.status = scaledScore20 >= 16 ? 'excellent' : scaledScore20 >= 12 ? 'good' : 'needs_practice'
   }
 
   sub.teacherGrading = {
     approved: true,
+    manualOverride: true,
     questionScores: cleanScores,
     questionFeedbacks: sub.teacherGrading?.questionFeedbacks || sub.aiGrading?.questionFeedbacks,
     teacherNotes: teacherNotes || 'تایید شده توسط آموزگار محترم',
@@ -2454,7 +3363,8 @@ export async function approveExamSubmission(params: {
     approvedAt: new Date().toISOString(),
   }
 
-  saveLocalSubmissions(all)
+  const dedupedAll = mergeSubmissionsDeduplicated([], all)
+  saveLocalSubmissions(dedupedAll)
   notifySubmissionUpdated(sub)
 
   // Clear stale cached student grades in localStorage
@@ -2462,6 +3372,7 @@ export async function approveExamSubmission(params: {
     if (typeof localStorage !== 'undefined') {
       localStorage.removeItem(`cached_grades_${studentId}`)
       localStorage.removeItem(`cached_grades_${sub.studentId}`)
+      if (rosterStudent?.nationalCode) localStorage.removeItem(`cached_grades_${rosterStudent.nationalCode}`)
     }
   } catch {}
 
@@ -2490,34 +3401,358 @@ export async function approveExamSubmission(params: {
     }
   }
 
-  // 2. Direct sync to Supabase posts table
+  // 2. Per-student independent sync to Supabase (__EXAM_SUB__, quiz_submissions) + safe merge into __SYSTEM_EXAM_SUBMISSIONS__
   try {
-    await syncExamSubmissionsToSupabase(all, teacherPass)
+    await Promise.allSettled([
+      syncExamSubmissionsToSupabase([sub], teacherPass, { preserveExplicitUpdates: true }),
+      syncIndividualExamSubPost(sub, exam),
+      syncQuizSubmissionScoreToSupabase(sub, exam),
+    ])
   } catch (err) {
     console.warn('[approveExamSubmission] Failed to sync approval to Supabase:', err)
   }
 
-  // 3. Persist grade directly to Supabase gradebook
-  const rosterStudent = resolveCanonicalStudent(studentId || sub.studentId || sub.studentName)
-  const canonicalStudentId = rosterStudent?.id || sub.studentId || studentId
-  const effectiveTeacherPass = teacherPassword || teacherPass || '1234'
+  // 3. Persist grade independently to PostgreSQL `grades` table by canonical student ID & capture real result/error
+  let gradeSync: GradebookUpsertResult = {
+    ok: true,
+    action: 'skipped',
+    studentId: canonicalStudentId,
+    studentName: sub.studentName || rosterStudent?.fullName,
+    scaledScore20,
+  }
 
-  if (canonicalStudentId) {
-    try {
-      await supabase.rpc('teacher_add_grade', {
-        p_password: effectiveTeacherPass,
-        p_student_id: canonicalStudentId,
-        p_subject: exam.subject || 'عمومی',
-        p_skill: `آزمون: ${sanitizeExamTitle(exam.title, exam.subject)}`,
-        p_score: scaledScore20,
-        p_max_score: 20,
+  if (canonicalStudentId && !isTestStudentRecord(canonicalStudentId, sub.studentName || rosterStudent?.fullName)) {
+    gradeSync = await upsertGradebookExamRow({
+      teacherPassword: teacherPass,
+      studentId: canonicalStudentId,
+      studentName: sub.studentName || rosterStudent?.fullName,
+      exam,
+      scaledScore20,
+    })
+  }
+
+  return Object.assign(sub, { gradeSync })
+}
+
+/**
+ * Single Authoritative Canonical Gradebook & Report-Card Resolver:
+ * Used identically by TeacherDashboard, StudentDashboard, StudentReportCard, and parity tests.
+ * Guarantees 0 discrepancies across panels for every student and every exam.
+ */
+export function buildCanonicalGradesList(params: {
+  studentId: string
+  studentName?: string
+  dbGrades: any[]
+  exams: Exam[]
+  examSubmissions: StudentExamSubmission[]
+  homeworkPosts?: any[]
+  homeworkSubmissions?: any[]
+  includePending?: boolean
+}): any[] {
+  const {
+    studentId,
+    studentName,
+    dbGrades = [],
+    exams = [],
+    examSubmissions = [],
+    homeworkPosts = [],
+    homeworkSubmissions = [],
+    includePending = false,
+  } = params
+
+  const canonStudent = resolveCanonicalStudent(studentId || studentName)
+  const targetStudentId = canonStudent?.id || String(studentId || '').trim()
+  const targetStudentName = canonStudent?.fullName || studentName
+
+  const dedupedSubs = mergeSubmissionsDeduplicated([], examSubmissions).filter((s) =>
+    isSameStudent(s.studentId, targetStudentId, s.studentName, targetStudentName)
+  )
+  const examMap = new Map(exams.map((e) => [e.id, e]))
+  const subMap = new Map(dedupedSubs.map((s) => [s.examId, s]))
+
+  const list: any[] = []
+  const seenExamIds = new Set<string>()
+  const seenTitles = new Set<string>()
+
+  const cleanDbGrades = [...dbGrades]
+    .filter((g) => !g?.student_id || isSameStudent(g.student_id, targetStudentId, g.student_name, targetStudentName))
+    .sort((a: any, b: any) => {
+      const ta = a?.recorded_at ? new Date(a.recorded_at).getTime() : 0
+      const tb = b?.recorded_at ? new Date(b.recorded_at).getTime() : 0
+      return tb - ta
+    })
+
+  // 1. Process authoritative DB grades (deduplicated newest-first per subject/skill)
+  for (const g of cleanDbGrades) {
+    let matchedExam: Exam | null = g.matchedExam || g.exam || (g.examId ? examMap.get(g.examId) || null : null)
+    let matchedSub: StudentExamSubmission | null =
+      g.matchedSub || g.sub || (g.examId ? subMap.get(g.examId) || null : null)
+
+    if (!matchedExam) {
+      matchedExam =
+        exams.find((e) => {
+          if (g.examId && e.id === g.examId) return true
+          if (g.id && (`exam_sub_${e.id}` === g.id || `exam_${e.id}` === g.id)) return true
+          const cleanE = sanitizeExamTitle(e.title, e.subject)
+          const cleanG = sanitizeExamTitle(g.skill || '', g.subject)
+          return cleanE && cleanG && (cleanE === cleanG || String(g.skill || '').includes(cleanE))
+        }) || null
+    }
+
+    const cleanTitleKey = sanitizeExamTitle(g.skill || '', g.subject || 'عمومی')
+      .replace(/^آزمون:\s*/u, '')
+      .replace(/^تکلیف:\s*/u, '')
+      .trim()
+    const subjectTitleKey = `${String(g.subject || 'عمومی').trim()}::${cleanTitleKey}`
+
+    if (matchedExam && seenExamIds.has(matchedExam.id)) continue
+    if (cleanTitleKey && (seenTitles.has(subjectTitleKey) || seenTitles.has(cleanTitleKey))) continue
+
+    if (matchedExam && !matchedSub) {
+      matchedSub = subMap.get(matchedExam.id) || null
+    }
+
+    let officialScore = Number(g.score) || 0
+    let officialMaxScore = Number(g.max_score) || 20
+    let rawEarned: number | undefined = (g as any).raw_score
+    let rawTotal: number | undefined = (g as any).raw_max
+    let officialNotes = g.notes || ''
+    let itemStatus: 'graded' | 'pending_review' | 'pending_submission' = 'graded'
+
+    if (matchedExam && matchedSub) {
+      const eff = getSubmissionEffectiveScore(matchedExam, matchedSub)
+      const isApproved = isSubmissionApprovedByTeacher(matchedSub) && eff.isApproved
+      const isReleased = isExamResultsReleased(matchedExam, matchedSub)
+      const gRecordedMs = g.recorded_at ? new Date(g.recorded_at).getTime() : 0
+      const subApprovedMs = matchedSub.teacherGrading?.approvedAt
+        ? new Date(matchedSub.teacherGrading.approvedAt).getTime()
+        : 0
+      const isDifferentManualDbScore = Math.abs(officialScore - eff.scaledScore20) > 0.06
+      const isNewerDbEdit = Boolean(
+        !String(g.id || '').startsWith('exam_sub_') &&
+          isDifferentManualDbScore &&
+          gRecordedMs > 0 &&
+          subApprovedMs > 0 &&
+          gRecordedMs > subApprovedMs + 1000
+      )
+
+      if (isApproved && isReleased) {
+        if (isNewerDbEdit) {
+          if (officialMaxScore > 0 && officialMaxScore !== 20) {
+            rawEarned = roundScore2(officialScore)
+            rawTotal = officialMaxScore
+            officialScore = roundScore2((officialScore / officialMaxScore) * 20)
+            officialMaxScore = 20
+          } else {
+            officialScore = roundScore2(officialScore)
+          }
+        } else {
+          officialScore = eff.scaledScore20
+          officialMaxScore = 20
+          rawEarned = eff.totalScore
+          rawTotal = eff.maxPoints
+        }
+        officialNotes = matchedSub.teacherGrading?.teacherNotes || officialNotes
+        itemStatus = 'graded'
+      } else {
+        itemStatus = 'pending_review'
+        rawEarned = undefined
+        rawTotal = getExamMaxPoints(matchedExam)
+      }
+    } else {
+      if (officialMaxScore > 0 && officialMaxScore !== 20) {
+        rawEarned = roundScore2(officialScore)
+        rawTotal = officialMaxScore
+        officialScore = roundScore2((officialScore / officialMaxScore) * 20)
+        officialMaxScore = 20
+      } else {
+        officialScore = roundScore2(officialScore)
+      }
+    }
+
+    if (matchedExam && rawEarned === undefined && itemStatus === 'graded') {
+      const examMax = getExamMaxPoints(matchedExam)
+      rawEarned = roundScore2((officialScore / 20) * examMax)
+      rawTotal = examMax
+    }
+
+    if (itemStatus !== 'graded' && !includePending) {
+      continue
+    }
+
+    if (matchedExam) seenExamIds.add(matchedExam.id)
+    if (cleanTitleKey) {
+      seenTitles.add(subjectTitleKey)
+      seenTitles.add(cleanTitleKey)
+    }
+
+    const isExplicitGradebookUuid = Boolean(
+      g.id && !String(g.id).startsWith('exam_sub_') && !String(g.id).startsWith('exam_') && !String(g.id).startsWith('pending_')
+    )
+
+    list.push({
+      ...g,
+      student_id: targetStudentId,
+      status: itemStatus,
+      score: itemStatus === 'graded' ? officialScore : null,
+      max_score: officialMaxScore,
+      raw_score: rawEarned,
+      raw_max: rawTotal,
+      notes: officialNotes,
+      is_exam: Boolean(matchedExam || g.is_exam),
+      examId: matchedExam?.id || g.examId,
+      matchedExam,
+      matchedSub,
+      isPersistedInGradesTable: isExplicitGradebookUuid,
+      gradeSource: isExplicitGradebookUuid ? 'grades_table' : 'exam_submissions_fallback',
+    })
+  }
+
+  // 2. Process all student exam submissions not yet represented in DB grades
+  for (const sub of dedupedSubs) {
+    const exam = examMap.get(sub.examId)
+    if (!exam) continue
+    if (seenExamIds.has(exam.id)) continue
+
+    const cleanTitle = sanitizeExamTitle(exam.title, exam.subject)
+    const subjectTitleKey = `${String(exam.subject || 'عمومی').trim()}::${cleanTitle}`
+    if (seenTitles.has(subjectTitleKey) || seenTitles.has(cleanTitle)) continue
+
+    const eff = getSubmissionEffectiveScore(exam, sub)
+    const isApproved = isSubmissionApprovedByTeacher(sub) && eff.isApproved
+    const isReleased = isExamResultsReleased(exam, sub)
+
+    if (isApproved && isReleased) {
+      seenExamIds.add(exam.id)
+      seenTitles.add(subjectTitleKey)
+      seenTitles.add(cleanTitle)
+      list.push({
+        id: `exam_sub_${sub.id}`,
+        student_id: targetStudentId,
+        subject: exam.subject || 'عمومی',
+        skill: exam.mode === 'assignment' ? `تکلیف: ${cleanTitle}` : `آزمون: ${cleanTitle}`,
+        status: 'graded',
+        score: eff.scaledScore20,
+        max_score: 20,
+        raw_score: eff.totalScore,
+        raw_max: eff.maxPoints,
+        recorded_at: sub.teacherGrading?.approvedAt || sub.submittedAt || new Date().toISOString(),
+        is_exam: true,
+        examId: exam.id,
+        matchedExam: exam,
+        matchedSub: sub,
+        exam,
+        sub,
+        isPersistedInGradesTable: false,
+        gradeSource: 'exam_submissions_fallback',
       })
-    } catch (e) {
-      console.warn('Could not record grade to Supabase gradebook', e)
+    } else if (includePending) {
+      seenExamIds.add(exam.id)
+      seenTitles.add(subjectTitleKey)
+      seenTitles.add(cleanTitle)
+      list.push({
+        id: `exam_sub_${sub.id}`,
+        student_id: targetStudentId,
+        subject: exam.subject || 'عمومی',
+        skill: exam.mode === 'assignment' ? `تکلیف: ${cleanTitle}` : `آزمون: ${cleanTitle}`,
+        status: 'pending_review',
+        score: null,
+        max_score: 20,
+        raw_score: null,
+        raw_max: getExamMaxPoints(exam),
+        recorded_at: sub.submittedAt || new Date().toISOString(),
+        is_exam: true,
+        examId: exam.id,
+        matchedExam: exam,
+        matchedSub: sub,
+        exam,
+        sub,
+      })
     }
   }
 
-  return sub
+  // 3. Optionally include unsubmitted published exams & traditional homeworks (for Student UI/ReportCard)
+  if (includePending) {
+    for (const exam of exams) {
+      if (!exam || exam.published === false) continue
+      if (seenExamIds.has(exam.id)) continue
+
+      const cleanTitle = sanitizeExamTitle(exam.title, exam.subject)
+      const subjectTitleKey = `${String(exam.subject || 'عمومی').trim()}::${cleanTitle}`
+      if (seenTitles.has(subjectTitleKey) || seenTitles.has(cleanTitle)) continue
+
+      seenExamIds.add(exam.id)
+      seenTitles.add(subjectTitleKey)
+      seenTitles.add(cleanTitle)
+
+      list.push({
+        id: `pending_exam_${exam.id}`,
+        student_id: targetStudentId,
+        subject: exam.subject || 'عمومی',
+        skill: exam.mode === 'assignment' ? `تکلیف: ${cleanTitle}` : `آزمون: ${cleanTitle}`,
+        status: 'pending_submission',
+        score: null,
+        max_score: 20,
+        raw_score: null,
+        raw_max: getExamMaxPoints(exam),
+        recorded_at: exam.dueDate || exam.createdAt || new Date().toISOString(),
+        due_date: exam.dueDate,
+        is_exam: true,
+        examId: exam.id,
+        matchedExam: exam,
+        matchedSub: null,
+      })
+    }
+
+    const submittedHwMap = new Map<string, any>()
+    for (const s of homeworkSubmissions) {
+      if (s?.post_id) submittedHwMap.set(s.post_id, s)
+    }
+
+    for (const hw of homeworkPosts) {
+      if (!hw || !hw.id || hw.type !== 'homework') continue
+      const titleStr = String(hw.title || '')
+      if (titleStr.startsWith('__') || titleStr.includes('__SYSTEM_') || titleStr.includes('__EXAM_SUB__')) continue
+      if (seenTitles.has(titleStr)) continue
+
+      const sub = submittedHwMap.get(hw.id)
+      seenTitles.add(titleStr)
+      if (sub) {
+        list.push({
+          id: `hw_sub_${sub.id || hw.id}`,
+          student_id: targetStudentId,
+          subject: hw.subject || 'عمومی',
+          skill: `تکلیف: ${titleStr}`,
+          status: 'pending_review',
+          score: null,
+          max_score: 20,
+          recorded_at: sub.submitted_at || hw.created_at,
+          homeworkPost: hw,
+          homeworkSubmission: sub,
+        })
+      } else {
+        list.push({
+          id: `hw_pending_${hw.id}`,
+          student_id: targetStudentId,
+          subject: hw.subject || 'عمومی',
+          skill: `تکلیف: ${titleStr}`,
+          status: 'pending_submission',
+          score: null,
+          max_score: 20,
+          recorded_at: hw.due_at || hw.created_at,
+          due_date: hw.due_at,
+          homeworkPost: hw,
+        })
+      }
+    }
+  }
+
+  return list.sort((a, b) => {
+    const priority = { graded: 1, pending_review: 2, pending_submission: 3 }
+    const pDiff = (priority[a.status as keyof typeof priority] || 9) - (priority[b.status as keyof typeof priority] || 9)
+    if (pDiff !== 0) return pDiff
+    return new Date(b.recorded_at || 0).getTime() - new Date(a.recorded_at || 0).getTime()
+  })
 }
 
 // ----------------------------------------------------------------------

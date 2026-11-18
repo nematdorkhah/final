@@ -29,7 +29,6 @@ export default defineConfig(() => {
               if (id.includes('katex')) return 'vendor-katex';
               if (id.includes('recharts')) return 'vendor-recharts';
               if (id.includes('html2canvas') || id.includes('canvas-confetti')) return 'vendor-canvas';
-              if (id.includes('@google/genai')) return 'vendor-genai';
               if (id.includes('@supabase')) return 'vendor-supabase';
               if (id.includes('react') || id.includes('react-dom') || id.includes('scheduler')) return 'vendor-react';
               if (id.includes('motion')) return 'vendor-motion';

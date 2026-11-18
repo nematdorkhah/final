@@ -2,6 +2,8 @@ import { useState, useRef, useEffect, useMemo } from 'react'
 import { toPersianDigits } from '../utils/persianNumbers'
 import { sortByLastName } from '../utils/persianSort'
 import { classroomChatHybrid } from '../services/geminiHybridService'
+import { roundScore2 } from '../utils/persianSemanticGrader'
+import { isSameStudent } from '../classStudents'
 
 interface Message {
   id: string
@@ -52,7 +54,7 @@ export default function TeacherAiAssistant({
   // Build the rich live context payload
   function buildClassroomContext() {
     const studentSummaries = statsRows.map((sr) => {
-      const studentGrades = grades.filter((g) => g.student_id === sr.id)
+      const studentGrades = grades.filter((g) => isSameStudent(g.student_id, sr.id, g.student_name, sr.name))
       const subjectAverages: Record<string, { total: number; count: number }> = {}
       studentGrades.forEach((g) => {
         const sub = g.subject || 'عمومی'
@@ -64,11 +66,11 @@ export default function TeacherAiAssistant({
 
       const subjectsBreakdown = Object.entries(subjectAverages).map(([sub, data]) => ({
         subject: sub,
-        avgOutOf20: Math.round((data.total / data.count) * 10) / 10,
+        avgOutOf20: roundScore2(data.total / data.count),
       }))
 
       const studentAbsents = allAttendance.filter(
-        (a) => a.student_id === sr.id && a.status === 'absent'
+        (a) => isSameStudent(a.student_id, sr.id) && a.status === 'absent'
       ).length
 
       const missingHwCount = Math.max(0, sr.totalHomework - sr.submitted)
@@ -78,7 +80,7 @@ export default function TeacherAiAssistant({
       return {
         id: sr.id,
         fullName: sr.name,
-        avgGradeOutOf20: sr.avg !== null ? Math.round(sr.avg * 10) / 10 : 'بدون نمره',
+        avgGradeOutOf20: sr.avg !== null ? roundScore2(sr.avg) : 'بدون نمره',
         submittedHomeworkCount: sr.submitted,
         totalHomeworkCount: sr.totalHomework,
         missingHomeworkCount: missingHwCount,

@@ -72,9 +72,10 @@ export interface StudentExamSubmission {
   teacherGrading?: {
     approved?: boolean
     approvedAt?: string
+    manualOverride?: boolean
     questionScores?: Record<string, number>
     questionFeedbacks?: Record<string, string>
-    totalScore: number
+    totalScore?: number
     scaledScore20?: number
     teacherNotes?: string
     [key: string]: any

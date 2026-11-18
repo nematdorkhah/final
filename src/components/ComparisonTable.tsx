@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { roundScore2 } from '../utils/persianSemanticGrader'
 
 const thStyle: React.CSSProperties = {
   padding: '12px 14px',
@@ -79,7 +80,7 @@ export default function ComparisonTable({
                 onClick={() => onSelectStudent(selectedStudentId === r.id ? null : r.id)}
               >
                 <td style={tdStyle}>{i + 1}. {r.name}</td>
-                <td style={tdStyle}>{r.avg !== null ? r.avg.toFixed(1) : '—'}</td>
+                <td style={tdStyle}>{r.avg !== null ? roundScore2(r.avg) : '—'}</td>
                 <td style={tdStyle}>{r.submitted}/{r.totalHomework}</td>
                 <td style={tdStyle}>{r.streak > 0 ? `🔥 ${r.streak}` : '—'}</td>
                 <td style={tdStyle}>{r.present}</td>
