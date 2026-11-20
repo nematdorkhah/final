@@ -3,7 +3,6 @@ import { Exam, StudentExamSubmission } from '../types/examTypes'
 import {
   fetchWithTimeout,
   isBackendStaticOnly,
-  normalizeQuizRowToExam,
   sanitizeExamForStudent,
 } from '../utils/networkResilience'
 
@@ -94,26 +93,7 @@ class RealtimeSyncManager {
         }
       )
 
-      // Quizzes table (online exams & interactive homework)
-      this.channel.on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'quizzes' },
-        (payload: any) => {
-          const action = payload.eventType === 'INSERT' ? 'create' : payload.eventType === 'DELETE' ? 'delete' : 'update'
-          const rawItem = payload.new || payload.old
-          const normalized = payload.new ? normalizeQuizRowToExam(payload.new) : null
-          const safeExam = normalized ? sanitizeExamForStudent(normalized) : undefined
-          const broadcastPayload: RealtimeBroadcastPayload = {
-            type: 'exam',
-            action,
-            item: safeExam,
-            id: rawItem?.id,
-            timestamp: Date.now(),
-          }
-          this.notifyListeners(broadcastPayload)
-          this.dispatchCustomWindowEvents(broadcastPayload)
-        }
-      )
+      // Quizzes changes are delivered via broadcast + student_poll_fingerprint RPC (direct postgres_changes omitted due to RLS on public.quizzes)
 
       // Grades table (student report card updates)
       this.channel.on(
@@ -249,8 +229,10 @@ class RealtimeSyncManager {
   }
 
   private handleVisibilityChange() {
-    if (typeof document !== 'undefined' && document.visibilityState === 'visible' && this.isOnline) {
-      // Tab became active again; ensure connection is alive and request fresh updates
+    const isBrowserOnline = typeof navigator !== 'undefined' ? navigator.onLine : this.isOnline
+    if (typeof document !== 'undefined' && !document.hidden && document.visibilityState === 'visible' && isBrowserOnline) {
+      this.isOnline = true
+      // Tab became active again; ensure Realtime connection is alive
       if (!this.isSubscribed) {
         this.connect()
       }
@@ -260,12 +242,15 @@ class RealtimeSyncManager {
 
   private startHeartbeat() {
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer)
-    // Lightweight heartbeat every 15s to check connectivity and poll if disconnected
+    // Primary sync runs over Realtime broadcast/postgres_changes; heartbeat only restores connection every 45s while tab is visible
     this.heartbeatTimer = setInterval(() => {
-      if (!this.isSubscribed && this.isOnline) {
+      if (typeof document !== 'undefined' && document.hidden) return
+      const isBrowserOnline = typeof navigator !== 'undefined' ? navigator.onLine : this.isOnline
+      if (!isBrowserOnline) return
+      if (!this.isSubscribed) {
         this.connect()
       }
-    }, 15000)
+    }, 45000)
   }
 
   public subscribe(listener: RealtimeListener): () => void {
@@ -383,3 +368,121 @@ class RealtimeSyncManager {
 }
 
 export const realtimeSync = new RealtimeSyncManager()
+
+export interface TableFingerprintEntry {
+  count: number
+  max_updated_at: string | null
+}
+
+export interface StudentPollFingerprint {
+  posts: TableFingerprintEntry
+  quizzes: TableFingerprintEntry
+  grades: TableFingerprintEntry
+  quiz_submissions?: TableFingerprintEntry
+  submissions?: TableFingerprintEntry
+}
+
+export interface TeacherPollFingerprint {
+  posts: TableFingerprintEntry
+  quizzes: TableFingerprintEntry
+  quiz_submissions: TableFingerprintEntry
+  submissions?: TableFingerprintEntry
+  grades: TableFingerprintEntry
+  attendance: TableFingerprintEntry
+}
+
+export interface PollFingerprintResult<T> {
+  ok: boolean
+  data: T | null
+  error?: unknown
+  skipped?: boolean
+}
+
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+export function isValidUuid(value: unknown): value is string {
+  return typeof value === 'string' && UUID_REGEX.test(value.trim())
+}
+
+function normalizeEntry(raw: any): TableFingerprintEntry {
+  return {
+    count: typeof raw?.count === 'number' ? raw.count : Number(raw?.count) || 0,
+    max_updated_at: raw?.max_updated_at ? String(raw.max_updated_at) : null,
+  }
+}
+
+export function hasFingerprintEntryChanged(
+  prev?: TableFingerprintEntry | null,
+  next?: TableFingerprintEntry | null
+): boolean {
+  if (!prev || !next) return false
+  return prev.count !== next.count || (prev.max_updated_at ?? null) !== (next.max_updated_at ?? null)
+}
+
+/**
+ * Single-request lightweight polling fingerprint for a student (1 RPC call total).
+ * Skips immediately if studentId is not a valid UUID (e.g. teacher preview mode).
+ */
+export async function fetchStudentPollFingerprint(
+  studentId: string,
+  accessCode: string
+): Promise<PollFingerprintResult<StudentPollFingerprint>> {
+  if (!isValidUuid(studentId) || !accessCode) {
+    return { ok: false, data: null, skipped: true }
+  }
+  try {
+    const { data, error } = await supabase.rpc('student_poll_fingerprint', {
+      p_student_id: studentId.trim(),
+      p_access_code: accessCode,
+    })
+    if (error || !data || typeof data !== 'object') {
+      return { ok: false, data: null, error: error || new Error('Invalid student_poll_fingerprint response') }
+    }
+    return {
+      ok: true,
+      data: {
+        posts: normalizeEntry((data as any).posts),
+        quizzes: normalizeEntry((data as any).quizzes),
+        grades: normalizeEntry((data as any).grades),
+        quiz_submissions: (data as any).quiz_submissions
+          ? normalizeEntry((data as any).quiz_submissions)
+          : undefined,
+        submissions: (data as any).submissions ? normalizeEntry((data as any).submissions) : undefined,
+      },
+    }
+  } catch (err) {
+    return { ok: false, data: null, error: err }
+  }
+}
+
+/**
+ * Single-request lightweight polling fingerprint for teacher (1 RPC call total).
+ */
+export async function fetchTeacherPollFingerprint(
+  password: string
+): Promise<PollFingerprintResult<TeacherPollFingerprint>> {
+  if (!password) {
+    return { ok: false, data: null, skipped: true }
+  }
+  try {
+    const { data, error } = await supabase.rpc('teacher_poll_fingerprint', {
+      p_password: password,
+    })
+    if (error || !data || typeof data !== 'object') {
+      return { ok: false, data: null, error: error || new Error('Invalid teacher_poll_fingerprint response') }
+    }
+    return {
+      ok: true,
+      data: {
+        posts: normalizeEntry((data as any).posts),
+        quizzes: normalizeEntry((data as any).quizzes),
+        quiz_submissions: normalizeEntry((data as any).quiz_submissions),
+        submissions: (data as any).submissions ? normalizeEntry((data as any).submissions) : undefined,
+        grades: normalizeEntry((data as any).grades),
+        attendance: normalizeEntry((data as any).attendance),
+      },
+    }
+  } catch (err) {
+    return { ok: false, data: null, error: err }
+  }
+}

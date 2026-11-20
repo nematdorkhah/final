@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import confetti from 'canvas-confetti'
 import { supabase } from '../supabaseClient'
 import {
@@ -10,7 +10,8 @@ import {
 import { generateRandomTizhooshanQuestion } from '../data/endlessGenerator'
 import { toPersianDigits } from '../utils/persianNumbers'
 import { sortByLastName } from '../utils/persianSort'
-import { fetchApiJson, fetchWithTimeout, isBackendStaticOnly } from '../utils/networkResilience'
+import { resolveCanonicalStudent } from '../classStudents'
+import { isValidUuid } from '../services/realtimeSync'
 
 interface UserProgress {
   totalXp: number
@@ -262,103 +263,252 @@ export default function TizhooshanPrep({ student }: { student: any }) {
   const [isCloudSyncing, setIsCloudSyncing] = useState(false)
   const [allProgressMap, setAllProgressMap] = useState<Record<string, any>>({})
 
-  // 1. Authoritative Load progress from server on mount
-  useEffect(() => {
-    if (!student?.id) {
-      setIsServerLoaded(true)
-      return
+  const { canonicalStudentId, canonicalAccessCode } = useMemo(() => {
+    const rawId = student?.id || student?.access_code || ''
+    const rosterInfo = resolveCanonicalStudent(rawId || student?.full_name)
+    return {
+      canonicalStudentId: String(rosterInfo?.id || rawId || '').trim(),
+      canonicalAccessCode: String(rosterInfo?.nationalCode || student?.access_code || rawId || '').trim(),
     }
-    if (isBackendStaticOnly()) {
-      setIsServerLoaded(true)
-      return
-    }
-    fetchApiJson<any>(`/api/tizhooshan/progress?studentId=${encodeURIComponent(student.id)}`, {}, 5000)
-      .then((data) => {
-        if (data?.success && data.progress) {
-          const cloud = data.progress
-          setProgress((prev) => {
-            const merged = {
-              ...prev,
-              totalXp: cloud.totalXp ?? prev.totalXp,
-              gems: cloud.gems ?? prev.gems,
-              streak: cloud.streak ?? prev.streak,
-              hearts: typeof cloud.hearts === 'number' ? cloud.hearts : prev.hearts,
-              lastActiveDate: cloud.lastActiveDate || prev.lastActiveDate,
-              unlockedTopicIndex: Math.max(prev.unlockedTopicIndex, cloud.unlockedTopicIndex ?? 0),
-              completedTopics: { ...(cloud.completedTopics || {}), ...(prev.completedTopics || {}) },
-              completedQuestionIds: Array.from(new Set([...(cloud.completedQuestionIds || []), ...(prev.completedQuestionIds || [])])),
-              openedChests: Array.from(new Set([...(cloud.openedChests || []), ...(prev.openedChests || [])])),
-              wrongQuestionIds: cloud.wrongQuestionIds || prev.wrongQuestionIds || [],
-              dailyMultiplier: cloud.dailyMultiplier ?? prev.dailyMultiplier,
-              dailyMultiplierDate: cloud.dailyMultiplierDate ?? prev.dailyMultiplierDate,
-            }
-            try {
-              localStorage.setItem(storageKey, JSON.stringify(merged))
-            } catch {}
-            return merged
-          })
-        }
-      })
-      .catch((err) => {
-        if (!err?.isHtmlFallback) console.warn('Failed to fetch cloud tizhooshan progress', err)
-      })
-      .finally(() => {
-        setIsServerLoaded(true)
-      })
-  }, [student?.id, storageKey])
+  }, [student?.id, student?.access_code, student?.full_name])
 
-  // 2. Save Progress to localStorage & Sync to Server (Guarded by isServerLoaded to avoid wiping cloud data)
+  const latestProgressRef = useRef<UserProgress>(progress)
+  latestProgressRef.current = progress
+  const isServerLoadedRef = useRef(false)
+  const lastSyncedHashRef = useRef<string>('')
+  const inFlightHashRef = useRef<string>('')
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const buildRpcProgressPayload = useCallback((p: UserProgress) => {
+    return {
+      total_xp: Number(p.totalXp) || 0,
+      gems: typeof p.gems === 'number' ? p.gems : 25,
+      streak: Number(p.streak) || 0,
+      hearts: typeof p.hearts === 'number' ? p.hearts : 5,
+      unlocked_topic_index: Number(p.unlockedTopicIndex) || 0,
+      completed_topics: p.completedTopics || {},
+      completed_question_ids: Array.isArray(p.completedQuestionIds) ? p.completedQuestionIds : [],
+      wrong_question_ids: Array.isArray(p.wrongQuestionIds) ? p.wrongQuestionIds : [],
+      last_active_date: p.lastActiveDate || new Date().toISOString().split('T')[0],
+    }
+  }, [])
+
+  const flushProgressToSupabase = useCallback(
+    async (snapshot: UserProgress, options?: { keepalive?: boolean }) => {
+      if (!isServerLoadedRef.current) return
+      if (!isValidUuid(canonicalStudentId) || !canonicalAccessCode) return
+
+      const payload = buildRpcProgressPayload(snapshot)
+      const serialized = JSON.stringify(payload)
+      if (serialized === lastSyncedHashRef.current || serialized === inFlightHashRef.current) return
+
+      inFlightHashRef.current = serialized
+
+      if (options?.keepalive) {
+        try {
+          const sbUrl = String((supabase as any)?.supabaseUrl || '').replace(/\/+$/, '')
+          const sbKey = String((supabase as any)?.supabaseKey || '')
+          if (sbUrl && sbKey && typeof fetch === 'function') {
+            void fetch(`${sbUrl}/rest/v1/rpc/student_upsert_tizhooshan`, {
+              method: 'POST',
+              keepalive: true,
+              headers: {
+                'Content-Type': 'application/json',
+                apikey: sbKey,
+                Authorization: `Bearer ${sbKey}`,
+              },
+              body: JSON.stringify({
+                p_student_id: canonicalStudentId,
+                p_access_code: canonicalAccessCode,
+                p_progress: payload,
+              }),
+            })
+              .then((res) => {
+                if (res.ok) {
+                  lastSyncedHashRef.current = serialized
+                }
+              })
+              .catch(() => {})
+              .finally(() => {
+                if (inFlightHashRef.current === serialized) {
+                  inFlightHashRef.current = ''
+                }
+              })
+            return
+          }
+        } catch {
+          // Fall through to standard RPC call below
+        }
+      }
+
+      setIsCloudSyncing(true)
+      try {
+        const { error } = await supabase.rpc('student_upsert_tizhooshan', {
+          p_student_id: canonicalStudentId,
+          p_access_code: canonicalAccessCode,
+          p_progress: payload,
+        })
+        if (error) {
+          console.warn('Supabase tizhooshan upsert error:', error)
+        } else {
+          lastSyncedHashRef.current = serialized
+        }
+      } catch (err) {
+        console.warn('Supabase tizhooshan sync error:', err)
+      } finally {
+        if (inFlightHashRef.current === serialized) {
+          inFlightHashRef.current = ''
+        }
+        setIsCloudSyncing(false)
+      }
+    },
+    [canonicalStudentId, canonicalAccessCode, buildRpcProgressPayload]
+  )
+
+  // 1. Authoritative Load progress from Supabase RPC on mount (p_progress = null => read-only)
+  useEffect(() => {
+    let cancelled = false
+    isServerLoadedRef.current = false
+    setIsServerLoaded(false)
+
+    if (!isValidUuid(canonicalStudentId) || !canonicalAccessCode) {
+      isServerLoadedRef.current = true
+      setIsServerLoaded(true)
+      return
+    }
+
+    ;(async () => {
+      try {
+        const { data: cloud, error } = await supabase.rpc('student_upsert_tizhooshan', {
+          p_student_id: canonicalStudentId,
+          p_access_code: canonicalAccessCode,
+          p_progress: null,
+        })
+        if (cancelled) return
+
+        if (!error && cloud && typeof cloud === 'object') {
+          const cloudCompletedTopics =
+            cloud.completed_topics && typeof cloud.completed_topics === 'object' ? cloud.completed_topics : {}
+          const cloudCompletedQIds = Array.isArray(cloud.completed_question_ids) ? cloud.completed_question_ids : []
+          const cloudWrongQIds = Array.isArray(cloud.wrong_question_ids) ? cloud.wrong_question_ids : []
+
+          const prev = latestProgressRef.current
+          const merged: UserProgress = {
+            ...prev,
+            totalXp: Math.max(prev.totalXp || 0, Number(cloud.total_xp) || 0),
+            gems: typeof cloud.gems === 'number' ? cloud.gems : prev.gems,
+            streak: typeof cloud.streak === 'number' ? Math.max(prev.streak || 0, cloud.streak) : prev.streak,
+            hearts: typeof cloud.hearts === 'number' ? cloud.hearts : prev.hearts,
+            lastActiveDate: cloud.last_active_date || prev.lastActiveDate,
+            unlockedTopicIndex: Math.max(prev.unlockedTopicIndex || 0, Number(cloud.unlocked_topic_index) || 0),
+            completedTopics: { ...cloudCompletedTopics, ...(prev.completedTopics || {}) },
+            completedQuestionIds: Array.from(new Set([...cloudCompletedQIds, ...(prev.completedQuestionIds || [])])),
+            wrongQuestionIds: cloudWrongQIds.length > 0 || (prev.wrongQuestionIds || []).length === 0
+              ? cloudWrongQIds
+              : prev.wrongQuestionIds,
+          }
+
+          const cloudSnapshotPayload = {
+            total_xp: Number(cloud.total_xp) || 0,
+            gems: typeof cloud.gems === 'number' ? cloud.gems : 25,
+            streak: Number(cloud.streak) || 0,
+            hearts: typeof cloud.hearts === 'number' ? cloud.hearts : 5,
+            unlocked_topic_index: Number(cloud.unlocked_topic_index) || 0,
+            completed_topics: cloudCompletedTopics,
+            completed_question_ids: cloudCompletedQIds,
+            wrong_question_ids: cloudWrongQIds,
+            last_active_date: cloud.last_active_date || merged.lastActiveDate,
+          }
+          lastSyncedHashRef.current = JSON.stringify(cloudSnapshotPayload)
+
+          try {
+            localStorage.setItem(storageKey, JSON.stringify(merged))
+          } catch {}
+          latestProgressRef.current = merged
+          setProgress(merged)
+        } else if (!error && cloud === null) {
+          // No server row yet: only trigger sync if local already has real activity
+          const cur = latestProgressRef.current
+          const hasLocalActivity =
+            (cur.totalXp || 0) > 0 ||
+            (cur.unlockedTopicIndex || 0) > 0 ||
+            Object.keys(cur.completedTopics || {}).length > 0 ||
+            (cur.completedQuestionIds || []).length > 0
+          lastSyncedHashRef.current = hasLocalActivity ? '' : JSON.stringify(buildRpcProgressPayload(cur))
+        }
+      } catch (err) {
+        if (!cancelled) {
+          console.warn('Failed to fetch Supabase tizhooshan progress:', err)
+        }
+      } finally {
+        if (!cancelled) {
+          isServerLoadedRef.current = true
+          setIsServerLoaded(true)
+        }
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [canonicalStudentId, canonicalAccessCode, storageKey, buildRpcProgressPayload])
+
+  // 2. Save Progress to localStorage immediately & sync to Supabase RPC with 10-second debounce
   useEffect(() => {
     if (!isServerLoaded) return
     try {
       localStorage.setItem(storageKey, JSON.stringify(progress))
-      if (student?.id) {
-        setIsCloudSyncing(true)
-        const rawClass = localStorage.getItem('tizhooshan_class_progress')
-        const classMap = rawClass ? JSON.parse(rawClass) : {}
-        classMap[student.id] = {
-          studentId: student.id,
-          studentName: student.full_name,
-          totalXp: progress.totalXp,
-          gems: progress.gems,
-          streak: progress.streak,
-          hearts: progress.hearts,
-          unlockedTopicIndex: progress.unlockedTopicIndex,
-          completedTopicsCount: Object.keys(progress.completedTopics || {}).length,
-          lastActiveDate: progress.lastActiveDate,
-          wrongCount: (progress.wrongQuestionIds || []).length,
-        }
-        localStorage.setItem('tizhooshan_class_progress', JSON.stringify(classMap))
-
-        // Sync to server persistent storage (tizhooshan_progress.json)
-        if (!isBackendStaticOnly()) {
-          fetchWithTimeout(
-            '/api/tizhooshan/progress',
-            {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                studentId: student.id,
-                studentName: student.full_name,
-                progress,
-              }),
-            },
-            5000
-          )
-            .catch((err) => {
-              if (!err?.isHtmlFallback) console.warn('Cloud sync error for Tizhooshan', err)
-            })
-            .finally(() => {
-              setIsCloudSyncing(false)
-            })
-        } else {
-          setIsCloudSyncing(false)
-        }
-      }
     } catch (e) {
       console.error(e)
     }
-  }, [progress, storageKey, student, isServerLoaded])
+
+    if (!isValidUuid(canonicalStudentId) || !canonicalAccessCode) return
+
+    const nextHash = JSON.stringify(buildRpcProgressPayload(progress))
+    if (nextHash === lastSyncedHashRef.current) {
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current)
+        saveTimerRef.current = null
+      }
+      return
+    }
+
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current)
+    }
+    saveTimerRef.current = setTimeout(() => {
+      saveTimerRef.current = null
+      void flushProgressToSupabase(latestProgressRef.current)
+    }, 10000)
+  }, [progress, storageKey, isServerLoaded, canonicalStudentId, canonicalAccessCode, buildRpcProgressPayload, flushProgressToSupabase])
+
+  // 3. Flush pending progress ONLY on beforeunload, pagehide, visibilitychange -> hidden, or unmount
+  useEffect(() => {
+    const flushNow = () => {
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current)
+        saveTimerRef.current = null
+      }
+      void flushProgressToSupabase(latestProgressRef.current, { keepalive: true })
+    }
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        flushNow()
+      }
+    }
+
+    window.addEventListener('beforeunload', flushNow)
+    window.addEventListener('pagehide', flushNow)
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+
+    return () => {
+      window.removeEventListener('beforeunload', flushNow)
+      window.removeEventListener('pagehide', flushNow)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+      flushNow()
+    }
+  }, [flushProgressToSupabase])
 
   const todayStr = new Date().toISOString().split('T')[0]
 
@@ -374,7 +524,7 @@ export default function TizhooshanPrep({ student }: { student: any }) {
     return dayHash % 2 === 0 ? 2 : 1.5
   }, [todayStr, student?.id, progress.dailyMultiplierDate, progress.dailyMultiplier])
 
-  // Classmates & Real Server Progress Map (Zero fake data)
+  // Classmates & Real Supabase Progress Map (Zero fake data)
   const [classmates, setClassmates] = useState<any[]>([])
 
   useEffect(() => {
@@ -389,20 +539,37 @@ export default function TizhooshanPrep({ student }: { student: any }) {
         console.warn('Classmates fetch error', err)
       }
 
-      // 2. Fetch real cloud progress map for all students
-      if (!isBackendStaticOnly()) {
+      // 2. Fetch real cloud progress map for all students from Supabase RPC
+      if (isValidUuid(canonicalStudentId) && canonicalAccessCode) {
         try {
-          const json = await fetchApiJson<any>('/api/tizhooshan/all-progress', {}, 5000)
-          if (json?.success && json.progressMap) {
-            setAllProgressMap(json.progressMap)
+          const { data: rows, error } = await supabase.rpc('student_list_tizhooshan_leaderboard', {
+            p_student_id: canonicalStudentId,
+            p_access_code: canonicalAccessCode,
+          })
+          if (!error && Array.isArray(rows)) {
+            const map: Record<string, any> = {}
+            for (const row of rows) {
+              if (!row?.student_id) continue
+              map[row.student_id] = {
+                studentId: row.student_id,
+                studentName: row.student_name || '',
+                totalXp: Number(row.total_xp) || 0,
+                streak: Number(row.streak) || 0,
+                hearts: typeof row.hearts === 'number' ? row.hearts : 5,
+                unlockedTopicIndex: Number(row.unlocked_topic_index) || 0,
+                lastActiveDate: row.last_active_date || '',
+                updatedAt: row.updated_at || null,
+              }
+            }
+            setAllProgressMap(map)
           }
-        } catch (err: any) {
-          if (!err?.isHtmlFallback) console.warn('Failed to load all-progress for leaderboard', err)
+        } catch (err) {
+          console.warn('Failed to load Supabase tizhooshan leaderboard:', err)
         }
       }
     }
-    fetchLeaderboardData()
-  }, [])
+    void fetchLeaderboardData()
+  }, [canonicalStudentId, canonicalAccessCode])
 
   // Active Quiz State
   const [isEndlessActive, setIsEndlessActive] = useState(false)

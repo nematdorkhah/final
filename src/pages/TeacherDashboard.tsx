@@ -1,6 +1,6 @@
 import { useMemo, useState, useEffect } from 'react'
 import { toPersianDigits } from '../utils/persianNumbers'
-import { useClassroomData } from '../hooks/useClassroomData'
+import { useClassroomData, ClassroomResourceKey } from '../hooks/useClassroomData'
 import { getJalaliDateLabel } from '../useJalaliDate'
 import { computeStreak, weakestSubjects } from '../masteryHelpers'
 import MobileHeader from '../components/MobileHeader'
@@ -20,7 +20,6 @@ import AttendanceList from '../components/AttendanceList'
 import Gradebook from '../components/Gradebook'
 import StudentProfilePanel from '../components/StudentProfilePanel'
 import BackupRestoreModal from '../components/BackupRestoreModal'
-import LoadingScreen from '../components/LoadingScreen'
 import { exportClassroomToExcel } from '../utils/excelExport'
 import { buildCanonicalGradesList } from '../utils/examStore'
 import { roundScore2 } from '../utils/persianSemanticGrader'
@@ -49,19 +48,22 @@ export default function TeacherDashboard({
     grades,
     exams,
     examSubmissions,
-    loading,
     error,
+    authExpired,
+    sectionStatus,
     reload,
+    reloadSections,
+    scheduleSectionRefresh,
   } = useClassroomData(teacherPassword)
 
   useEffect(() => {
     realtimeSync.init()
     const handleExamsUpdated = () => {
-      reload()
+      scheduleSectionRefresh('exams')
     }
     window.addEventListener('exams-updated', handleExamsUpdated)
     return () => window.removeEventListener('exams-updated', handleExamsUpdated)
-  }, [reload])
+  }, [scheduleSectionRefresh])
 
   const sortedStudents = useMemo(
     () => sortByLastName(students).filter((s) => !isTestStudentRecord(s.id, s.full_name)),
@@ -115,6 +117,20 @@ export default function TeacherDashboard({
     )
   }, [grades, sortedStudents, exams, examSubmissions])
 
+  const gradebookGrades = useMemo(() => {
+    const cleanDbGrades = grades.filter((g) => !isTestStudentRecord(g.student_id, g.student_name))
+    return sortedStudents.flatMap((st) =>
+      buildCanonicalGradesList({
+        studentId: st.id,
+        studentName: st.full_name,
+        dbGrades: cleanDbGrades.filter((g) => isSameStudent(g.student_id, st.id, g.student_name, st.full_name)),
+        exams,
+        examSubmissions,
+        includePending: true,
+      }).filter((item) => item.status === 'graded' || item.status === 'pending_review')
+    )
+  }, [grades, sortedStudents, exams, examSubmissions])
+
   const statsRows = useMemo(() => {
     return sortedStudents.map((s) => {
       const myGrades = combinedGrades.filter((g) => isSameStudent(g.student_id, s.id))
@@ -160,18 +176,36 @@ export default function TeacherDashboard({
     { id: 'ai', label: 'هوش مصنوعی', icon: '🤖' },
   ]
 
-  if (loading) {
-    return (
-      <div dir="rtl" className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
-        <LoadingScreen
-          message="در حال بارگذاری اطلاعات کلاس درس..."
-          error={error}
-          onRetry={reload}
-          onLogout={onLogout}
-        />
-      </div>
-    )
+  const RESOURCE_LABELS: Record<ClassroomResourceKey, string> = {
+    students: 'دانش‌آموزان',
+    posts: 'تکالیف و اعلانات',
+    submissions: 'تحویل تکالیف',
+    attendance: 'حضور و غیاب',
+    grades: 'نمرات',
+    exams: 'آزمون‌ها',
+    examSubmissions: 'پاسخنامه‌های آزمون',
   }
+
+  const dashboardFailedKeys = (
+    ['students', 'posts', 'submissions', 'attendance', 'grades', 'exams', 'examSubmissions'] as ClassroomResourceKey[]
+  ).filter((k) => Boolean(sectionStatus[k].error))
+
+  const dashboardLoadingAny =
+    (sectionStatus.students.loading && !sectionStatus.students.loaded) ||
+    (sectionStatus.posts.loading && !sectionStatus.posts.loaded) ||
+    (sectionStatus.submissions.loading && !sectionStatus.submissions.loaded) ||
+    (sectionStatus.attendance.loading && !sectionStatus.attendance.loaded) ||
+    (sectionStatus.grades.loading && !sectionStatus.grades.loaded) ||
+    (sectionStatus.exams.loading && !sectionStatus.exams.loaded) ||
+    (sectionStatus.examSubmissions.loading && !sectionStatus.examSubmissions.loaded)
+
+  const gradesSectionKeys: ClassroomResourceKey[] = ['grades', 'exams', 'examSubmissions']
+  const gradesSectionLoading =
+    (sectionStatus.grades.loading && !sectionStatus.grades.loaded) ||
+    (sectionStatus.exams.loading && !sectionStatus.exams.loaded) ||
+    (sectionStatus.examSubmissions.loading && !sectionStatus.examSubmissions.loaded)
+  const gradesSectionError =
+    sectionStatus.grades.error || sectionStatus.exams.error || sectionStatus.examSubmissions.error || null
 
   return (
     <div dir="rtl" className="min-h-screen bg-slate-50 text-slate-800 flex flex-col font-sans pb-36 sm:pb-32">
@@ -186,6 +220,28 @@ export default function TeacherDashboard({
 
       {/* Main Tab Views */}
       <main className="max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-5 pb-16 flex-1">
+        {authExpired && (
+          <div className="mb-5 p-4 bg-rose-50 border border-rose-300 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
+            <div className="flex items-center gap-2.5 text-rose-900">
+              <span className="text-xl shrink-0">🔒</span>
+              <div>
+                <div className="text-sm font-black">ورود معلم منقضی شده است</div>
+                <div className="text-xs text-rose-700 mt-0.5">
+                  {error || 'نشست آموزگار معتبر نیست. لطفاً برای بارگذاری اطلاعات مجدداً وارد شوید.'}
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={onLogout}
+              className="self-start sm:self-auto inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white transition-colors cursor-pointer shrink-0"
+            >
+              <span>🔑</span>
+              <span>ورود مجدد معلم</span>
+            </button>
+          </div>
+        )}
+
         {/* TAB 1: HOME (Dashboard Overview) */}
         {activeTab === 'home' && (
           <div className="space-y-6 animate-[mobileFadeIn_0.2s_ease-out]">
@@ -316,6 +372,34 @@ export default function TeacherDashboard({
               </span>
             </div>
 
+            {/* Independent Dashboard Loading / Error Banner */}
+            {!authExpired && dashboardFailedKeys.length > 0 && (
+              <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 shadow-2xs">
+                <div className="flex items-center gap-2 text-xs font-bold text-amber-900">
+                  <span className="text-base">⚠️</span>
+                  <span>
+                    خطا در بارگذاری بخش‌های{' '}
+                    {dashboardFailedKeys.map((k) => RESOURCE_LABELS[k]).join('، ')}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => reloadSections(dashboardFailedKeys)}
+                  className="self-start sm:self-auto inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-amber-600 hover:bg-amber-700 text-white transition-colors cursor-pointer shrink-0"
+                >
+                  <span>🔄</span>
+                  <span>تلاش دوباره</span>
+                </button>
+              </div>
+            )}
+
+            {!authExpired && dashboardLoadingAny && dashboardFailedKeys.length === 0 && (
+              <div className="flex items-center gap-2 text-xs font-bold text-slate-500 px-1">
+                <span className="w-2 h-2 rounded-full bg-blue-500 animate-ping" />
+                <span>در حال دریافت مستقل بخش‌های داشبورد...</span>
+              </div>
+            )}
+
             {/* KPI Cards */}
             <div className="mt-6">
               <KpiCards
@@ -326,6 +410,17 @@ export default function TeacherDashboard({
                 grades={combinedGrades}
                 statsRows={statsRows}
                 weakSubjects={weakSubjects}
+                loadingState={{
+                  students: sectionStatus.students.loading && !sectionStatus.students.loaded,
+                  attendance: sectionStatus.attendance.loading && !sectionStatus.attendance.loaded,
+                  homework:
+                    (sectionStatus.posts.loading && !sectionStatus.posts.loaded) ||
+                    (sectionStatus.submissions.loading && !sectionStatus.submissions.loaded),
+                  grades:
+                    (sectionStatus.grades.loading && !sectionStatus.grades.loaded) ||
+                    (sectionStatus.exams.loading && !sectionStatus.exams.loaded) ||
+                    (sectionStatus.examSubmissions.loading && !sectionStatus.examSubmissions.loaded),
+                }}
               />
             </div>
           </div>
@@ -473,10 +568,12 @@ export default function TeacherDashboard({
 
             <Gradebook
               students={sortedStudents}
-              grades={combinedGrades}
+              grades={gradebookGrades}
               attendanceRows={allAttendance}
               onSelectStudent={(id) => setOpenStudentId(id)}
-              onRetry={reload}
+              loading={gradesSectionLoading}
+              error={!authExpired ? gradesSectionError : null}
+              onRetry={() => reloadSections(['students', ...gradesSectionKeys])}
             />
           </div>
         )}

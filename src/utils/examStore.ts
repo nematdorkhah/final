@@ -146,89 +146,151 @@ export function generateUuid(): string {
   })
 }
 
-export async function fetchAllExams(teacherPassword?: string): Promise<Exam[]> {
-  const local = getLocalExams()
-  const teacherPass = getStoredTeacherPassword(teacherPassword)
-  const mergedMap = new Map<string, Exam>()
-  local.forEach((e) => mergedMap.set(e.id, e))
+const LEGACY_SYSTEM_EXAMS_MIGRATED_KEY = 'quizzes_legacy_system_migration_v1_done'
 
-  console.log('[ExamStore:fetchAllExams] Syncing exams directly from Supabase quizzes & posts...')
+function buildQuizRowPayload(exam: Exam) {
+  const durationMinutes = Number(exam.durationMinutes ?? 30)
+  const safeDuration = Number.isFinite(durationMinutes) && durationMinutes >= 0 ? Math.round(durationMinutes) : 30
+  const isUntimed = Boolean(exam.isUntimed || exam.mode === 'assignment' || safeDuration === 0)
+  const mode: 'exam' | 'assignment' = exam.mode === 'assignment' || isUntimed ? 'assignment' : 'exam'
+  const questions = Array.isArray(exam.questions) ? exam.questions : []
+  const explicitTotal = Number(exam.totalPoints)
+  const totalPoints =
+    Number.isFinite(explicitTotal) && explicitTotal > 0
+      ? explicitTotal
+      : questions.length > 0
+      ? questions.reduce((sum, q) => sum + (Number(q?.points) || 1), 0)
+      : 20
 
-  // 1. Direct Supabase Query: Read directly from quizzes table
-  try {
-    const { data: dbQuizzes, error: qErr } = await supabase
-      .from('quizzes')
-      .select('*')
-      .order('created_at', { ascending: false })
-
-    if (!qErr && Array.isArray(dbQuizzes) && dbQuizzes.length > 0) {
-      dbQuizzes.forEach((row: any) => {
-        if (!row || !row.id) return
-        const mappedExam: Exam = {
-          id: row.id,
-          title: row.title || 'آزمون کلاسی',
-          subject: row.subject || 'عمومی',
-          description: `آزمون درس ${row.subject || 'عمومی'}`,
-          questions: Array.isArray(row.questions) ? row.questions : [],
-          durationMinutes: Number(row.duration_minutes) || 30,
-          totalPoints: Array.isArray(row.questions)
-            ? row.questions.reduce((sum: number, q: any) => sum + (Number(q.points) || 1), 0)
-            : 20,
-          createdAt: row.created_at || new Date().toISOString(),
-          scheduledStartTime: row.created_at || new Date().toISOString(),
-          published: true,
-        }
-        mergedMap.set(row.id, mappedExam)
-      })
-      console.log(`[ExamStore:fetchAllExams] Synced ${dbQuizzes.length} exams directly from quizzes table`)
-    }
-  } catch (err) {
-    console.warn('[ExamStore:fetchAllExams] Direct Supabase quizzes query error:', err)
+  return {
+    id: exam.id,
+    title: exam.title || 'آزمون کلاسی',
+    subject: exam.subject || 'عمومی',
+    questions,
+    duration_minutes: safeDuration,
+    published: exam.published !== false,
+    mode,
+    due_at: exam.dueDate || null,
+    scheduled_start: exam.scheduledStartTime || exam.createdAt || new Date().toISOString(),
+    is_untimed: isUntimed,
+    results_published: Boolean(
+      exam.resultsPublished || exam.results_published || exam.isResultsReleased || (exam as any).resultsReleased
+    ),
+    total_points: totalPoints,
+    created_at: exam.createdAt || new Date().toISOString(),
   }
+}
 
-  // 2. Direct Supabase Query: Read __SYSTEM_EXAMS__ directly from posts table (CRITICAL FOR STATIC NETLIFY/CLOUDFLARE SPA)
+async function upsertSingleQuizRow(exam: Exam, teacherPass: string): Promise<Exam> {
+  if (!teacherPass) {
+    throw new Error('رمز عبور معلم برای ذخیره آزمون در پایگاه داده یافت نشد.')
+  }
+  const quizPayload = buildQuizRowPayload(exam)
+
+  const { data, error } = await supabase.rpc('teacher_upsert_quiz', {
+    p_password: teacherPass,
+    p_quiz: quizPayload,
+  })
+  if (error) {
+    throw error
+  }
+  const normalized = data ? normalizeQuizRowToExam(data) : null
+  return normalized || exam
+}
+
+/**
+ * One-time migration from legacy posts.__SYSTEM_EXAMS__ into public.quizzes.
+ * Runs at most once per teacher browser, only if legacy metadata has not yet been migrated into quizzes,
+ * then permanently disables itself via localStorage flag.
+ */
+async function migrateLegacySystemExamsOnce(teacherPass: string, existingRows: any[]): Promise<Exam[] | null> {
   try {
+    if (!teacherPass) return null
+    if (typeof localStorage !== 'undefined' && localStorage.getItem(LEGACY_SYSTEM_EXAMS_MIGRATED_KEY) === '1') {
+      return null
+    }
+
+    // If SQL migration already populated the new columns on quizzes, mark complete and never read __SYSTEM_EXAMS__
+    const alreadyHasMigratedMetadata = existingRows.some(
+      (r) =>
+        r &&
+        (r.due_at !== undefined ||
+          r.scheduled_start !== undefined ||
+          r.results_published !== undefined ||
+          r.total_points !== undefined) &&
+        (r.due_at !== null || r.total_points !== null || r.mode === 'assignment' || r.results_published === true)
+    )
+    if (alreadyHasMigratedMetadata) {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(LEGACY_SYSTEM_EXAMS_MIGRATED_KEY, '1')
+      }
+      return null
+    }
+
     const { data: systemRow, error: sysErr } = await supabase
       .from('posts')
-      .select('id, title, body, type, publish_at')
+      .select('id, body')
       .eq('title', '__SYSTEM_EXAMS__')
       .order('created_at', { ascending: false })
       .limit(1)
       .maybeSingle()
 
-    if (!sysErr && systemRow?.body) {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(LEGACY_SYSTEM_EXAMS_MIGRATED_KEY, '1')
+    }
+
+    if (sysErr || !systemRow?.body) return null
+    const parsed = typeof systemRow.body === 'string' ? JSON.parse(systemRow.body) : systemRow.body
+    if (!Array.isArray(parsed) || parsed.length === 0) return null
+
+    const migrated: Exam[] = []
+    for (const rawItem of parsed) {
+      if (!rawItem || !isValidUuid(rawItem.id)) continue
       try {
-        const parsed = typeof systemRow.body === 'string' ? JSON.parse(systemRow.body) : systemRow.body
-        if (Array.isArray(parsed)) {
-          parsed.forEach((e: Exam) => {
-            if (e && e.id) mergedMap.set(e.id, { ...e, published: e.published !== false })
-          })
-          console.log(`[ExamStore:fetchAllExams] Synced ${parsed.length} exams directly from Supabase posts __SYSTEM_EXAMS__`)
-        }
-      } catch (parseErr) {
-        console.warn('[ExamStore:fetchAllExams] Error parsing __SYSTEM_EXAMS__ body:', parseErr)
+        const saved = await upsertSingleQuizRow(rawItem as Exam, teacherPass)
+        migrated.push(saved)
+      } catch (itemErr) {
+        console.warn('[ExamStore:migrateLegacySystemExamsOnce] Failed migrating item:', rawItem.id, itemErr)
       }
     }
-  } catch (err) {
-    console.warn('[ExamStore:fetchAllExams] Direct Supabase __SYSTEM_EXAMS__ query failed:', err)
-  }
 
-  // 3. Query filtered classroom posts as fallback (avoids 10MB system history dumps)
+    return migrated.length > 0 ? migrated : null
+  } catch {
+    return null
+  }
+}
+
+export async function fetchAllExams(teacherPassword?: string): Promise<Exam[]> {
+  const teacherPass = getStoredTeacherPassword(teacherPassword)
+
+  // Single authoritative source of truth: public.quizzes via secure RPC (1 query)
   try {
-    const pubPosts = await fetchFilteredPublishedPosts(supabase, { includeScheduledFuture: true })
-    if (Array.isArray(pubPosts) && pubPosts.length > 0) {
-      const extracted = extractExamsFromPosts(pubPosts)
-      extracted.forEach((e) => {
-        if (!mergedMap.has(e.id)) mergedMap.set(e.id, e)
-      })
-    }
-  } catch (err) {
-    console.warn('[ExamStore:fetchAllExams] Supabase filtered posts skipped:', err)
-  }
+    let rows: any[] = []
 
-  const merged = Array.from(mergedMap.values())
-  saveLocalExams(merged)
-  return merged
+    if (teacherPass) {
+      const { data: rpcRows, error: rpcErr } = await supabase.rpc('teacher_list_quizzes', {
+        p_password: teacherPass,
+      })
+      if (rpcErr) throw rpcErr
+      rows = Array.isArray(rpcRows) ? rpcRows : []
+    } else {
+      const { data: rpcRows, error: rpcErr } = await supabase.rpc('student_list_published_quizzes')
+      if (rpcErr) throw rpcErr
+      rows = Array.isArray(rpcRows) ? rpcRows : []
+    }
+
+    // One-time legacy migration check (permanently disabled after first check/migration)
+    const migrated = await migrateLegacySystemExamsOnce(teacherPass, rows)
+    const finalExams = migrated
+      ? migrated
+      : rows.map((row) => normalizeQuizRowToExam(row)).filter((e): e is Exam => Boolean(e))
+
+    saveLocalExams(finalExams)
+    return finalExams
+  } catch (err) {
+    console.warn('[ExamStore:fetchAllExams] Quizzes query error, falling back to local cache:', err)
+    return getLocalExams()
+  }
 }
 
 export function isPromptLike(text: string): boolean {
@@ -282,182 +344,84 @@ export async function fetchPublishedExamsWithDiagnostics(
   }
 
   const runPromise = (async (): Promise<PublishedExamsResult> => {
-  const local = getLocalExams()
-  const remoteMap = new Map<string, Exam>()
-  const start = Date.now()
-  let remoteSourcesSucceeded = 0
-  let lastErrorMsg: string | null = null
+    const local = getLocalExams()
+    const start = Date.now()
 
-  const applyRemoteExam = (candidate: Exam | null) => {
-    if (!candidate || !candidate.id) return
-    const existing = remoteMap.get(candidate.id)
-    remoteMap.set(candidate.id, {
-      ...(existing || {}),
-      ...candidate,
-      published: candidate.published !== false,
-    })
-  }
-
-  const skipApi = Boolean(options.skipBackendApi) || isBackendStaticOnly()
-
-  const apiPromise = skipApi
-    ? Promise.reject(Object.assign(new Error('Skipped redundant /api/exams'), { isHtmlFallback: true }))
-    : retryWithBackoff(
+    // Single authoritative source of truth: public.quizzes (1 single query)
+    try {
+      const outcome = await retryWithBackoff(
         async () => {
-          const json = await fetchApiJson<{ success?: boolean; exams?: Exam[]; error?: string }>(
-            `/api/exams?role=${forStudent ? 'student' : 'teacher'}${forceFresh ? '&fresh=1' : ''}`,
-            { headers: { 'Cache-Control': 'no-cache' } },
-            5500
-          )
-          if (!json || !json.success || !Array.isArray(json.exams)) {
-            throw new Error(json?.error || 'Invalid /api/exams payload')
+          if (forStudent) {
+            const { data: rpcRows, error: rpcErr } = await supabase.rpc('student_list_published_quizzes')
+            if (rpcErr) {
+              const err: any = new Error(rpcErr.message || 'student_list_published_quizzes error')
+              err.code = rpcErr.code
+              throw err
+            }
+            return Array.isArray(rpcRows) ? rpcRows : []
           }
-          return json.exams as Exam[]
+
+          const teacherPass = getStoredTeacherPassword()
+          if (teacherPass) {
+            const { data: rpcRows, error: rpcErr } = await supabase.rpc('teacher_list_quizzes', {
+              p_password: teacherPass,
+            })
+            if (rpcErr) {
+              const err: any = new Error(rpcErr.message || 'teacher_list_quizzes error')
+              err.code = rpcErr.code
+              throw err
+            }
+            return Array.isArray(rpcRows) ? rpcRows : []
+          }
+
+          const { data: rpcRows, error: rpcErr } = await supabase.rpc('student_list_published_quizzes')
+          if (rpcErr) {
+            const err: any = new Error(rpcErr.message || 'student_list_published_quizzes error')
+            err.code = rpcErr.code
+            throw err
+          }
+          return Array.isArray(rpcRows) ? rpcRows : []
         },
-        { maxRetries: 2, baseDelayMs: 250, stage: 'api_exams' }
+        { maxRetries: 2, baseDelayMs: 300, stage: 'supabase_quizzes' }
       )
 
-  const [apiRes, quizzesRes, systemRes, postsRes] = await Promise.allSettled([
-    apiPromise,
+      const normalized = outcome.data
+        .map((row: any) => normalizeQuizRowToExam(row))
+        .filter((e): e is Exam => Boolean(e && e.published !== false))
 
-    // 1. Direct Supabase Query: quizzes table
-    retryWithBackoff(
-      async () => {
-        const { data, error } = await supabase
-          .from('quizzes')
-          .select('*')
-          .order('created_at', { ascending: false })
-        if (error) {
-          const err: any = new Error(error.message || 'quizzes query error')
-          err.code = error.code
-          throw err
-        }
-        return Array.isArray(data) ? data : []
-      },
-      { maxRetries: 2, baseDelayMs: 300, stage: 'supabase_quizzes' }
-    ),
+      const finalExams = forStudent ? normalized.map(sanitizeExamForStudent) : normalized
+      saveLocalExams(finalExams)
 
-    // 2. Direct Supabase Query: __SYSTEM_EXAMS__ in posts table
-    retryWithBackoff(
-      async () => {
-        const { data, error } = await supabase
-          .from('posts')
-          .select('id, title, body, type, publish_at')
-          .eq('title', '__SYSTEM_EXAMS__')
-          .order('created_at', { ascending: false })
-          .limit(1)
-          .maybeSingle()
-        if (error) {
-          const err: any = new Error(error.message || '__SYSTEM_EXAMS__ query error')
-          err.code = error.code
-          throw err
-        }
-        return data
-      },
-      { maxRetries: 2, baseDelayMs: 300, stage: 'supabase_system_exams' }
-    ),
+      return {
+        exams: finalExams,
+        remoteOk: true,
+        remoteSourcesSucceeded: 1,
+        error: null,
+        fromCacheOnly: false,
+      }
+    } catch (err: any) {
+      const errorMsg = String(err?.message || err || 'خطا در دریافت آزمون‌ها از پایگاه داده')
+      const cached = local.filter((e) => e && e.published !== false)
+      const finalExams = forStudent ? cached.map(sanitizeExamForStudent) : cached
 
-    // 3. Lightweight filtered classroom posts (never pulls 10MB system history blobs)
-    retryWithBackoff(
-      async () => fetchFilteredPublishedPosts(supabase, { includeScheduledFuture: !forStudent }),
-      { maxRetries: 1, baseDelayMs: 300, stage: 'supabase_filtered_posts' }
-    ),
-  ])
+      recordFetchDiagnostic({
+        timestamp: new Date().toISOString(),
+        examId: null,
+        stage: 'fetch_published_exams_quizzes_failed',
+        statusOrError: errorMsg,
+        durationMs: Date.now() - start,
+        retryCount: 2,
+        finalStatus: 'failed',
+      })
 
-  // Merge in deterministic order so richer metadata (__SYSTEM_EXAMS__ & /api/exams) enhances raw quizzes rows:
-  // First: raw quizzes rows
-  if (quizzesRes.status === 'fulfilled') {
-    remoteSourcesSucceeded++
-    for (const row of quizzesRes.value.data) {
-      const normalized = normalizeQuizRowToExam(row)
-      if (normalized) applyRemoteExam(normalized)
-    }
-  } else {
-    lastErrorMsg = String(quizzesRes.reason?.message || quizzesRes.reason || 'quizzes fetch failed')
-  }
-
-  // Second: filtered posts extracted exams
-  if (postsRes.status === 'fulfilled') {
-    remoteSourcesSucceeded++
-    const extracted = extractExamsFromPosts(postsRes.value.data)
-    extracted.forEach((e) => applyRemoteExam(e))
-  } else if (!lastErrorMsg) {
-    lastErrorMsg = String(postsRes.reason?.message || postsRes.reason || 'posts fetch failed')
-  }
-
-  // Third: __SYSTEM_EXAMS__ authoritative exam settings (mode, dueDate, isUntimed, resultsPublished)
-  if (systemRes.status === 'fulfilled') {
-    remoteSourcesSucceeded++
-    const systemRow = systemRes.value.data
-    if (systemRow?.body) {
-      try {
-        const parsed = typeof systemRow.body === 'string' ? JSON.parse(systemRow.body) : systemRow.body
-        if (Array.isArray(parsed)) {
-          parsed.forEach((e: Exam) => {
-            if (e && e.id && e.published !== false) {
-              applyRemoteExam(e)
-            } else if (e && e.id && e.published === false) {
-              // Respect explicit unpublished flag from authoritative __SYSTEM_EXAMS__
-              remoteMap.delete(e.id)
-            }
-          })
-        }
-      } catch (parseErr) {
-        console.warn('[ExamStore:fetchPublishedExams] Error parsing __SYSTEM_EXAMS__:', parseErr)
+      return {
+        exams: finalExams,
+        remoteOk: false,
+        remoteSourcesSucceeded: 0,
+        error: errorMsg,
+        fromCacheOnly: true,
       }
     }
-  } else if (!lastErrorMsg) {
-    lastErrorMsg = String(systemRes.reason?.message || systemRes.reason || '__SYSTEM_EXAMS__ failed')
-  }
-
-  // Fourth: /api/exams server cache (already merges quizzes + __SYSTEM_EXAMS__)
-  if (apiRes.status === 'fulfilled') {
-    remoteSourcesSucceeded++
-    apiRes.value.data.forEach((e: Exam) => {
-      if (e && e.id && e.published !== false) {
-        applyRemoteExam(e)
-      }
-    })
-  } else if (!lastErrorMsg) {
-    lastErrorMsg = String(apiRes.reason?.message || apiRes.reason || '/api/exams failed')
-  }
-
-  const remoteOk = remoteSourcesSucceeded > 0
-  let resolved: Exam[] = []
-
-  if (remoteOk) {
-    resolved = Array.from(remoteMap.values())
-    // Keep localStorage cache synchronized with remote truth WITHOUT allowing stale local `published: false` to hide remote exams,
-    // and NEVER wipe localStorage if an error happened.
-    if (resolved.length > 0) {
-      const sanitizedToCache = forStudent ? resolved.map(sanitizeExamForStudent) : resolved
-      saveLocalExams(sanitizedToCache)
-    } else if (quizzesRes.status === 'fulfilled' && systemRes.status === 'fulfilled') {
-      // Both authoritative Supabase sources succeeded and genuinely returned 0 exams
-      saveLocalExams([])
-    }
-  } else {
-    // All remote sources failed: fall back to cached localStorage (do NOT overwrite cache)
-    resolved = local.filter((e) => e && e.published !== false)
-    recordFetchDiagnostic({
-      timestamp: new Date().toISOString(),
-      examId: null,
-      stage: 'fetch_published_exams_all_failed',
-      statusOrError: lastErrorMsg || 'All remote exam sources failed',
-      durationMs: Date.now() - start,
-      retryCount: 2,
-      finalStatus: 'failed',
-    })
-  }
-
-  const finalExams = forStudent ? resolved.map(sanitizeExamForStudent) : resolved
-  return {
-    exams: finalExams,
-    remoteOk,
-    remoteSourcesSucceeded,
-    error: remoteOk ? null : (lastErrorMsg || 'خطا در دریافت آزمون‌ها از سرور'),
-    fromCacheOnly: !remoteOk,
-  }
   })().finally(() => {
     inFlightPublishedExams.delete(dedupeKey)
   })
@@ -474,147 +438,156 @@ export async function fetchPublishedExams(forStudent = true): Promise<Exam[]> {
   return result.exams
 }
 
+export interface StudentExamReviewQuestionItem {
+  question_id: string
+  index: number
+  text: string
+  type: string
+  options?: string[]
+  student_answer?: any
+  correct_answer?: any
+  explanation?: string
+  feedback?: string
+  earned_points?: number | null
+  max_points?: number
+}
+
+export interface StudentExamReviewResponse {
+  ok: boolean
+  released: boolean
+  reason?: string
+  message?: string
+  exam?: Exam | null
+  submission?: StudentExamSubmission | null
+  questionsReview?: StudentExamReviewQuestionItem[]
+  scaledScore20?: number | null
+}
+
 /**
- * Direct sync helper to keep __SYSTEM_EXAMS__ in Supabase posts table
- * completely up-to-date even in static SPA environments (Netlify / Cloudflare Workers).
+ * Fetches full unsanitized exam questions, correct answers, explanations, and student's answers
+ * via the secure Supabase RPC `student_get_exam_review`.
+ * Returns `released: false` if results for this student have not been approved/published yet.
  */
-export async function syncExamsToSupabaseSystemRow(
-  exams: Exam[],
-  teacherPassword?: string
-): Promise<boolean> {
-  const examsBody = JSON.stringify(exams)
-  let directSuccess = false
-
-  console.log(`[ExamStore:syncExamsToSupabaseSystemRow] Syncing ${exams.length} exams directly to __SYSTEM_EXAMS__...`)
-
-  // 1. Direct Supabase Client: Update or insert __SYSTEM_EXAMS__ row using type: 'announcement' (valid for posts_type_check)
-  try {
-    const { data: existingRow } = await supabase
-      .from('posts')
-      .select('id, title')
-      .eq('title', '__SYSTEM_EXAMS__')
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle()
-
-    if (existingRow?.id) {
-      const { error: updateErr } = await supabase
-        .from('posts')
-        .update({
-          body: examsBody,
-          type: 'announcement',
-          publish_at: new Date().toISOString(),
-        })
-        .eq('id', existingRow.id)
-
-      if (!updateErr) directSuccess = true
-    } else {
-      const { error: insertErr } = await supabase
-        .from('posts')
-        .insert({
-          title: '__SYSTEM_EXAMS__',
-          type: 'announcement',
-          body: examsBody,
-          publish_at: new Date().toISOString(),
-        })
-
-      if (!insertErr) directSuccess = true
+export async function fetchStudentExamReview(params: {
+  examId: string
+  studentId: string
+  accessCode: string
+}): Promise<StudentExamReviewResponse> {
+  const { examId, studentId, accessCode } = params
+  if (!isValidUuid(examId) || !isValidUuid(studentId) || !String(accessCode || '').trim()) {
+    return {
+      ok: false,
+      released: false,
+      reason: 'invalid_params',
+      message: 'اطلاعات شناسایی آزمون یا دانش‌آموز معتبر نیست.',
     }
-  } catch (err) {
-    console.warn('[ExamStore:syncExamsToSupabaseSystemRow] Direct supabase.from("posts") failed:', err)
   }
 
-  return directSuccess
+  const { data, error } = await supabase.rpc('student_get_exam_review', {
+    p_exam_id: examId,
+    p_student_id: studentId,
+    p_access_code: String(accessCode).trim(),
+  })
+
+  if (error) {
+    throw new Error(error.message || 'خطا در دریافت پاسخ‌نامه از سرور')
+  }
+
+  if (!data || typeof data !== 'object') {
+    return {
+      ok: false,
+      released: false,
+      reason: 'empty_response',
+      message: 'پاسخی از سرور دریافت نشد.',
+    }
+  }
+
+  const payload = data as any
+  if (!payload.ok || !payload.released) {
+    return {
+      ok: false,
+      released: false,
+      reason: payload.reason || 'not_released',
+      message: payload.message || 'نتیجه هنوز منتشر نشده است.',
+    }
+  }
+
+  const normalizedExam = payload.exam ? normalizeQuizRowToExam(payload.exam) : null
+  const normalizedSub = payload.submission ? (payload.submission as StudentExamSubmission) : null
+
+  return {
+    ok: true,
+    released: true,
+    exam: normalizedExam,
+    submission: normalizedSub,
+    questionsReview: Array.isArray(payload.questions_review) ? payload.questions_review : [],
+    scaledScore20:
+      payload.scaled_score_20 !== null && payload.scaled_score_20 !== undefined
+        ? safeScaled20(payload.scaled_score_20, 20)
+        : null,
+  }
 }
 
 export async function saveExam(exam: Exam, teacherPassword?: string): Promise<void> {
-  console.log('[ExamStore:saveExam] Saving exam directly to Supabase quizzes:', exam.id, exam.title)
-
   // Ensure exam has a valid UUID format for PostgreSQL quizzes.id and quiz_submissions.quiz_id
   if (!isValidUuid(exam.id)) {
     exam.id = generateUuid()
   }
 
-  const current = getLocalExams()
-  const idx = current.findIndex((e) => e.id === exam.id)
-  if (idx >= 0) {
-    current[idx] = exam
-  } else {
-    current.unshift(exam)
-  }
-  saveLocalExams(current)
-
   const teacherPass = getStoredTeacherPassword(teacherPassword)
 
-  const saveWork = async (): Promise<boolean> => {
-    const quizPayload = {
-      id: exam.id,
-      title: exam.title,
-      subject: exam.subject || 'عمومی',
-      questions: exam.questions || [],
-      duration_minutes: Number(exam.durationMinutes) || 30,
-      created_at: exam.createdAt || new Date().toISOString(),
-    }
-
-    const [quizWrite, serverWrite, sysWrite] = await Promise.allSettled([
-      // 1. Primary Direct persistence to quizzes table in Supabase
-      retryWithBackoff(
-        async () => {
-          const { error: quizErr } = await supabase.from('quizzes').upsert(quizPayload, { onConflict: 'id' })
-          if (quizErr) {
-            const { error: insErr } = await supabase.from('quizzes').insert(quizPayload)
-            if (insErr) throw insErr
-          }
-          return true
-        },
-        { maxRetries: 1, baseDelayMs: 300, stage: 'save_exam_quizzes', examId: exam.id }
-      ),
-
-      // 2. Backend server /api/exams/save (skipped when static-only Netlify host detected)
-      isBackendStaticOnly()
-        ? Promise.resolve({ success: false, skipped: true })
-        : fetchApiJson<any>(
-            '/api/exams/save',
-            {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                ...(teacherPass ? { 'x-teacher-password': teacherPass, 'Authorization': `Bearer ${teacherPass}` } : {}),
-              },
-              body: JSON.stringify({ exam, teacherPassword: teacherPass }),
-            },
-            6000
-          ),
-
-      // 3. Sync to Supabase Posts __SYSTEM_EXAMS__ row for cross-device redundancy
-      syncExamsToSupabaseSystemRow(current, teacherPass),
-    ])
-
-    const quizOk = quizWrite.status === 'fulfilled' && quizWrite.value.data === true
-    const serverOk = serverWrite.status === 'fulfilled' && Boolean(serverWrite.value?.success)
-    const sysOk = sysWrite.status === 'fulfilled' && sysWrite.value === true
-
-    return quizOk || serverOk || sysOk
+  const saveWork = async (): Promise<Exam> => {
+    const outcome = await retryWithBackoff(
+      async () => upsertSingleQuizRow(exam, teacherPass),
+      { maxRetries: 1, baseDelayMs: 300, stage: 'save_exam_quizzes', examId: exam.id }
+    )
+    return outcome.data
   }
 
-  const timeoutPromise = new Promise<boolean>((_, reject) =>
-    setTimeout(() => reject(new Error('زمان ذخیره آزمون در سرور به پایان رسید. لطفاً اینترنت خود را بررسی کرده و مجدداً ذخیره کنید.')), 10000)
+  const timeoutPromise = new Promise<Exam>((_, reject) =>
+    setTimeout(
+      () =>
+        reject(
+          new Error('زمان ذخیره آزمون در سرور به پایان رسید. لطفاً اینترنت خود را بررسی کرده و مجدداً ذخیره کنید.')
+        ),
+      10000
+    )
   )
 
-  const savedRemote = await Promise.race([saveWork(), timeoutPromise])
-  if (!savedRemote) {
-    throw new Error('ذخیره آزمون در سرور یا پایگاه داده ناموفق بود. لطفاً اتصال اینترنت را بررسی کرده و دوباره تلاش نمایید.')
+  const savedExam = await Promise.race([saveWork(), timeoutPromise])
+
+  // Update local cache ONLY after single-row quizzes upsert succeeds (never push localStorage list to server)
+  const current = getLocalExams()
+  const idx = current.findIndex((e) => e.id === savedExam.id)
+  if (idx >= 0) {
+    current[idx] = savedExam
+  } else {
+    current.unshift(savedExam)
   }
+  saveLocalExams(current)
 }
 
 export async function deleteExam(examId: string, teacherPassword?: string): Promise<boolean> {
-  console.log('[ExamStore:deleteExam] Initiating complete deletion of exam/assignment:', examId)
-  
-  // 1. Immediately remove from local memory & localStorage
+  const teacherPass = getStoredTeacherPassword(teacherPassword)
+
+  // Delete single quiz row in Supabase strictly via teacher_delete_quiz RPC (never direct table access)
+  if (isValidUuid(examId)) {
+    if (!teacherPass) {
+      throw new Error('رمز عبور معلم برای حذف آزمون یافت نشد.')
+    }
+    const { error: rpcErr } = await supabase.rpc('teacher_delete_quiz', {
+      p_password: teacherPass,
+      p_quiz_id: examId,
+    })
+    if (rpcErr) {
+      throw rpcErr
+    }
+  }
+
+  // Clean local cache after remote deletion
   const current = getLocalExams().filter((e) => e.id !== examId)
   saveLocalExams(current)
 
-  // 2. Clean associated student submissions from local storage
   try {
     const currentSubs = getLocalSubmissions().filter((s) => s.examId !== examId)
     saveLocalSubmissions(currentSubs)
@@ -622,45 +595,6 @@ export async function deleteExam(examId: string, teacherPassword?: string): Prom
     console.warn('[ExamStore:deleteExam] Error cleaning local submissions:', err)
   }
 
-  const teacherPass = getStoredTeacherPassword(teacherPassword)
-
-  // 3. Direct delete from quizzes table, quiz_submissions, and independent posts in Supabase
-  try {
-    await supabase.from('quizzes').delete().eq('id', examId)
-    await supabase.from('quiz_submissions').delete().eq('quiz_id', examId)
-    await supabase.from('quiz_submissions').delete().filter('answers->>exam_id', 'eq', examId)
-    await supabase.from('quiz_submissions').delete().filter('answers->>quiz_id', 'eq', examId)
-    await supabase.from('posts').delete().like('title', `__EXAM_SUB__:${examId}%`)
-    console.log('[ExamStore:deleteExam] Deleted from Supabase tables for exam:', examId)
-  } catch (err) {
-    console.warn('[ExamStore:deleteExam] Error deleting from Supabase:', err)
-  }
-
-  // 4. Direct Sync updated exams array to Supabase __SYSTEM_EXAMS__ row
-  await syncExamsToSupabaseSystemRow(current, teacherPass)
-
-  // 5. Backend server delete call (persists disk backup and in-memory caches)
-  if (!isBackendStaticOnly()) {
-    try {
-      const data = await fetchApiJson<any>(
-        '/api/exams/delete',
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(teacherPass ? { 'x-teacher-password': teacherPass, 'Authorization': `Bearer ${teacherPass}` } : {}),
-          },
-          body: JSON.stringify({ examId, teacherPassword: teacherPass }),
-        },
-        6000
-      )
-      console.log('[ExamStore:deleteExam] Server delete response:', data)
-    } catch (err) {
-      console.warn('[ExamStore:deleteExam] Server delete call error:', err)
-    }
-  }
-
-  // 6. Broadcast event across client components
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('exams-updated', { detail: { examId, deleted: true } }))
   }
@@ -1706,7 +1640,7 @@ export async function releaseExamResultsForAll(
   allExams[examIdx] = updatedExam
   saveLocalExams(allExams)
 
-  // Update in Supabase __SYSTEM_EXAMS__
+  // Update single row in public.quizzes
   await saveExam(updatedExam, teacherPass)
 
   // Hydrate all submissions for this exam before updating
@@ -3563,11 +3497,17 @@ export function buildCanonicalGradesList(params: {
       if (officialMaxScore > 0 && officialMaxScore !== 20) {
         rawEarned = roundScore2(officialScore)
         rawTotal = officialMaxScore
-        officialScore = roundScore2((officialScore / officialMaxScore) * 20)
+        officialScore = safeScaled20(officialScore, officialMaxScore)
         officialMaxScore = 20
       } else {
-        officialScore = roundScore2(officialScore)
+        officialScore = safeScaled20(officialScore, 20)
+        officialMaxScore = 20
       }
+    }
+
+    if (itemStatus === 'graded') {
+      officialScore = safeScaled20(officialScore, officialMaxScore > 0 ? officialMaxScore : 20)
+      officialMaxScore = 20
     }
 
     if (matchedExam && rawEarned === undefined && itemStatus === 'graded') {
@@ -3595,7 +3535,7 @@ export function buildCanonicalGradesList(params: {
       student_id: targetStudentId,
       status: itemStatus,
       score: itemStatus === 'graded' ? officialScore : null,
-      max_score: officialMaxScore,
+      max_score: 20,
       raw_score: rawEarned,
       raw_max: rawTotal,
       notes: officialNotes,
@@ -3765,6 +3705,9 @@ export interface SystemBackupData {
   exams: Exam[]
   examSubmissions: StudentExamSubmission[]
   tizhooshanProgress?: Record<string, any>
+  examsExportWarning?: string
+  examSubmissionsExportWarning?: string
+  tizhooshanExportError?: string
   students?: any[]
   posts?: any[]
   grades?: any[]
@@ -3773,42 +3716,211 @@ export interface SystemBackupData {
 }
 
 export async function exportCompleteSystemBackup(teacherPassword?: string): Promise<string> {
-  const exams = getLocalExams()
-  const examSubmissions = getLocalSubmissions()
+  const cleanTeacherPassword = typeof teacherPassword === 'string' ? teacherPassword.trim() : ''
 
+  let exams: Exam[] = []
+  let examSubmissions: StudentExamSubmission[] = []
   let students: any[] = []
   let posts: any[] = []
   let grades: any[] = []
   let attendance: any[] = []
   let submissions: any[] = []
-  let tizhooshanProgress: any = {}
+  let tizhooshanProgress: Record<string, any> = {}
 
-  if (!isBackendStaticOnly()) {
-    try {
-      const d = await fetchApiJson<any>('/api/tizhooshan/all-progress', {}, 5000)
-      if (d?.progressMap) tizhooshanProgress = d.progressMap
-    } catch (e) {
-      console.warn('Failed to export server tizhooshan progress', e)
-    }
-  }
+  let examsExportWarning: string | undefined
+  let examSubmissionsExportWarning: string | undefined
+  let tizhooshanExportError: string | undefined
 
-  if (teacherPassword) {
-    try {
-      const [sRes, pRes, gRes, aRes, subRes] = await Promise.all([
-        supabase.rpc('teacher_list_students', { p_password: teacherPassword }),
-        fetchFilteredPublishedPosts(supabase, { includeScheduledFuture: true }),
-        supabase.rpc('teacher_list_grades', { p_password: teacherPassword }),
-        supabase.rpc('teacher_list_attendance', { p_password: teacherPassword }),
-        supabase.rpc('teacher_list_submissions', { p_password: teacherPassword }),
-      ])
-      students = sRes.data || []
-      posts = Array.isArray(pRes) ? pRes : []
-      grades = gRes.data || []
-      attendance = aRes.data || []
-      submissions = subRes.data || []
-    } catch (e) {
-      console.warn('Failed to fetch some cloud tables during backup, including local data', e)
+  if (cleanTeacherPassword) {
+    const [
+      quizzesRes,
+      quizSubsRes,
+      tizhooshanRes,
+      studentsRes,
+      postsRes,
+      gradesRes,
+      attendanceRes,
+      submissionsRes,
+    ] = await Promise.allSettled([
+      supabase.rpc('teacher_list_quizzes', { p_password: cleanTeacherPassword }),
+      supabase.rpc('teacher_list_quiz_submissions', { p_password: cleanTeacherPassword }),
+      supabase.rpc('teacher_list_tizhooshan', { p_password: cleanTeacherPassword }),
+      supabase.rpc('teacher_list_students', { p_password: cleanTeacherPassword }),
+      fetchFilteredPublishedPosts(supabase, { includeScheduledFuture: true }),
+      supabase.rpc('teacher_list_grades', { p_password: cleanTeacherPassword }),
+      supabase.rpc('teacher_list_attendance', { p_password: cleanTeacherPassword }),
+      supabase.rpc('teacher_list_submissions', { p_password: cleanTeacherPassword }),
+    ])
+
+    // 1. Students & other cloud tables
+    if (studentsRes.status === 'fulfilled' && !studentsRes.value.error && Array.isArray(studentsRes.value.data)) {
+      students = studentsRes.value.data
+    } else if (studentsRes.status === 'rejected' || (studentsRes.status === 'fulfilled' && studentsRes.value.error)) {
+      console.warn('Failed to export Supabase students during backup', studentsRes.status === 'rejected' ? studentsRes.reason : studentsRes.value.error)
     }
+
+    if (postsRes.status === 'fulfilled' && Array.isArray(postsRes.value)) {
+      posts = postsRes.value
+    } else if (postsRes.status === 'rejected') {
+      console.warn('Failed to export Supabase posts during backup', postsRes.reason)
+    }
+
+    if (gradesRes.status === 'fulfilled' && !gradesRes.value.error && Array.isArray(gradesRes.value.data)) {
+      grades = gradesRes.value.data
+    } else if (gradesRes.status === 'rejected' || (gradesRes.status === 'fulfilled' && gradesRes.value.error)) {
+      console.warn('Failed to export Supabase grades during backup', gradesRes.status === 'rejected' ? gradesRes.reason : gradesRes.value.error)
+    }
+
+    if (attendanceRes.status === 'fulfilled' && !attendanceRes.value.error && Array.isArray(attendanceRes.value.data)) {
+      attendance = attendanceRes.value.data
+    } else if (attendanceRes.status === 'rejected' || (attendanceRes.status === 'fulfilled' && attendanceRes.value.error)) {
+      console.warn('Failed to export Supabase attendance during backup', attendanceRes.status === 'rejected' ? attendanceRes.reason : attendanceRes.value.error)
+    }
+
+    if (submissionsRes.status === 'fulfilled' && !submissionsRes.value.error && Array.isArray(submissionsRes.value.data)) {
+      submissions = submissionsRes.value.data
+    } else if (submissionsRes.status === 'rejected' || (submissionsRes.status === 'fulfilled' && submissionsRes.value.error)) {
+      console.warn('Failed to export Supabase submissions during backup', submissionsRes.status === 'rejected' ? submissionsRes.reason : submissionsRes.value.error)
+    }
+
+    const studentNameById = new Map<string, string>()
+    for (const st of students) {
+      if (st?.id && st?.full_name) {
+        studentNameById.set(String(st.id), String(st.full_name))
+      }
+    }
+
+    // 2. Exams from teacher_list_quizzes (same server source as fetchAllExams), fallback to getLocalExams
+    if (quizzesRes.status === 'fulfilled' && !quizzesRes.value.error && Array.isArray(quizzesRes.value.data)) {
+      exams = quizzesRes.value.data
+        .map((row: any) => normalizeQuizRowToExam(row))
+        .filter((e): e is Exam => Boolean(e))
+    } else {
+      const err = quizzesRes.status === 'rejected' ? quizzesRes.reason : quizzesRes.value.error
+      console.warn('Failed to export Supabase exams via teacher_list_quizzes, falling back to local cache', err)
+      exams = getLocalExams()
+      examsExportWarning = err?.message
+        ? `دریافت آزمون‌ها از سرور ناموفق بود (${err.message})؛ نسخه حافظه محلی مرورگر در بکاپ ذخیره شد.`
+        : 'دریافت آزمون‌ها از سرور ناموفق بود؛ نسخه حافظه محلی مرورگر در بکاپ ذخیره شد.'
+    }
+
+    // 3. Exam submissions from teacher_list_quiz_submissions, fallback to getLocalSubmissions
+    if (quizSubsRes.status === 'fulfilled' && !quizSubsRes.value.error && Array.isArray(quizSubsRes.value.data)) {
+      const mappedSubs: StudentExamSubmission[] = []
+      for (const qs of quizSubsRes.value.data) {
+        if (!qs || typeof qs !== 'object') continue
+        const answersObj = qs.answers || {}
+        const targetExamId = qs.quiz_id || answersObj.quiz_id || answersObj.exam_id
+        if (!targetExamId) continue
+
+        const rawStudentName = answersObj.student_name || studentNameById.get(String(qs.student_id || ''))
+        const canonRowStudent = resolveCanonicalStudent(
+          qs.student_id || answersObj.student_national_code || rawStudentName
+        )
+        const targetStudentId = canonRowStudent?.id || qs.student_id || answersObj.student_national_code
+        const targetStudentName = canonRowStudent?.fullName || rawStudentName || 'دانش‌آموز'
+        if (!targetStudentId) continue
+
+        const isApproved = Boolean(
+          answersObj.teacher_approved ||
+            answersObj.approved ||
+            answersObj.is_released ||
+            answersObj.isReleased
+        )
+        const rawScore = Number(
+          answersObj.raw_score ??
+            answersObj.totalScore ??
+            answersObj.earnedPoints ??
+            answersObj.teacherGrading?.totalScore
+        )
+        const scaledScore = Number(
+          qs.score ??
+            answersObj.score ??
+            answersObj.scaledScore20 ??
+            answersObj.teacherGrading?.scaledScore20
+        )
+        const existingTeacherGrading = answersObj.teacherGrading || {}
+        const qScores = answersObj.questionScores || existingTeacherGrading.questionScores
+        const qFeedbacks = answersObj.questionFeedbacks || existingTeacherGrading.questionFeedbacks
+        const teacherNotes = answersObj.teacherNotes || existingTeacherGrading.teacherNotes
+
+        let calculatedRaw: number | undefined = !isNaN(rawScore) && rawScore > 0 ? rawScore : undefined
+        if (qScores && typeof qScores === 'object' && Object.keys(qScores).length > 0) {
+          const sum = Object.values(qScores).reduce((acc: number, v: any) => acc + (Number(v) || 0), 0)
+          if (sum > 0) calculatedRaw = roundScore2(sum)
+        }
+        const validScaled = !isNaN(scaledScore) && scaledScore > 0 ? roundScore2(scaledScore) : undefined
+
+        mappedSubs.push({
+          id: `sub_${targetExamId}_${targetStudentId}`,
+          examId: String(targetExamId),
+          studentId: String(targetStudentId),
+          studentName: targetStudentName,
+          submittedAt: qs.submitted_at,
+          answers: answersObj,
+          syncStatus: 'synced',
+          isReleased: isApproved,
+          is_released: isApproved,
+          status: isApproved ? 'graded' : 'pending_approval',
+          teacherGrading: {
+            ...existingTeacherGrading,
+            totalScore: calculatedRaw,
+            scaledScore20: validScaled,
+            questionScores: qScores,
+            questionFeedbacks: qFeedbacks,
+            teacherNotes,
+            approved: isApproved,
+            approvedAt: answersObj.approved_at || existingTeacherGrading.approvedAt,
+          },
+        })
+      }
+      examSubmissions = mergeSubmissionsDeduplicated([], mappedSubs)
+    } else {
+      const err = quizSubsRes.status === 'rejected' ? quizSubsRes.reason : quizSubsRes.value.error
+      console.warn('Failed to export Supabase exam submissions via teacher_list_quiz_submissions, falling back to local cache', err)
+      examSubmissions = getLocalSubmissions()
+      examSubmissionsExportWarning = err?.message
+        ? `دریافت پاسخ‌های آزمون از سرور ناموفق بود (${err.message})؛ نسخه حافظه محلی مرورگر در بکاپ ذخیره شد.`
+        : 'دریافت پاسخ‌های آزمون از سرور ناموفق بود؛ نسخه حافظه محلی مرورگر در بکاپ ذخیره شد.'
+    }
+
+    // 4. Tizhooshan progress from teacher_list_tizhooshan
+    if (tizhooshanRes.status === 'fulfilled' && !tizhooshanRes.value.error && Array.isArray(tizhooshanRes.value.data)) {
+      const progressMap: Record<string, any> = {}
+      for (const row of tizhooshanRes.value.data) {
+        if (!row || !row.student_id) continue
+        progressMap[String(row.student_id)] = {
+          student_id: row.student_id,
+          student_name: row.student_name ?? '',
+          total_xp: row.total_xp ?? 0,
+          gems: row.gems ?? 0,
+          streak: row.streak ?? 0,
+          hearts: row.hearts ?? 5,
+          unlocked_topic_index: row.unlocked_topic_index ?? 0,
+          completed_topics: row.completed_topics ?? {},
+          completed_question_ids: Array.isArray(row.completed_question_ids) ? row.completed_question_ids : [],
+          wrong_question_ids: Array.isArray(row.wrong_question_ids) ? row.wrong_question_ids : [],
+          last_active_date: row.last_active_date ?? '',
+          updated_at: row.updated_at ?? null,
+        }
+      }
+      tizhooshanProgress = progressMap
+    } else {
+      const err = tizhooshanRes.status === 'rejected' ? tizhooshanRes.reason : tizhooshanRes.value.error
+      console.warn('Failed to export Supabase tizhooshan progress', err)
+      tizhooshanProgress = {}
+      tizhooshanExportError = err?.message
+        ? `خطا در دریافت پیشرفت تیزهوشان: ${err.message}`
+        : 'دریافت پیشرفت تیزهوشان از سرور ناموفق بود.'
+    }
+  } else {
+    console.warn('Failed to export Supabase cloud backup data: missing teacher password')
+    exams = getLocalExams()
+    examSubmissions = getLocalSubmissions()
+    tizhooshanProgress = {}
+    examsExportWarning = 'رمز عبور آموزگار موجود نبود؛ آزمون‌ها از حافظه محلی مرورگر ذخیره شدند.'
+    examSubmissionsExportWarning = 'رمز عبور آموزگار موجود نبود؛ پاسخ‌های آزمون از حافظه محلی مرورگر ذخیره شدند.'
+    tizhooshanExportError = 'رمز عبور آموزگار برای دریافت پیشرفت تیزهوشان موجود نبود.'
   }
 
   const backup: SystemBackupData = {
@@ -3817,6 +3929,9 @@ export async function exportCompleteSystemBackup(teacherPassword?: string): Prom
     exams,
     examSubmissions,
     tizhooshanProgress,
+    ...(examsExportWarning ? { examsExportWarning } : {}),
+    ...(examSubmissionsExportWarning ? { examSubmissionsExportWarning } : {}),
+    ...(tizhooshanExportError ? { tizhooshanExportError } : {}),
     students,
     posts,
     grades,

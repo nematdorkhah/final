@@ -337,23 +337,47 @@ export function normalizeQuizRowToExam(row: any): Exam | null {
   if (!row || !row.id) return null
   const questions = Array.isArray(row.questions) ? row.questions : []
   const duration = Number(row.duration_minutes ?? row.durationMinutes ?? 30)
+  const safeDuration = isNaN(duration) ? 30 : duration
+  const isUntimed = Boolean(
+    row.is_untimed ?? row.isUntimed ?? (row.mode === 'assignment' || safeDuration === 0)
+  )
+  const mode: 'exam' | 'assignment' =
+    row.mode === 'assignment' || row.mode === 'exam'
+      ? row.mode
+      : isUntimed
+      ? 'assignment'
+      : 'exam'
+  const explicitTotal = Number(row.total_points ?? row.totalPoints)
+  const computedTotal =
+    !isNaN(explicitTotal) && explicitTotal > 0
+      ? explicitTotal
+      : questions.length > 0
+      ? questions.reduce((sum: number, q: any) => sum + (Number(q?.points) || 1), 0)
+      : 20
+  const resultsPublished = Boolean(
+    row.results_published ?? row.resultsPublished ?? row.isResultsReleased
+  )
+
   return {
     id: String(row.id),
     title: row.title || 'آزمون کلاسی',
     subject: row.subject || 'عمومی',
     description: row.description || `آزمون درس ${row.subject || 'عمومی'}`,
     questions,
-    durationMinutes: isNaN(duration) ? 30 : duration,
-    totalPoints:
-      questions.length > 0
-        ? questions.reduce((sum: number, q: any) => sum + (Number(q?.points) || 1), 0)
-        : 20,
+    durationMinutes: safeDuration,
+    totalPoints: computedTotal,
     createdAt: row.created_at || row.createdAt || new Date().toISOString(),
-    scheduledStartTime: row.scheduled_start_time || row.scheduledStartTime || row.created_at || new Date().toISOString(),
+    scheduledStartTime:
+      row.scheduled_start ||
+      row.scheduled_start_time ||
+      row.scheduledStartTime ||
+      row.created_at ||
+      new Date().toISOString(),
     published: row.published !== false,
-    mode: row.mode || (duration === 0 ? 'assignment' : 'exam'),
-    dueDate: row.due_date || row.dueDate,
-    isUntimed: Boolean(row.is_untimed || row.isUntimed || duration === 0),
-    resultsPublished: Boolean(row.results_published || row.resultsPublished || row.isResultsReleased),
+    mode,
+    dueDate: row.due_at || row.due_date || row.dueDate || undefined,
+    isUntimed,
+    resultsPublished,
+    results_published: resultsPublished,
   }
 }

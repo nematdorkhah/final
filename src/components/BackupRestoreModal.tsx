@@ -18,15 +18,31 @@ export default function BackupRestoreModal({
   const [restoring, setRestoring] = useState(false)
   const [statusMsg, setStatusMsg] = useState('')
   const [isSuccess, setIsSuccess] = useState(false)
+  const [exportWarnings, setExportWarnings] = useState<string[]>([])
 
   async function handleExport() {
     setDownloading(true)
     setStatusMsg('')
+    setExportWarnings([])
     try {
       const json = await exportCompleteSystemBackup(teacherPassword)
       downloadBackupFile(json)
+      const warningsList: string[] = []
+      try {
+        const parsed = JSON.parse(json)
+        if (parsed?.examsExportWarning) {
+          warningsList.push(String(parsed.examsExportWarning))
+        }
+        if (parsed?.examSubmissionsExportWarning) {
+          warningsList.push(String(parsed.examSubmissionsExportWarning))
+        }
+        if (parsed?.tizhooshanExportError) {
+          warningsList.push('پیشرفت تیزهوشان در این بکاپ ذخیره نشد')
+        }
+      } catch {}
       setStatusMsg('فایل پشتیبان کامل با موفقیت دانلود شد ✓')
       setIsSuccess(true)
+      setExportWarnings(warningsList)
     } catch (err: any) {
       setStatusMsg('خطا در دانلود پشتیبان: ' + err.message)
       setIsSuccess(false)
@@ -40,6 +56,7 @@ export default function BackupRestoreModal({
     if (!file) return
     setRestoring(true)
     setStatusMsg('')
+    setExportWarnings([])
 
     const reader = new FileReader()
     reader.onload = async (event) => {
@@ -135,13 +152,35 @@ export default function BackupRestoreModal({
             borderRadius: 10,
             fontSize: 13,
             fontWeight: 800,
-            marginBottom: 16,
+            marginBottom: exportWarnings.length > 0 ? 10 : 16,
             background: isSuccess ? '#DCFCE7' : '#FEE2E2',
             color: isSuccess ? '#166534' : '#DC2626',
             border: `1px solid ${isSuccess ? '#86EFAC' : '#FCA5A5'}`,
           }}
         >
           {statusMsg}
+        </div>
+      )}
+
+      {exportWarnings.length > 0 && (
+        <div
+          style={{
+            padding: '10px 14px',
+            borderRadius: 10,
+            fontSize: 12.5,
+            fontWeight: 800,
+            marginBottom: 16,
+            background: '#FEF3C7',
+            color: '#92400E',
+            border: '1px solid #FCD34D',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 6,
+          }}
+        >
+          {exportWarnings.map((warn, idx) => (
+            <div key={idx}>⚠️ {warn}</div>
+          ))}
         </div>
       )}
 

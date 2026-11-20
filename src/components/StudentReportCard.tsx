@@ -1,9 +1,24 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { toPersianDigits } from '../utils/persianNumbers'
-import { sanitizeExamTitle, getLocalExams, getLocalSubmissions, isExamResultsReleased, mergeSubmissionsDeduplicated, deduplicateGradebookRows } from '../utils/examStore'
+import {
+  sanitizeExamTitle,
+  getLocalExams,
+  getLocalSubmissions,
+  isExamResultsReleased,
+  mergeSubmissionsDeduplicated,
+  deduplicateGradebookRows,
+  fetchStudentExamReview,
+  StudentExamReviewQuestionItem,
+  isValidUuid,
+} from '../utils/examStore'
 import { sanitizeTeacherFeedback } from '../utils/cleanFeedback'
-import { getSubmissionEffectiveScore, isSubmissionApprovedByTeacher, roundScore2 } from '../utils/persianSemanticGrader'
-import { isSameStudent } from '../classStudents'
+import {
+  getSubmissionEffectiveScore,
+  isSubmissionApprovedByTeacher,
+  roundScore2,
+  safeScaled20,
+} from '../utils/persianSemanticGrader'
+import { isSameStudent, resolveCanonicalStudent } from '../classStudents'
 import ExamReviewModal from './ExamReviewModal'
 import SchoolLogo from './SchoolLogo'
 
@@ -15,6 +30,9 @@ export default function StudentReportCard({
   examSubmissions,
   homeworkCount,
   reportNote,
+  loading = false,
+  error = null,
+  onRetry,
   onClose,
 }: {
   student: any
@@ -24,20 +42,30 @@ export default function StudentReportCard({
   examSubmissions?: any[]
   homeworkCount: number
   reportNote?: string
+  loading?: boolean
+  error?: string | null
+  onRetry?: () => void
   onClose: () => void
 }) {
-  const [reviewExamData, setReviewExamData] = useState<{ exam: any; submission: any } | null>(null)
+  const [reviewExamData, setReviewExamData] = useState<{
+    exam: any
+    submission: any
+    questionsReview?: StudentExamReviewQuestionItem[]
+    scaledScore20?: number | null
+    forceReleased?: boolean
+  } | null>(null)
   const [reviewNotice, setReviewNotice] = useState<string | null>(null)
+  const [openingExamId, setOpeningExamId] = useState<string | null>(null)
 
-  // Normalize every grade to 20 (Score = (Earned / Total) * 20) after defensive deduplication
+  // Normalize every grade strictly to 20: Score = (earned / total) * 20
   const dedupedInputGrades = deduplicateGradebookRows(grades || [])
   const normalizedGrades = dedupedInputGrades.map((g: any) => {
     const isPendingReview = g.status === 'pending_review'
     const isPendingSubmission = g.status === 'pending_submission'
     const isPending = isPendingReview || isPendingSubmission
 
-    let rawScore = Number(g.score) || 0
-    let rawMax = Number(g.max_score) || 20
+    const rawScoreInput = Number(g.score) || 0
+    const rawMaxInput = Number(g.max_score) || 20
 
     // Match exam and submission if this represents an exam
     let matchedExam = g.matchedExam || g.exam || null
@@ -56,7 +84,8 @@ export default function StudentReportCard({
     }
 
     if (!matchedSub && matchedExam) {
-      const rawSubs = (Array.isArray(examSubmissions) && examSubmissions.length > 0 ? examSubmissions : getLocalSubmissions())
+      const rawSubs =
+        Array.isArray(examSubmissions) && examSubmissions.length > 0 ? examSubmissions : getLocalSubmissions()
       const allSubs = mergeSubmissionsDeduplicated([], rawSubs)
       matchedSub =
         allSubs.find(
@@ -66,30 +95,35 @@ export default function StudentReportCard({
         ) || null
     }
 
-    const officialDbScore = Number(g.score) || 0
-    const normalizedDb20 = rawMax > 0 && rawMax !== 20
-      ? roundScore2((officialDbScore / rawMax) * 20)
-      : roundScore2(officialDbScore)
+    const normalizedDb20 =
+      rawMaxInput > 0 && rawMaxInput !== 20
+        ? safeScaled20(rawScoreInput, rawMaxInput)
+        : safeScaled20(rawScoreInput, 20)
 
-    const isExplicitDbRecord = Boolean(g.id && !String(g.id).startsWith('exam_sub_') && !String(g.id).startsWith('exam_'))
+    const isExplicitDbRecord = Boolean(
+      g.id && !String(g.id).startsWith('exam_sub_') && !String(g.id).startsWith('exam_')
+    )
     const gRecordedMs = g.recorded_at ? new Date(g.recorded_at).getTime() : 0
-    const subApprovedMs = matchedSub?.teacherGrading?.approvedAt ? new Date(matchedSub.teacherGrading.approvedAt).getTime() : 0
+    const subApprovedMs = matchedSub?.teacherGrading?.approvedAt
+      ? new Date(matchedSub.teacherGrading.approvedAt).getTime()
+      : 0
 
     const isApprovedOrReleased =
       matchedSub && matchedExam
         ? isSubmissionApprovedByTeacher(matchedSub) && isExamResultsReleased(matchedExam, matchedSub)
         : false
 
-    const subEff = matchedSub && matchedExam && isApprovedOrReleased
-      ? getSubmissionEffectiveScore(matchedExam, matchedSub)
-      : null
+    const subEff =
+      matchedSub && matchedExam && isApprovedOrReleased
+        ? getSubmissionEffectiveScore(matchedExam, matchedSub)
+        : null
     const isDifferentManualDbScore = subEff ? Math.abs(normalizedDb20 - subEff.scaledScore20) > 0.06 : false
     const isNewerDbManualEdit = Boolean(
       isExplicitDbRecord &&
-      isDifferentManualDbScore &&
-      gRecordedMs > 0 &&
-      subApprovedMs > 0 &&
-      gRecordedMs > subApprovedMs + 1000
+        isDifferentManualDbScore &&
+        gRecordedMs > 0 &&
+        subApprovedMs > 0 &&
+        gRecordedMs > subApprovedMs + 1000
     )
 
     const effectivePending = isPending || Boolean(matchedSub && matchedExam && !isApprovedOrReleased)
@@ -100,23 +134,11 @@ export default function StudentReportCard({
     if (effectivePending) {
       scaledScore = null
     } else if (subEff && isApprovedOrReleased && !isNewerDbManualEdit) {
-      rawScore = subEff.totalScore
-      rawMax = subEff.maxPoints
-      scaledScore = subEff.scaledScore20
-    }
-
-    if (!effectivePending && scaledScore === null) {
-      if (g.raw_score !== undefined && g.raw_max !== undefined && Number(g.raw_max) > 0) {
-        rawScore = Number(g.raw_score)
-        rawMax = Number(g.raw_max)
-        scaledScore = rawMax === 20 ? roundScore2(rawScore) : roundScore2((rawScore / rawMax) * 20)
-      } else {
-        scaledScore = rawMax === 20
-          ? roundScore2(rawScore)
-          : rawMax > 0
-          ? roundScore2((rawScore / rawMax) * 20)
-          : roundScore2(officialDbScore || rawScore)
-      }
+      scaledScore = safeScaled20(subEff.totalScore, subEff.maxPoints)
+    } else if (g.raw_score !== undefined && g.raw_max !== undefined && Number(g.raw_max) > 0) {
+      scaledScore = safeScaled20(Number(g.raw_score), Number(g.raw_max))
+    } else {
+      scaledScore = normalizedDb20
     }
 
     const cleanLabel = sanitizeTeacherFeedback(sanitizeExamTitle(g.skill || g.subject || 'عمومی', g.subject))
@@ -145,9 +167,13 @@ export default function StudentReportCard({
 
     return {
       ...g,
-      status: effectivePending ? (effectivePendingReview ? 'pending_review' : 'pending_submission') : (g.status || 'graded'),
-      rawScore,
-      rawMax,
+      status: effectivePending
+        ? effectivePendingReview
+          ? 'pending_review'
+          : 'pending_submission'
+        : g.status || 'graded',
+      score: scaledScore,
+      max_score: 20,
       scaledScore,
       cleanLabel,
       matchedExam,
@@ -160,15 +186,99 @@ export default function StudentReportCard({
   const gradedList = normalizedGrades.filter(
     (g: any) => g.status === 'graded' && g.scaledScore !== null && !isNaN(g.scaledScore)
   )
+
   const gpaVal = gradedList.length
     ? String(roundScore2(gradedList.reduce((acc: number, g: any) => acc + g.scaledScore, 0) / gradedList.length))
     : null
+
+  // Per-subject averages strictly calculated from the out-of-20 normalized scores
+  const subjectAverages = useMemo(() => {
+    const map = new Map<string, { sum: number; count: number }>()
+    for (const g of gradedList) {
+      const subject = String(g.subject || 'عمومی').trim()
+      const curr = map.get(subject) || { sum: 0, count: 0 }
+      curr.sum += Number(g.scaledScore)
+      curr.count += 1
+      map.set(subject, curr)
+    }
+    return Array.from(map.entries())
+      .map(([subject, stats]) => ({
+        subject,
+        avg: roundScore2(stats.sum / stats.count),
+        count: stats.count,
+      }))
+      .sort((a, b) => b.avg - a.avg)
+  }, [gradedList])
 
   const presents = attendanceRows.filter((a: any) => a.status === 'present').length
   const lates = attendanceRows.filter((a: any) => a.status === 'late').length
   const absents = attendanceRows.filter((a: any) => a.status === 'absent').length
 
   const cleanReportNote = sanitizeTeacherFeedback(reportNote)
+
+  async function handleOpenReview(g: any) {
+    const examId = String(g.examId || g.matchedExam?.id || '')
+    if (!examId) return
+
+    setReviewNotice(null)
+    setOpeningExamId(examId)
+
+    try {
+      const rosterInfo = resolveCanonicalStudent(
+        student?.id || student?.access_code || student?.full_name || student?.fullName
+      )
+      const canonicalStudentId = rosterInfo?.id || student?.id || ''
+      const canonicalAccessCode = rosterInfo?.nationalCode || student?.access_code || student?.id || ''
+
+      // Fetch full unsanitized questions + correct answers + explanations via secure RPC
+      if (isValidUuid(examId) && isValidUuid(canonicalStudentId) && canonicalAccessCode) {
+        const res = await fetchStudentExamReview({
+          examId,
+          studentId: canonicalStudentId,
+          accessCode: canonicalAccessCode,
+        })
+
+        if (res.ok && res.released && res.exam && res.submission) {
+          setReviewExamData({
+            exam: res.exam,
+            submission: res.submission,
+            questionsReview: res.questionsReview,
+            scaledScore20: res.scaledScore20,
+            forceReleased: true,
+          })
+          return
+        }
+
+        if (!res.released) {
+          setReviewNotice(res.message || 'نتیجه هنوز منتشر نشده است.')
+          return
+        }
+      }
+
+      // Preview-mode or non-UUID fallback
+      if (g.status === 'pending_review' || g.status === 'pending_submission') {
+        setReviewNotice('نتیجه هنوز منتشر نشده است.')
+        return
+      }
+
+      if (g.matchedExam && g.matchedSub) {
+        if (!isExamResultsReleased(g.matchedExam, g.matchedSub)) {
+          setReviewNotice('نتیجه هنوز منتشر نشده است.')
+          return
+        }
+        setReviewExamData({
+          exam: g.matchedExam,
+          submission: g.matchedSub,
+        })
+      } else {
+        setReviewNotice('برگه پاسخ ثبت‌شده برای این آزمون در دسترس نیست.')
+      }
+    } catch (err: any) {
+      setReviewNotice(err?.message || 'خطا در دریافت پاسخ‌نامه از سرور. لطفاً دوباره تلاش کنید.')
+    } finally {
+      setOpeningExamId(null)
+    }
+  }
 
   return (
     <div
@@ -211,6 +321,18 @@ export default function StudentReportCard({
           </div>
 
           <div className="flex items-center gap-2">
+            {onRetry && (
+              <button
+                type="button"
+                disabled={loading}
+                onClick={onRetry}
+                className="px-3 py-1.5 text-xs font-bold text-slate-200 hover:text-white bg-slate-800 hover:bg-slate-700 disabled:opacity-50 rounded-xl transition-colors inline-flex items-center gap-1 cursor-pointer"
+                title="دریافت مجدد نمرات از سرور"
+              >
+                <span>{loading ? '⏳' : '🔄'}</span>
+                <span className="hidden sm:inline">{loading ? 'در حال دریافت...' : 'بروزرسانی'}</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={() => window.print()}
@@ -232,6 +354,33 @@ export default function StudentReportCard({
 
         {/* Scrollable Printable Document */}
         <div className="p-4 sm:p-6 overflow-y-auto flex-1 bg-slate-50/60">
+          {/* Fresh Server Sync Status / Error Banner */}
+          {loading && (
+            <div className="no-print mb-3 bg-blue-50 border border-blue-200 text-blue-800 rounded-xl px-4 py-2.5 text-xs font-bold flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-blue-600 animate-ping" />
+              <span>در حال دریافت جدیدترین نمرات از سرور...</span>
+            </div>
+          )}
+
+          {error && (
+            <div className="no-print mb-4 bg-rose-50 border border-rose-200 text-rose-900 rounded-xl px-4 py-3 text-xs font-bold flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+              <div className="flex items-center gap-2">
+                <span className="text-base">⚠️</span>
+                <span>{error}</span>
+              </div>
+              {onRetry && (
+                <button
+                  type="button"
+                  onClick={onRetry}
+                  className="self-start sm:self-auto px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-black transition-colors cursor-pointer shrink-0 inline-flex items-center gap-1"
+                >
+                  <span>🔄</span>
+                  <span>تلاش دوباره</span>
+                </button>
+              )}
+            </div>
+          )}
+
           <div
             id="printable-report"
             className="bg-white border border-slate-300 rounded-2xl p-5 sm:p-8 shadow-xs text-slate-900"
@@ -281,12 +430,11 @@ export default function StudentReportCard({
             </div>
 
             {/* Summary KPIs */}
-            <div className="grid grid-cols-3 gap-3 mb-6">
+            <div className="grid grid-cols-3 gap-3 mb-5">
               <div className="bg-emerald-50/70 border border-emerald-200 rounded-xl p-3 text-center">
                 <div className="text-[11px] text-emerald-800 font-bold">معدل کل ارزیابی‌ها</div>
                 <div className="text-xl sm:text-2xl font-black text-emerald-700 mt-1">
-                  {gpaVal ? `${toPersianDigits(gpaVal)}` : '—'}
-                  <span className="text-xs font-bold text-emerald-600 mr-1">از ۲۰</span>
+                  {gpaVal ? `${toPersianDigits(gpaVal)} از ۲۰` : '—'}
                 </div>
                 <div className="text-[10px] text-emerald-700 font-black mt-0.5">
                   {gpaVal && Number(gpaVal) >= 18 ? 'سطح: خیلی خوب (ممتاز)' : 'سطح: مطلوب'}
@@ -321,6 +469,26 @@ export default function StudentReportCard({
               </div>
             </div>
 
+            {/* Subject Averages (strictly calculated from out-of-20 scores) */}
+            {subjectAverages.length > 0 && (
+              <div className="mb-5">
+                <div className="text-xs font-black text-slate-700 mb-2">میانگین هر درس (از ۲۰):</div>
+                <div className="flex flex-wrap gap-2">
+                  {subjectAverages.map((sa) => (
+                    <div
+                      key={sa.subject}
+                      className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 text-xs font-bold flex items-center gap-1.5"
+                    >
+                      <span className="text-slate-800">{sa.subject}:</span>
+                      <span className="font-black text-blue-700">
+                        {toPersianDigits(sa.avg)} از ۲۰
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {reviewNotice && (
               <div className="no-print mb-4 bg-amber-50 border border-amber-300 text-amber-900 rounded-xl px-4 py-2.5 text-xs font-bold flex items-center justify-between gap-2">
                 <span>⚠️ {reviewNotice}</span>
@@ -343,7 +511,7 @@ export default function StudentReportCard({
                     <th className="py-2.5 px-3">عنوان درس و آزمون</th>
                     <th className="py-2.5 px-3 text-center">نمره (از ۲۰)</th>
                     <th className="py-2.5 px-3 text-center">مقیاس توصیفی</th>
-                    <th className="no-print py-2.5 px-3 text-center w-28">پاسخنامه</th>
+                    <th className="no-print py-2.5 px-3 text-center w-36">پاسخ‌نامه</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200">
@@ -355,26 +523,17 @@ export default function StudentReportCard({
                     </tr>
                   )}
                   {normalizedGrades.map((g: any, index: number) => {
-                    const hasExamObj = Boolean(g.matchedExam)
-                    const openReview = () => {
-                      if (g.matchedExam && g.matchedSub) {
-                        setReviewNotice(null)
-                        setReviewExamData({
-                          exam: g.matchedExam,
-                          submission: g.matchedSub,
-                        })
-                      } else if (g.matchedExam) {
-                        setReviewNotice('برگه پاسخ ثبت‌شده برای این آزمون یافت نشد؛ ممکن است فقط نمره نهایی ثبت شده باشد.')
-                      }
-                    }
+                    const examId = String(g.examId || g.matchedExam?.id || '')
+                    const hasExamObj = Boolean(examId)
+                    const isOpening = openingExamId === examId
 
                     return (
                       <tr
                         key={g.id || index}
-                        className={`hover:bg-slate-50 transition-colors ${
-                          hasExamObj ? 'cursor-pointer' : ''
-                        }`}
-                        onClick={openReview}
+                        className={`hover:bg-slate-50 transition-colors ${hasExamObj ? 'cursor-pointer' : ''}`}
+                        onClick={() => {
+                          if (hasExamObj) handleOpenReview(g)
+                        }}
                       >
                         <td className="py-2.5 px-3 text-center text-slate-500 font-mono">
                           {toPersianDigits(index + 1)}
@@ -387,7 +546,7 @@ export default function StudentReportCard({
                             </span>
                           )}
                         </td>
-                        <td className="py-2.5 px-3 text-center font-black text-sm">
+                        <td className="py-2.5 px-3 text-center font-black text-sm whitespace-nowrap">
                           {g.scaledScore !== null ? (
                             <span
                               className={
@@ -398,7 +557,7 @@ export default function StudentReportCard({
                                   : 'text-rose-700'
                               }
                             >
-                              {toPersianDigits(g.scaledScore)}
+                              {toPersianDigits(g.scaledScore)} از ۲۰
                             </span>
                           ) : (
                             <span className="text-slate-400 font-bold">—</span>
@@ -415,14 +574,15 @@ export default function StudentReportCard({
                           {hasExamObj ? (
                             <button
                               type="button"
+                              disabled={isOpening}
                               onClick={(e) => {
                                 e.stopPropagation()
-                                openReview()
+                                handleOpenReview(g)
                               }}
                               className="px-2.5 py-1 text-[11px] font-bold text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-lg border border-blue-200 transition-colors cursor-pointer inline-flex items-center gap-1"
                             >
-                              <span>📋</span>
-                              <span>پاسخ‌نامه</span>
+                              <span>{isOpening ? '⏳' : '📋'}</span>
+                              <span>{isOpening ? 'در حال دریافت...' : 'پاسخ‌نامه'}</span>
                             </button>
                           ) : (
                             <span className="text-[11px] text-slate-400 font-medium">کلاسی</span>
@@ -471,6 +631,9 @@ export default function StudentReportCard({
         <ExamReviewModal
           exam={reviewExamData.exam}
           submission={reviewExamData.submission}
+          questionsReview={reviewExamData.questionsReview}
+          scaledScore20Override={reviewExamData.scaledScore20}
+          forceReleased={reviewExamData.forceReleased}
           onClose={() => setReviewExamData(null)}
         />
       )}

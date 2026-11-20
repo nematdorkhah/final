@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useMemo } from 'react'
+import { useEffect, useRef, useState, useMemo, useCallback } from 'react'
 import { supabase } from '../supabaseClient'
 import { getJalaliDateLabel, sanitizeFileName } from '../useJalaliDate'
 import { computeStreak, computeBadges, groupSkillMastery, getHomeworkStatus } from '../masteryHelpers'
@@ -17,6 +17,8 @@ import {
   fetchPublishedExams,
   fetchPublishedExamsWithDiagnostics,
   fetchExamSubmissions,
+  fetchStudentExamReview,
+  StudentExamReviewQuestionItem,
   getStudentExamSubmission,
   sanitizeExamTitle,
   getLocalExams,
@@ -33,7 +35,13 @@ import { sanitizeTeacherFeedback } from '../utils/cleanFeedback'
 import { toPersianDigits } from '../utils/persianNumbers'
 import { roundScore2 } from '../utils/persianSemanticGrader'
 import { resolveCanonicalStudent, isSameStudent } from '../classStudents'
-import { realtimeSync } from '../services/realtimeSync'
+import {
+  realtimeSync,
+  fetchStudentPollFingerprint,
+  hasFingerprintEntryChanged,
+  isValidUuid,
+  StudentPollFingerprint,
+} from '../services/realtimeSync'
 import {
   retryWithBackoff,
   fetchApiJson,
@@ -156,15 +164,29 @@ export default function StudentDashboard({
   const [expandedHomeworkId, setExpandedHomeworkId] = useState<string | null>(null)
   const [viewingAttachmentUrl, setViewingAttachmentUrl] = useState<string | null>(null)
   const [viewingAttachmentTitle, setViewingAttachmentTitle] = useState<string>('فایل پیوست')
-  const [reviewExamData, setReviewExamData] = useState<{ exam: any; submission: any } | null>(null)
+  const [reviewExamData, setReviewExamData] = useState<{
+    exam: any
+    submission: any
+    questionsReview?: StudentExamReviewQuestionItem[]
+    scaledScore20?: number | null
+    forceReleased?: boolean
+  } | null>(null)
   const [openingReviewId, setOpeningReviewId] = useState<string | null>(null)
   const [reviewErrorMsg, setReviewErrorMsg] = useState<string | null>(null)
   const [myExamSubs, setMyExamSubs] = useState<StudentExamSubmission[]>([])
   const [showReportCardModal, setShowReportCardModal] = useState(false)
+  const [reportCardLoading, setReportCardLoading] = useState(false)
+  const [reportCardError, setReportCardError] = useState<string | null>(null)
+  const reportCardReqSeqRef = useRef(0)
+  const [isManualRefreshing, setIsManualRefreshing] = useState(false)
   const [currentTime, setCurrentTime] = useState(Date.now())
   const hasLoadedOnce = useRef(false)
   const requestSeqRef = useRef(0)
   const inFlightLoadRef = useRef<{ promise: Promise<void>; seq: number } | null>(null)
+  const inFlightPollRef = useRef<Promise<void> | null>(null)
+  const lastPollFingerprintRef = useRef<StudentPollFingerprint | null>(null)
+  const hasRemoteSyncedRef = useRef(false)
+  const lastBackgroundSyncAtRef = useRef(0)
   const serverTimeOffsetRef = useRef(0)
 
   function updateHomeworkDraft(postId: string, text: string) {
@@ -299,8 +321,9 @@ export default function StudentDashboard({
     return false
   }
 
-  async function loadAll(force = false): Promise<void> {
-    if (!force && inFlightLoadRef.current) {
+  async function loadAll(force = false, options?: { background?: boolean }): Promise<void> {
+    const isBackground = Boolean(options?.background)
+    if ((!force || isBackground) && inFlightLoadRef.current) {
       return inFlightLoadRef.current.promise
     }
 
@@ -326,15 +349,17 @@ export default function StudentDashboard({
         setMyExamSubs(localSubs)
       }
 
-      if (hasLoadedOnce.current || hasCachedData) {
+      if (hasLoadedOnce.current || hasCachedData || isBackground) {
         setLoading(false)
       } else {
         setLoading(true)
         setFetchStatus('loading')
         setExamsFetchStatus('loading')
       }
-      setLoadError(null)
-      setSyncWarning(null)
+      if (!isBackground) {
+        setLoadError(null)
+        setSyncWarning(null)
+      }
 
       const rawId = student?.id || student?.access_code
       const rosterInfo = resolveCanonicalStudent(rawId || student?.full_name)
@@ -542,11 +567,24 @@ export default function StudentDashboard({
       // STRICT 3-STATE EVALUATION FOR EXAMS & POSTS:
       // Never mark examsFetchStatus as 'ready' simply because grades/attendance loaded if exam sources actually failed!
       if (examsRemoteOk && postsRemoteOk) {
+        hasRemoteSyncedRef.current = true
         setFetchStatus('ready')
         setExamsFetchStatus('ready')
         setLoadError(null)
         setSyncWarning(null)
+      } else if (isBackground && (hasLoadedOnce.current || hasCachedData)) {
+        if (examsRemoteOk || postsRemoteOk) {
+          hasRemoteSyncedRef.current = true
+        }
+        // Silent background poll: never flash error banners or spinners if prior data is already loaded
+        if (examsRemoteOk) {
+          setExamsFetchStatus('ready')
+        }
+        if (postsRemoteOk) {
+          setFetchStatus('ready')
+        }
       } else if (examsRemoteOk || postsRemoteOk) {
+        hasRemoteSyncedRef.current = true
         setFetchStatus(postsRemoteOk || localPosts.length > 0 ? 'ready' : 'error')
         setExamsFetchStatus(examsRemoteOk ? 'ready' : (localExams.length > 0 ? 'ready' : 'error'))
         if (!examsRemoteOk) {
@@ -568,6 +606,7 @@ export default function StudentDashboard({
         setLoadError('خطا در دریافت اطلاعات و آزمون‌ها از سرور. لطفاً اتصال اینترنت را بررسی کرده و دکمه «تلاش مجدد» را بزنید.')
       }
     })().finally(() => {
+      lastBackgroundSyncAtRef.current = Date.now()
       if (inFlightLoadRef.current?.seq === seq) {
         inFlightLoadRef.current = null
       }
@@ -578,9 +617,140 @@ export default function StudentDashboard({
   }
 
   useEffect(() => {
-    loadAll(false)
+    let isMounted = true
+
+    const resolveStudentCredentials = () => {
+      const rawId = student?.id || student?.access_code
+      const rosterInfo = resolveCanonicalStudent(rawId || student?.full_name)
+      return {
+        canonicalStudentId: rosterInfo?.id || rawId || '',
+        canonicalAccessCode: rosterInfo?.nationalCode || student?.access_code || rawId || '',
+      }
+    }
+
+    const refreshPostsSection = async () => {
+      const rows = await fetchFilteredPublishedPosts(supabase, { includeScheduledFuture: false })
+      if (!isMounted || !Array.isArray(rows)) return
+      const cleanPosts = rows.filter((post: any) => !isSystemRecord(post))
+      setPosts(cleanPosts)
+      setPostsFetchStatus('ready')
+      setFetchStatus('ready')
+      try {
+        localStorage.setItem('cached_published_posts', JSON.stringify(cleanPosts))
+      } catch {}
+    }
+
+    const refreshExamsSection = async () => {
+      const diag = await fetchPublishedExamsWithDiagnostics(true, true, { skipBackendApi: true })
+      if (!isMounted || !diag.remoteOk) return
+      setExams(diag.exams)
+      setExamsFetchStatus('ready')
+      setFetchStatus('ready')
+      hasLoadedOnce.current = true
+    }
+
+    const refreshGradesSection = async () => {
+      const { canonicalStudentId, canonicalAccessCode } = resolveStudentCredentials()
+      if (!canonicalStudentId || !canonicalAccessCode) return
+      const res = await supabase.rpc('student_list_my_grades', {
+        p_student_id: canonicalStudentId,
+        p_access_code: canonicalAccessCode,
+      })
+      if (!isMounted || res?.error || !Array.isArray(res?.data)) return
+      setMyGrades(res.data)
+      setGradesFetchStatus('ready')
+      try {
+        localStorage.setItem(`cached_grades_${canonicalStudentId}`, JSON.stringify(res.data))
+      } catch {}
+    }
+
+    const refreshQuizSubmissionsSection = async () => {
+      const { canonicalStudentId } = resolveStudentCredentials()
+      if (!canonicalStudentId) return
+      const list = await fetchExamSubmissions(undefined, canonicalStudentId, true)
+      if (!isMounted || !Array.isArray(list)) return
+      setMyExamSubs(list)
+      setSubmissionsFetchStatus('ready')
+    }
+
+    const refreshHomeworkSubmissionsSection = async () => {
+      const { canonicalStudentId, canonicalAccessCode } = resolveStudentCredentials()
+      if (!canonicalStudentId || !canonicalAccessCode) return
+      const res = await supabase.rpc('student_list_my_submissions', {
+        p_student_id: canonicalStudentId,
+        p_access_code: canonicalAccessCode,
+      })
+      if (!isMounted || res?.error || !Array.isArray(res?.data)) return
+      setMySubmissions(res.data)
+      setSubmissionsFetchStatus('ready')
+      try {
+        localStorage.setItem(`cached_submissions_${canonicalStudentId}`, JSON.stringify(res.data))
+      } catch {}
+    }
+
+    const NORMAL_POLL_MS = 45000
+    const ERROR_BACKOFF_POLL_MS = 120000
+    let currentPollDelayMs = NORMAL_POLL_MS
+    let hasRpcError = false
+    let lastRpcErrorAt = 0
+    let pollTimer: ReturnType<typeof setTimeout> | null = null
+
+    // Guard: if student.id is not a valid UUID (e.g. test_preview_student), never run fingerprint polling at all
+    const hasValidStudentUuid = (() => {
+      if (!isValidUuid(student?.id)) return false
+      const { canonicalStudentId } = resolveStudentCredentials()
+      return isValidUuid(canonicalStudentId)
+    })()
+
+    const scheduleNextPollTimer = () => {
+      if (!isMounted || !hasValidStudentUuid) return
+      if (pollTimer) clearTimeout(pollTimer)
+      pollTimer = setTimeout(() => {
+        if (!isMounted) return
+        if (typeof document !== 'undefined' && document.hidden) {
+          scheduleNextPollTimer()
+          return
+        }
+        // When RPC is failing and Realtime is connected, rely on Realtime instead of firing failing RPCs
+        if (hasRpcError && realtimeSync.getIsSubscribed()) {
+          scheduleNextPollTimer()
+          return
+        }
+        scheduleBackupPoll(false)
+      }, currentPollDelayMs)
+    }
+
+    loadAll(false).finally(() => {
+      if (!isMounted || !hasValidStudentUuid || lastPollFingerprintRef.current !== null) return
+      const { canonicalStudentId, canonicalAccessCode } = resolveStudentCredentials()
+      if (!isValidUuid(canonicalStudentId) || !canonicalAccessCode) return
+      fetchStudentPollFingerprint(canonicalStudentId, canonicalAccessCode)
+        .then((res) => {
+          if (!isMounted || res.skipped) return
+          if (res.ok && res.data) {
+            hasRpcError = false
+            currentPollDelayMs = NORMAL_POLL_MS
+            if (lastPollFingerprintRef.current === null) {
+              lastPollFingerprintRef.current = res.data
+            }
+          } else {
+            hasRpcError = true
+            lastRpcErrorAt = Date.now()
+            currentPollDelayMs = ERROR_BACKOFF_POLL_MS
+            scheduleNextPollTimer()
+          }
+        })
+        .catch(() => {
+          if (!isMounted) return
+          hasRpcError = true
+          lastRpcErrorAt = Date.now()
+          currentPollDelayMs = ERROR_BACKOFF_POLL_MS
+          scheduleNextPollTimer()
+        })
+    })
     flushPendingExamSyncQueue().catch(() => {})
 
+    // Primary channel: Realtime (broadcast + postgres_changes)
     realtimeSync.init()
     const unsubscribe = realtimeSync.subscribe((event) => {
       if (event.type === 'post') {
@@ -640,8 +810,8 @@ export default function StudentDashboard({
               setSyncWarning(null)
             }
           } else {
-            // e.g. __SYSTEM_EXAMS__ changed in Supabase: re-fetch immediately without blocking UI
-            loadAll(true)
+            // e.g. __SYSTEM_EXAMS__ changed in Supabase: re-fetch ONLY exams silently
+            refreshExamsSection().catch(() => {})
           }
         } else if (event.action === 'delete' && event.id) {
           setExams((prev) => {
@@ -650,33 +820,148 @@ export default function StudentDashboard({
             return next
           })
         }
-      } else if (event.type === 'grade' || event.type === 'submission') {
-        // Silently reload grades and submissions without blocking screen
-        loadAll(true)
+      } else if (event.type === 'grade') {
+        refreshGradesSection().catch(() => {})
+      } else if (event.type === 'submission') {
+        Promise.allSettled([refreshHomeworkSubmissionsSection(), refreshQuizSubmissionsSection()])
       }
     })
 
-    // Non-Realtime fallback polling only while Realtime channel is not subscribed
-    const fallbackInterval = setInterval(() => {
-      if (!realtimeSync.getIsSubscribed()) {
-        loadAll(true)
+    // Lightweight single-request RPC backup polling (student_poll_fingerprint)
+    // Selectively refetches ONLY changed sections (posts / quizzes / grades / submissions)
+    const runLightweightBackupPoll = async (immediate = false) => {
+      if (!isMounted || !hasValidStudentUuid) return
+      if (typeof document !== 'undefined' && document.hidden) return
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) return
+      if (inFlightLoadRef.current || inFlightPollRef.current) return
+      if (!immediate && Date.now() - lastBackgroundSyncAtRef.current < 1500) return
+
+      // If RPC previously failed and Realtime is connected, rely on Realtime during the 2-minute backoff window
+      if (hasRpcError && realtimeSync.getIsSubscribed()) {
+        if (!immediate || Date.now() - lastRpcErrorAt < ERROR_BACKOFF_POLL_MS) {
+          scheduleNextPollTimer()
+          return
+        }
       }
-    }, 20000)
+
+      const { canonicalStudentId, canonicalAccessCode } = resolveStudentCredentials()
+      if (!isValidUuid(canonicalStudentId) || !canonicalAccessCode) return
+
+      const pollTask = (async () => {
+        try {
+          const res = await fetchStudentPollFingerprint(canonicalStudentId, canonicalAccessCode)
+          if (!isMounted || res.skipped) return
+
+          // On RPC error: NEVER run full loadAll; back off to 2 minutes and rely on Realtime if connected
+          if (!res.ok || !res.data) {
+            hasRpcError = true
+            lastRpcErrorAt = Date.now()
+            currentPollDelayMs = ERROR_BACKOFF_POLL_MS
+            return
+          }
+
+          // First successful RPC restores normal 45s polling cadence
+          hasRpcError = false
+          currentPollDelayMs = NORMAL_POLL_MS
+
+          const nextFingerprint = res.data
+          const prevFingerprint = lastPollFingerprintRef.current
+          if (prevFingerprint === null) {
+            lastPollFingerprintRef.current = nextFingerprint
+            return
+          }
+
+          lastPollFingerprintRef.current = nextFingerprint
+
+          // Selectively refetch ONLY sections whose updated_at or count changed
+          const tasks: Promise<void>[] = []
+          if (hasFingerprintEntryChanged(prevFingerprint.posts, nextFingerprint.posts)) {
+            tasks.push(refreshPostsSection())
+          }
+          if (hasFingerprintEntryChanged(prevFingerprint.quizzes, nextFingerprint.quizzes)) {
+            tasks.push(refreshExamsSection())
+          }
+          if (hasFingerprintEntryChanged(prevFingerprint.grades, nextFingerprint.grades)) {
+            tasks.push(refreshGradesSection())
+          }
+          if (hasFingerprintEntryChanged(prevFingerprint.quiz_submissions, nextFingerprint.quiz_submissions)) {
+            tasks.push(refreshQuizSubmissionsSection())
+          }
+          if (hasFingerprintEntryChanged(prevFingerprint.submissions, nextFingerprint.submissions)) {
+            tasks.push(refreshHomeworkSubmissionsSection())
+          }
+
+          if (tasks.length > 0) {
+            await Promise.allSettled(tasks)
+          }
+        } catch {
+          // Catch any unexpected error safely without calling loadAll
+          hasRpcError = true
+          lastRpcErrorAt = Date.now()
+          currentPollDelayMs = ERROR_BACKOFF_POLL_MS
+        } finally {
+          lastBackgroundSyncAtRef.current = Date.now()
+          inFlightPollRef.current = null
+          scheduleNextPollTimer()
+        }
+      })()
+
+      inFlightPollRef.current = pollTask
+      return pollTask
+    }
+
+    const scheduleBackupPoll = (immediate = false) => {
+      if (!hasValidStudentUuid) return
+      if (typeof document !== 'undefined' && document.hidden) return
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) return
+      if (inFlightLoadRef.current || inFlightPollRef.current) return
+
+      if (immediate) {
+        runLightweightBackupPoll(true)
+        return
+      }
+
+      const run = () => {
+        runLightweightBackupPoll(false)
+      }
+      if (typeof window !== 'undefined' && typeof (window as any).requestIdleCallback === 'function') {
+        ;(window as any).requestIdleCallback(run, { timeout: 2000 })
+      } else {
+        setTimeout(run, 0)
+      }
+    }
+
+    // Start backup polling timer (45s normal, 2m backoff on RPC error; disabled completely for non-UUID students)
+    if (hasValidStudentUuid) {
+      scheduleNextPollTimer()
+    }
 
     const handleReconnect = () => {
+      if (typeof document !== 'undefined' && document.hidden) return
       realtimeSync.init()
       flushPendingExamSyncQueue().catch(() => {})
-      loadAll(true)
+      if (hasValidStudentUuid) {
+        scheduleBackupPoll(true)
+      }
     }
-    window.addEventListener('classroom_network_reconnected', handleReconnect)
-    window.addEventListener('classroom_tab_activated', handleReconnect)
+
+    const handleVisibilityChange = () => {
+      if (typeof document !== 'undefined' && !document.hidden && document.visibilityState === 'visible') {
+        realtimeSync.init()
+        if (hasValidStudentUuid) {
+          scheduleBackupPoll(true)
+        }
+      }
+    }
+
+    document.addEventListener('visibilitychange', handleVisibilityChange)
     window.addEventListener('online', handleReconnect)
 
     return () => {
+      isMounted = false
       unsubscribe()
-      clearInterval(fallbackInterval)
-      window.removeEventListener('classroom_network_reconnected', handleReconnect)
-      window.removeEventListener('classroom_tab_activated', handleReconnect)
+      if (pollTimer) clearTimeout(pollTimer)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
       window.removeEventListener('online', handleReconnect)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -916,6 +1201,89 @@ export default function StudentDashboard({
     return String(roundScore2(total / gradedCombinedItems.length))
   }, [gradedCombinedItems])
 
+  // Fresh server fetch whenever the student opens the Report Card tab or official Report Card modal
+  const refreshReportCardFromServer = useCallback(async () => {
+    const rawId = student?.id || student?.access_code
+    const rosterInfo = resolveCanonicalStudent(rawId || student?.full_name)
+    const canonicalStudentId = rosterInfo?.id || rawId
+    const canonicalAccessCode = rosterInfo?.nationalCode || student?.access_code || rawId
+
+    if (!canonicalStudentId || !isValidUuid(String(canonicalStudentId))) {
+      // Teacher preview mode or synthetic local preview student
+      setReportCardLoading(false)
+      setReportCardError(null)
+      return
+    }
+
+    const seq = ++reportCardReqSeqRef.current
+    setReportCardLoading(true)
+    setReportCardError(null)
+
+    const withFetchTimeout = async <T,>(promise: PromiseLike<T> | Promise<T>, ms = 15000): Promise<T> => {
+      return Promise.race([
+        Promise.resolve(promise),
+        new Promise<T>((_, reject) => setTimeout(() => reject(new Error('timeout')), ms)),
+      ])
+    }
+
+    try {
+      const [gradesRes, examsRes, examSubsRes] = await Promise.allSettled([
+        withFetchTimeout<any>(
+          supabase.rpc('student_list_my_grades', {
+            p_student_id: canonicalStudentId,
+            p_access_code: String(canonicalAccessCode || ''),
+          }),
+          15000
+        ),
+        withFetchTimeout(fetchPublishedExamsWithDiagnostics(true, true, { skipBackendApi: true }), 15000),
+        withFetchTimeout(fetchExamSubmissions(undefined, canonicalStudentId, true), 15000),
+      ])
+
+      if (seq !== reportCardReqSeqRef.current) return
+
+      let gradesOk = false
+      if (gradesRes.status === 'fulfilled' && !gradesRes.value?.error && Array.isArray(gradesRes.value?.data)) {
+        gradesOk = true
+        setMyGrades(gradesRes.value.data)
+        setGradesFetchStatus('ready')
+        try {
+          localStorage.setItem(`cached_grades_${canonicalStudentId}`, JSON.stringify(gradesRes.value.data))
+        } catch {}
+      }
+
+      let examsOk = false
+      if (examsRes.status === 'fulfilled' && examsRes.value?.remoteOk) {
+        examsOk = true
+        setExams(examsRes.value.exams)
+        setExamsFetchStatus('ready')
+      }
+
+      let subsOk = false
+      if (examSubsRes.status === 'fulfilled' && Array.isArray(examSubsRes.value)) {
+        subsOk = true
+        setMyExamSubs(examSubsRes.value)
+        setSubmissionsFetchStatus('ready')
+      }
+
+      if (!gradesOk || (!examsOk && !subsOk)) {
+        setReportCardError('خطا در دریافت جدیدترین نمرات از سرور. لطفاً اتصال اینترنت را بررسی کرده و دوباره تلاش کنید.')
+      }
+    } catch {
+      if (seq !== reportCardReqSeqRef.current) return
+      setReportCardError('خطا در دریافت جدیدترین نمرات از سرور. لطفاً اتصال اینترنت را بررسی کرده و دوباره تلاش کنید.')
+    } finally {
+      if (seq === reportCardReqSeqRef.current) {
+        setReportCardLoading(false)
+      }
+    }
+  }, [student?.id, student?.access_code, student?.full_name])
+
+  useEffect(() => {
+    if (activeTab === 'grades' || showReportCardModal) {
+      void refreshReportCardFromServer()
+    }
+  }, [activeTab, showReportCardModal, refreshReportCardFromServer])
+
   async function handleOpenExamReview(g: any) {
     const rowKey = String(g.id || g.examId || g.skill || 'review')
     setReviewErrorMsg(null)
@@ -923,62 +1291,90 @@ export default function StudentDashboard({
 
     try {
       const targetStudentName = student?.full_name || (student as any)?.fullName
-      let targetExam = g.matchedExam || g.exam || exams.find((e) => e.id === g.examId) || getLocalExams().find((e) => e.id === g.examId) || null
-      let targetSub =
+      const rawId = student?.id || student?.access_code
+      const rosterInfo = resolveCanonicalStudent(rawId || targetStudentName)
+      const canonicalStudentId = rosterInfo?.id || rawId
+      const canonicalAccessCode = rosterInfo?.nationalCode || student?.access_code || rawId
+
+      let targetExam =
+        g.matchedExam ||
+        g.exam ||
+        exams.find((e) => e.id === g.examId) ||
+        getLocalExams().find((e) => e.id === g.examId) ||
+        null
+
+      if (!targetExam && g.skill) {
+        targetExam =
+          exams.find((e) => {
+            const cleanE = sanitizeExamTitle(e.title, e.subject)
+            const cleanG = sanitizeExamTitle(g.skill || '', g.subject)
+            return Boolean(cleanE && cleanG && (cleanE === cleanG || String(g.skill).includes(cleanE)))
+          }) || null
+      }
+
+      const targetExamId = String(g.examId || targetExam?.id || '').trim()
+
+      if (!targetExamId) {
+        setReviewErrorMsg('اطلاعات سؤالات این ارزیابی در سامانه یافت نشد یا مربوط به ارزیابی کلاسی بدون برگه‌سؤال است.')
+        return
+      }
+
+      // Always fetch full unsanitized questions + correct answers + explanations via secure RPC
+      // so students see the real answer key ONLY when their results are officially approved/published.
+      if (isValidUuid(String(canonicalStudentId || '')) && isValidUuid(targetExamId)) {
+        const reviewRes = await fetchStudentExamReview({
+          examId: targetExamId,
+          studentId: String(canonicalStudentId),
+          accessCode: String(canonicalAccessCode || ''),
+        })
+
+        if (reviewRes.ok && reviewRes.released && reviewRes.exam && reviewRes.submission) {
+          setReviewExamData({
+            exam: reviewRes.exam,
+            submission: reviewRes.submission,
+            questionsReview: reviewRes.questionsReview,
+            scaledScore20: reviewRes.scaledScore20,
+            forceReleased: true,
+          })
+          return
+        }
+
+        if (!reviewRes.released) {
+          setReviewErrorMsg(reviewRes.message || 'نتیجه هنوز منتشر نشده است.')
+          return
+        }
+
+        setReviewErrorMsg(reviewRes.message || 'پاسخ‌نامه این آزمون در حال حاضر در دسترس نیست. لطفاً دوباره تلاش کنید.')
+        return
+      }
+
+      // Fallback only for teacher preview mode (non-UUID synthetic student)
+      const targetSub =
         g.matchedSub ||
         g.sub ||
         (targetExam
           ? (myExamSubs.length > 0 ? myExamSubs : getLocalSubmissions()).find(
               (s) =>
-                (s.examId === targetExam.id || s.examId === g.examId) &&
+                (s.examId === targetExam.id || s.examId === targetExamId) &&
                 isSameStudent(s.studentId, student?.id, s.studentName, targetStudentName)
             )
           : null)
 
-      // Lazy-hydrate missing exam questions or submission from Supabase on demand
-      if (!targetExam || !Array.isArray(targetExam.questions) || targetExam.questions.length === 0) {
-        try {
-          const diag = await fetchPublishedExamsWithDiagnostics(true, true, { skipBackendApi: true })
-          if (diag.exams.length > 0) {
-            setExams(diag.exams)
-            targetExam =
-              diag.exams.find((e) => {
-                if (g.examId && e.id === g.examId) return true
-                if (targetExam?.id && e.id === targetExam.id) return true
-                const cleanE = sanitizeExamTitle(e.title, e.subject)
-                const cleanG = sanitizeExamTitle(g.skill || '', g.subject)
-                return Boolean(cleanE && cleanG && (cleanE === cleanG || g.skill?.includes(cleanE)))
-              }) || targetExam
-          }
-        } catch {}
-      }
-
-      if (targetExam && !targetSub) {
-        try {
-          const rosterInfo = resolveCanonicalStudent(student?.id || student?.access_code || targetStudentName)
-          const canonicalStudentId = rosterInfo?.id || student?.id
-          const fetchedSubs = await fetchExamSubmissions(targetExam.id, canonicalStudentId, true)
-          if (Array.isArray(fetchedSubs) && fetchedSubs.length > 0) {
-            targetSub =
-              fetchedSubs.find(
-                (s) =>
-                  s.examId === targetExam.id &&
-                  isSameStudent(s.studentId, canonicalStudentId, s.studentName, targetStudentName)
-              ) || null
-          }
-        } catch {}
-      }
-
       if (targetExam && targetSub) {
+        if (!isExamResultsReleased(targetExam, targetSub)) {
+          setReviewErrorMsg('نتیجه هنوز منتشر نشده است.')
+          return
+        }
         setReviewExamData({
           exam: targetExam,
           submission: targetSub,
+          forceReleased: true,
         })
-      } else if (!targetExam) {
-        setReviewErrorMsg('اطلاعات سؤالات این آزمون در سامانه یافت نشد یا مربوط به ارزیابی کلاسی بدون برگه‌سؤال است.')
       } else {
-        setReviewErrorMsg('برگه پاسخ ثبت‌شده شما برای این آزمون در دسترس نیست؛ لطفاً در صورت نیاز با آموزگار تماس بگیرید.')
+        setReviewErrorMsg('نتیجه هنوز منتشر نشده است.')
       }
+    } catch (err: any) {
+      setReviewErrorMsg(err?.message || 'خطا در دریافت پاسخ‌نامه از سرور. لطفاً دوباره تلاش کنید.')
     } finally {
       setOpeningReviewId(null)
     }
@@ -1047,6 +1443,26 @@ export default function StudentDashboard({
       />
 
       <main className="max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-5 pb-16 flex-1">
+        {/* Top Refresh Action Bar */}
+        <div className="mb-4 flex items-center justify-between gap-2">
+          <div className="text-[11px] sm:text-xs text-slate-500 font-medium">
+            📅 {weekday}، {jalali}
+          </div>
+          <button
+            type="button"
+            disabled={isManualRefreshing}
+            onClick={() => {
+              setIsManualRefreshing(true)
+              loadAll(true).finally(() => setIsManualRefreshing(false))
+            }}
+            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-black bg-white hover:bg-blue-50 text-blue-700 border border-blue-200 hover:border-blue-300 shadow-2xs transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-wait"
+            title="بروزرسانی تکالیف، آزمون‌ها و کارنامه"
+          >
+            <span className={isManualRefreshing ? 'inline-block animate-spin' : 'inline-block'}>🔄</span>
+            <span>{isManualRefreshing ? 'در حال بروزرسانی...' : 'بروزرسانی'}</span>
+          </button>
+        </div>
+
         {/* New Homework Notification Banner */}
         {showHomeworkNotification && (
           <div
@@ -1257,7 +1673,7 @@ export default function StudentDashboard({
                               }`}
                             >
                               {isGraded
-                                ? `✅ نمره: ${toPersianDigits(matchedGrade.score)} از ۲۰ (${toPersianDigits(matchedGrade.raw_score)} از ${toPersianDigits(matchedGrade.raw_max)} نمره)`
+                                ? `✅ نمره: ${toPersianDigits(matchedGrade.score)} از ۲۰`
                                 : isPendingReview
                                 ? '⏳ در انتظار تایید معلم'
                                 : hasDraft
@@ -1580,7 +1996,7 @@ export default function StudentDashboard({
                               }`}
                             >
                               {isGraded
-                                ? `✅ نمره: ${toPersianDigits(matchedGrade.score)} از ۲۰ (${toPersianDigits(matchedGrade.raw_score)} از ${toPersianDigits(matchedGrade.raw_max)} نمره)`
+                                ? `✅ نمره: ${toPersianDigits(matchedGrade.score)} از ۲۰`
                                 : isPendingReview
                                 ? '⏳ در انتظار تایید معلم'
                                 : hasDraft
@@ -1953,6 +2369,30 @@ export default function StudentDashboard({
               </button>
             </div>
 
+            {reportCardLoading && (
+              <div className="bg-blue-50 border border-blue-200 text-blue-800 rounded-2xl px-4 py-2.5 text-xs font-bold flex items-center gap-2">
+                <span className="animate-spin">⏳</span>
+                <span>در حال دریافت جدیدترین نمرات از سرور...</span>
+              </div>
+            )}
+
+            {reportCardError && (
+              <div className="bg-rose-50 border border-rose-200 text-rose-800 rounded-2xl px-4 py-3 text-xs font-bold flex flex-wrap items-center justify-between gap-2.5">
+                <span className="flex items-center gap-1.5">
+                  <span>⚠️</span>
+                  <span>{reportCardError}</span>
+                </span>
+                <button
+                  type="button"
+                  disabled={reportCardLoading}
+                  onClick={() => void refreshReportCardFromServer()}
+                  className="px-3 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-black cursor-pointer disabled:opacity-60"
+                >
+                  تلاش دوباره
+                </button>
+              </div>
+            )}
+
             {/* GPA & Performance Hero Card */}
             <div className="bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 text-white rounded-3xl p-6 sm:p-7 shadow-lg shadow-slate-900/10 border border-slate-800 relative overflow-hidden">
               <div className="relative z-10 flex flex-col sm:flex-row sm:items-center justify-between gap-6">
@@ -2115,8 +2555,8 @@ export default function StudentDashboard({
 
                       const rowKey = String(g.id || g.examId || g.skill || idx)
                       const isOpeningThis = openingReviewId === rowKey
-                      const hasReview = isGraded && Boolean(g.matchedExam)
-                      const canViewPendingAnswers = isPendingReview && Boolean(g.matchedExam && g.matchedSub)
+                      const hasReview = isGraded && Boolean(g.matchedExam || g.examId)
+                      const canViewPendingAnswers = isPendingReview && Boolean(g.matchedExam || g.examId)
 
                       return (
                         <div
@@ -2226,11 +2666,6 @@ export default function StudentDashboard({
                                   </span>
                                   <span className="text-xs text-slate-400 mr-1 font-bold">از ۲۰</span>
                                 </div>
-                                {(g as any).raw_score !== undefined && (g as any).raw_max !== undefined && (
-                                  <span className="text-[11px] text-slate-500 font-bold block mt-0.5">
-                                    ({toPersianDigits((g as any).raw_score)} از {toPersianDigits((g as any).raw_max)} نمره)
-                                  </span>
-                                )}
                               </div>
                             ) : isPendingReview ? (
                               <div className="text-left">
@@ -2455,6 +2890,9 @@ export default function StudentDashboard({
           examSubmissions={myExamSubs}
           homeworkCount={homeworkPosts.length}
           reportNote={reportNote || undefined}
+          loading={reportCardLoading}
+          error={reportCardError}
+          onRetry={() => void refreshReportCardFromServer()}
           onClose={() => setShowReportCardModal(false)}
         />
       )}
@@ -2514,6 +2952,9 @@ export default function StudentDashboard({
         <ExamReviewModal
           exam={reviewExamData.exam}
           submission={reviewExamData.submission}
+          questionsReview={reviewExamData.questionsReview}
+          scaledScore20Override={reviewExamData.scaledScore20}
+          forceReleased={reviewExamData.forceReleased}
           onClose={() => setReviewExamData(null)}
           onEdit={() => {
             const targetExam = reviewExamData.exam

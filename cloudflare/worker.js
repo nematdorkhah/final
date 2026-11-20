@@ -1,47 +1,54 @@
 /**
- * Cloudflare Worker: Netlify Reverse Proxy + Secure Server-Side Gemini AI Gateway (/api/ai/*)
+ * Cloudflare Worker: Netlify Reverse Proxy + Supabase Proxy (/sb/* + Realtime WebSocket) + Secure Server-Side Gemini AI Gateway (/api/ai/*)
  * Target Worker: https://class.nemat-darkhah.workers.dev
  *
  * Required Cloudflare Worker Variables & Secrets (Dashboard -> Settings -> Variables and Secrets):
  * - GEMINI_API_KEY (Secret): Google Gemini API Key (NEVER expose in Frontend / GitHub)
  * - NETLIFY_ORIGIN (Text Variable): Your Netlify site URL (e.g. https://your-site-name.netlify.app)
+ * - SUPABASE_URL (Text Variable, Optional): Supabase Project URL (defaults to https://ephgqrnbpxvxlzloflhy.supabase.co)
  * - TEACHER_PASSWORD (Optional Secret): Override teacher password check (otherwise verified via Supabase verify_teacher RPC)
  * - GEMINI_MODEL (Optional Text Variable): Preferred Gemini model ID override
- * - SUPABASE_URL (Optional Text Variable): Defaults to existing project Supabase URL
  * - SUPABASE_ANON_KEY (Optional Text Variable): Defaults to existing public Supabase publishable/anon key
  */
 
 const DEFAULT_SUPABASE_URL = 'https://ephgqrnbpxvxlzloflhy.supabase.co'
 const DEFAULT_SUPABASE_ANON_KEY = 'sb_publishable_bI5v4Hzokb0A4JWJDzuz1A_4B3lIUX_'
 
-const MODEL_CACHE_TTL_MS = 10 * 60 * 1000
-const discoveredModelsCache = new Map()
+const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash-lite'
+const GEMINI_TIMEOUT_MS = 20000
+const MODEL_LIST_TIMEOUT_MS = 8000
 
-const PREFERRED_MODEL_PATTERNS = [
-  /^gemini-3(?:\.\d+)?-flash(?!.*(?:tts|live|image|audio|lite))/,
-  /^gemini-2\.5-flash(?!.*(?:tts|live|image|audio|lite))/,
-  /^gemini-4-hydrogen$/,
-  /^gemini-3(?:\.\d+)?-flash-lite/,
-  /^gemini-2\.5-flash-lite/,
-  /^gemini-.*flash(?!.*(?:1\.0|1\.5|2\.0|tts|live|image|audio|thinking))/,
-]
+const WORKING_MODEL_CACHE_TTL_MS = 30 * 60 * 1000
+const workingModelCache = new Map()
 
-const DISALLOWED_MODEL_KEYWORDS = [
-  'embedding',
-  'imagen',
-  'veo',
-  'lyria',
-  'aqa',
-  'tts',
-  'live',
-  'transcribe',
-  'image',
-  'audio',
-  'gemini-1.0',
-  'gemini-1.5',
-  'gemini-2.0',
-  'gemini-pro',
-]
+const EXCLUDED_DISCOVERY_KEYWORDS = ['preview', 'tts', 'live', 'image', 'audio', 'embedding']
+
+const TEACHER_AUTH_CACHE_TTL_MS = 5 * 60 * 1000
+const teacherAuthCache = new Map()
+
+const EXAM_QUESTIONS_RESPONSE_SCHEMA = {
+  type: 'ARRAY',
+  items: {
+    type: 'OBJECT',
+    properties: {
+      id: { type: 'STRING' },
+      type: {
+        type: 'STRING',
+        enum: ['multiple_choice', 'fill_in_the_blank', 'descriptive'],
+      },
+      question: { type: 'STRING' },
+      options: {
+        type: 'ARRAY',
+        items: { type: 'STRING' },
+      },
+      correctAnswer: { type: 'STRING' },
+      correctOptionText: { type: 'STRING' },
+      rubricOrHint: { type: 'STRING' },
+      points: { type: 'NUMBER' },
+    },
+    required: ['id', 'type', 'question', 'rubricOrHint', 'points'],
+  },
+}
 
 function getCorsHeaders(request) {
   const origin = request?.headers?.get('Origin') || '*'
@@ -50,6 +57,33 @@ function getCorsHeaders(request) {
     'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
     'Access-Control-Allow-Headers':
       'Origin, X-Requested-With, Content-Type, Accept, Authorization, x-teacher-password, x-principal-password, Cache-Control',
+    'Access-Control-Max-Age': '86400',
+    'Vary': 'Origin',
+  }
+}
+
+function getSupabaseCorsHeaders(request) {
+  const origin = request?.headers?.get('Origin') || '*'
+  const reqHeaders = request?.headers?.get('Access-Control-Request-Headers')
+  const defaultAllowed =
+    'apikey, authorization, content-type, prefer, x-client-info, range, accept, accept-profile, content-profile, x-upsert, x-supabase-api-version, cache-control, pragma'
+  const allowHeaders = reqHeaders
+    ? Array.from(
+        new Set(
+          `${defaultAllowed}, ${reqHeaders}`
+            .split(',')
+            .map((h) => h.trim())
+            .filter(Boolean)
+        )
+      ).join(', ')
+    : defaultAllowed
+
+  return {
+    'Access-Control-Allow-Origin': origin === 'null' ? '*' : origin,
+    'Access-Control-Allow-Methods': 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS',
+    'Access-Control-Allow-Headers': allowHeaders,
+    'Access-Control-Expose-Headers':
+      'Content-Range, Range, Preference-Applied, X-Total-Count, Location, Content-Location',
     'Access-Control-Max-Age': '86400',
     'Vary': 'Origin',
   }
@@ -177,12 +211,27 @@ function extractJsonObject(rawText) {
   }
 }
 
+async function sha256Hex(text) {
+  const bytes = new TextEncoder().encode(String(text || ''))
+  const digest = await crypto.subtle.digest('SHA-256', bytes)
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')
+}
+
 async function verifyTeacher(password, env) {
   const cleanPass = String(password || '').trim()
   if (!cleanPass) return false
 
   if (env.TEACHER_PASSWORD && cleanPass === String(env.TEACHER_PASSWORD).trim()) {
     return true
+  }
+
+  const now = Date.now()
+  const passHash = await sha256Hex(cleanPass)
+  const cached = teacherAuthCache.get(passHash)
+  if (cached && cached.expiresAt > now) {
+    return cached.valid
   }
 
   const supabaseUrl = String(env.SUPABASE_URL || DEFAULT_SUPABASE_URL).replace(/\/+$/, '')
@@ -203,7 +252,23 @@ async function verifyTeacher(password, env) {
     })
     if (!res.ok) return false
     const data = await res.json()
-    return Boolean(data)
+    const valid = Boolean(data)
+
+    if (teacherAuthCache.size >= 200) {
+      for (const [k, v] of teacherAuthCache.entries()) {
+        if (v.expiresAt <= now) teacherAuthCache.delete(k)
+      }
+      if (teacherAuthCache.size >= 200) {
+        const firstKey = teacherAuthCache.keys().next().value
+        if (firstKey) teacherAuthCache.delete(firstKey)
+      }
+    }
+    teacherAuthCache.set(passHash, {
+      valid,
+      expiresAt: now + TEACHER_AUTH_CACHE_TTL_MS,
+    })
+
+    return valid
   } catch {
     return false
   } finally {
@@ -272,7 +337,7 @@ function classifyGeminiHttpError(status, errMessage = '') {
     lower.includes('permission_denied')
   ) {
     return new WorkerApiError(
-      'کلید دسترسی Gemini نامعتبر است یا دسترسی آن در سرویس گوگل فعال نیست.',
+      'مرحله کلید دسترسی ناموفق بود: کلید Gemini نامعتبر است یا مجوز استفاده از این سرویس را ندارد.',
       403,
       'API_KEY_INVALID'
     )
@@ -285,7 +350,7 @@ function classifyGeminiHttpError(status, errMessage = '') {
     lower.includes('rate limit')
   ) {
     return new WorkerApiError(
-      'سهمیه استفاده از سرویس هوش مصنوعی گوگل (Quota / Rate Limit) موقتاً تکمیل شده است.',
+      'مرحله سهمیه سرویس ناموفق بود: سهمیه یا محدودیت نرخ درخواست Gemini (Quota / Rate Limit) موقتاً تکمیل شده است.',
       429,
       'QUOTA_EXCEEDED'
     )
@@ -293,67 +358,99 @@ function classifyGeminiHttpError(status, errMessage = '') {
 
   if (status === 404 || lower.includes('not found') || lower.includes('is not supported')) {
     return new WorkerApiError(
-      `مدل انتخابی هوش مصنوعی در سرویس Gemini در دسترس نیست (${msg || 'HTTP 404'}).`,
+      `مرحله انتخاب مدل ناموفق بود: مدل در دسترس نیست یا منسوخ شده است (${msg || 'HTTP 404'}).`,
       404,
       'MODEL_UNAVAILABLE'
     )
   }
 
   return new WorkerApiError(
-    `خطا در ارتباط با سرویس Gemini (${status || 'Network'}): ${msg || 'پاسخ نامعتبر'}`,
+    `مرحله ارتباط با سرویس Gemini ناموفق بود (${status || 'Network'}): ${msg || 'پاسخ نامعتبر'}`,
     status >= 500 || !status ? 502 : status,
     'GEMINI_UPSTREAM_ERROR'
   )
 }
 
-function rankAvailableFlashModels(rawModels, preferredOverride) {
-  const validIds = (Array.isArray(rawModels) ? rawModels : [])
+function isThinkingConfig400Error(status, errMessage = '') {
+  if (status !== 400) return false
+  const lower = String(errMessage || '').toLowerCase()
+  return (
+    lower.includes('thinking') ||
+    lower.includes('thinking_config') ||
+    lower.includes('thinkingconfig') ||
+    lower.includes('thinking_budget') ||
+    lower.includes('thinkingbudget') ||
+    lower.includes('thinking_level') ||
+    lower.includes('thinkinglevel')
+  )
+}
+
+function buildThinkingConfigForModel(model) {
+  const normalized = String(model || '').replace(/^models\//, '').toLowerCase().trim()
+  if (normalized.startsWith('gemini-2.5')) {
+    return { thinkingBudget: 0 }
+  }
+  const versionMatch = normalized.match(/^gemini-(\d+)(?:\.(\d+))?/)
+  if (versionMatch && Number(versionMatch[1]) >= 3) {
+    return { thinkingLevel: 'minimal' }
+  }
+  return null
+}
+
+function parseGeminiVersion(modelId) {
+  const match = String(modelId || '').toLowerCase().match(/^gemini-(\d+)(?:\.(\d+))?/)
+  if (!match) return { major: 0, minor: 0 }
+  return {
+    major: Number(match[1]) || 0,
+    minor: Number(match[2]) || 0,
+  }
+}
+
+function selectDiscoveredFlashModels(rawModels) {
+  const eligible = (Array.isArray(rawModels) ? rawModels : [])
     .filter((m) => {
       const methods = Array.isArray(m?.supportedGenerationMethods) ? m.supportedGenerationMethods : []
       if (!methods.includes('generateContent')) return false
-      const id = String(m?.name || '').replace(/^models\//, '').toLowerCase()
-      if (!id.startsWith('gemini-')) return false
-      return !DISALLOWED_MODEL_KEYWORDS.some((kw) => id.includes(kw))
+      const id = String(m?.name || '').replace(/^models\//, '').trim()
+      const lower = id.toLowerCase()
+      if (!lower.startsWith('gemini-') || !lower.includes('flash')) return false
+      return !EXCLUDED_DISCOVERY_KEYWORDS.some((kw) => lower.includes(kw))
     })
-    .map((m) => String(m.name).replace(/^models\//, ''))
+    .map((m) => String(m.name).replace(/^models\//, '').trim())
 
-  const uniqueIds = Array.from(new Set(validIds))
+  const uniqueIds = Array.from(new Set(eligible))
+
+  const compareByNewest = (a, b) => {
+    const va = parseGeminiVersion(a)
+    const vb = parseGeminiVersion(b)
+    if (vb.major !== va.major) return vb.major - va.major
+    if (vb.minor !== va.minor) return vb.minor - va.minor
+    const aHasVariant = /-\d{3}$|-latest$|-exp/.test(a.toLowerCase()) ? 1 : 0
+    const bHasVariant = /-\d{3}$|-latest$|-exp/.test(b.toLowerCase()) ? 1 : 0
+    if (aHasVariant !== bHasVariant) return aHasVariant - bHasVariant
+    return a.length - b.length
+  }
+
+  const liteModels = uniqueIds
+    .filter((id) => id.toLowerCase().includes('flash-lite'))
+    .sort(compareByNewest)
+
+  const standardFlashModels = uniqueIds
+    .filter((id) => !id.toLowerCase().includes('flash-lite'))
+    .sort(compareByNewest)
+
   const ordered = []
-
-  if (preferredOverride) {
-    const cleanOverride = String(preferredOverride).replace(/^models\//, '').trim()
-    if (uniqueIds.includes(cleanOverride)) {
-      ordered.push(cleanOverride)
-    }
+  if (liteModels.length > 0) ordered.push(liteModels[0])
+  if (standardFlashModels.length > 0) ordered.push(standardFlashModels[0])
+  for (const id of [...liteModels.slice(1), ...standardFlashModels.slice(1)]) {
+    if (!ordered.includes(id)) ordered.push(id)
   }
-
-  for (const pattern of PREFERRED_MODEL_PATTERNS) {
-    for (const id of uniqueIds) {
-      if (pattern.test(id) && !ordered.includes(id)) {
-        ordered.push(id)
-      }
-    }
-  }
-
-  for (const id of uniqueIds) {
-    if (!ordered.includes(id)) {
-      ordered.push(id)
-    }
-  }
-
   return ordered
 }
 
-async function discoverConfirmedGeminiModels(apiKey, env) {
-  const preferredOverride = env.GEMINI_MODEL ? String(env.GEMINI_MODEL).trim() : ''
-  const cacheKey = `${apiKey.slice(-6)}::${preferredOverride}`
-  const cached = discoveredModelsCache.get(cacheKey)
-  if (cached && cached.expiresAt > Date.now() && cached.models.length > 0) {
-    return cached.models
-  }
-
+async function discoverFallbackFlashModels(apiKey) {
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 8000)
+  const timer = setTimeout(() => controller.abort(), MODEL_LIST_TIMEOUT_MS)
   try {
     const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=100', {
       method: 'GET',
@@ -369,118 +466,205 @@ async function discoverConfirmedGeminiModels(apiKey, env) {
     }
 
     const json = await res.json()
-    const ranked = rankAvailableFlashModels(json?.models, preferredOverride)
+    const ranked = selectDiscoveredFlashModels(json?.models)
     if (ranked.length === 0) {
       throw new WorkerApiError(
-        'هیچ مدل پشتیبانی‌شده‌ای برای generateContent روی کلید Gemini یافت نشد.',
-        502,
+        'مرحله انتخاب مدل ناموفق بود: هیچ مدل پایدار gemini-*flash* با قابلیت generateContent در فهرست مدل‌های Gemini یافت نشد.',
+        404,
         'MODEL_UNAVAILABLE'
       )
     }
 
-    const selected = ranked.slice(0, 4)
-    discoveredModelsCache.set(cacheKey, {
-      models: selected,
-      expiresAt: Date.now() + MODEL_CACHE_TTL_MS,
-    })
-    return selected
+    return ranked
   } catch (err) {
     if (err instanceof WorkerApiError) throw err
     if (err?.name === 'AbortError') {
-      throw new WorkerApiError('زمان انتظار بررسی مدل‌های Gemini به پایان رسید.', 504, 'GEMINI_TIMEOUT')
+      throw new WorkerApiError(
+        'مرحله کشف مدل جایگزین ناموفق بود: زمان انتظار دریافت فهرست مدل‌های Gemini به پایان رسید.',
+        504,
+        'GEMINI_TIMEOUT'
+      )
     }
     throw new WorkerApiError(
-      `خطای شبکه هنگام دریافت فهرست مدل‌های Gemini: ${err?.message || err}`,
+      `مرحله کشف مدل جایگزین ناموفق بود: خطای شبکه هنگام دریافت فهرست مدل‌های Gemini (${err?.message || err}).`,
       502,
-      'GEMINI_NETWORK_ERROR'
+      'GEMINI_UPSTREAM_ERROR'
     )
   } finally {
     clearTimeout(timer)
   }
 }
 
-async function callGeminiWithFallbacks(prompt, env, responseJson = false) {
+async function executeGeminiRequest(
+  model,
+  prompt,
+  apiKey,
+  responseJson = false,
+  responseSchema = null,
+  omitThinkingConfig = false
+) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS)
+  try {
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`
+    const thinkingConfig = omitThinkingConfig ? null : buildThinkingConfigForModel(model)
+
+    const generationConfig = {}
+    if (thinkingConfig) {
+      generationConfig.thinkingConfig = thinkingConfig
+    }
+    if (responseJson) {
+      generationConfig.temperature = 0.4
+      generationConfig.responseMimeType = 'application/json'
+      if (responseSchema) {
+        generationConfig.responseSchema = responseSchema
+      }
+    }
+
+    const payload = {
+      contents: [{ parts: [{ text: prompt }] }],
+      ...(Object.keys(generationConfig).length > 0 ? { generationConfig } : {}),
+    }
+
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': apiKey,
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    })
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}))
+      const errMsg = errData?.error?.message || `HTTP ${res.status}`
+      if (!omitThinkingConfig && thinkingConfig && isThinkingConfig400Error(res.status, errMsg)) {
+        return { retryWithoutThinking: true }
+      }
+      throw classifyGeminiHttpError(res.status, errMsg)
+    }
+
+    const json = await res.json()
+    const parts = json?.candidates?.[0]?.content?.parts
+    const text = Array.isArray(parts)
+      ? parts.map((p) => p?.text || '').join('').trim()
+      : ''
+
+    if (!text) {
+      throw new WorkerApiError(
+        `مرحله دریافت پاسخ ناموفق بود: مدل ${model} خروجی متنی معتبری بازنگرداند.`,
+        502,
+        'INVALID_MODEL_RESPONSE'
+      )
+    }
+
+    return { retryWithoutThinking: false, text }
+  } catch (err) {
+    if (err instanceof WorkerApiError) throw err
+    if (err?.name === 'AbortError') {
+      throw new WorkerApiError(
+        'مرحله دریافت پاسخ از مدل هوش مصنوعی ناموفق بود: زمان انتظار (۲۰ ثانیه) به پایان رسید.',
+        504,
+        'GEMINI_TIMEOUT'
+      )
+    }
+    throw new WorkerApiError(
+      `مرحله ارتباط با سرویس Gemini ناموفق بود: ${err?.message || err}`,
+      502,
+      'GEMINI_UPSTREAM_ERROR'
+    )
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function callSingleGeminiModel(model, prompt, apiKey, responseJson = false, responseSchema = null) {
+  const firstAttempt = await executeGeminiRequest(model, prompt, apiKey, responseJson, responseSchema, false)
+  if (firstAttempt.retryWithoutThinking) {
+    const secondAttempt = await executeGeminiRequest(model, prompt, apiKey, responseJson, responseSchema, true)
+    return secondAttempt.text
+  }
+  return firstAttempt.text
+}
+
+function getWorkingModelCacheKey(apiKey, configuredPrimary) {
+  return `${String(apiKey || '').slice(-6)}::${configuredPrimary}`
+}
+
+function cacheWorkingModel(cacheKey, model) {
+  workingModelCache.set(cacheKey, {
+    model,
+    expiresAt: Date.now() + WORKING_MODEL_CACHE_TTL_MS,
+  })
+}
+
+async function callGeminiWithFallbacks(prompt, env, responseJson = false, responseSchema = null) {
   const apiKey = env.GEMINI_API_KEY
   if (!apiKey) {
     throw new WorkerApiError(
-      'کلید GEMINI_API_KEY در تنظیمات Cloudflare Worker تعریف نشده است.',
+      'مرحله کلید دسترسی ناموفق بود: کلید GEMINI_API_KEY در تنظیمات Cloudflare Worker تعریف نشده است.',
       503,
       'GEMINI_KEY_MISSING'
     )
   }
 
-  // Always confirm actually supported models on the API key rather than guessing unverified IDs
-  const candidateModels = await discoverConfirmedGeminiModels(apiKey, env)
-  let lastError = null
+  const configuredPrimary =
+    String(env.GEMINI_MODEL || '')
+      .replace(/^models\//, '')
+      .trim() || DEFAULT_GEMINI_MODEL
 
-  for (const model of candidateModels) {
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 35000)
-    try {
-      const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`
-      const payload = {
-        contents: [{ parts: [{ text: prompt }] }],
-        ...(responseJson
-          ? { generationConfig: { responseMimeType: 'application/json' } }
-          : {}),
-      }
+  const cacheKey = getWorkingModelCacheKey(apiKey, configuredPrimary)
+  const cached = workingModelCache.get(cacheKey)
+  const initialModel = cached && cached.expiresAt > Date.now() && cached.model
+    ? cached.model
+    : configuredPrimary
 
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': apiKey,
-        },
-        body: JSON.stringify(payload),
-        signal: controller.signal,
-      })
+  try {
+    const text = await callSingleGeminiModel(initialModel, prompt, apiKey, responseJson, responseSchema)
+    cacheWorkingModel(cacheKey, initialModel)
+    return text
+  } catch (err) {
+    const isModelUnavailable =
+      err instanceof WorkerApiError &&
+      (err.status === 404 || err.code === 'MODEL_UNAVAILABLE')
 
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}))
-        const classified = classifyGeminiHttpError(res.status, errData?.error?.message || `HTTP ${res.status}`)
-        lastError = classified
-        // Invalid API key won't succeed on another model — fail fast
-        if (classified.code === 'API_KEY_INVALID') {
-          throw classified
-        }
-        continue
-      }
-
-      const json = await res.json()
-      const parts = json?.candidates?.[0]?.content?.parts
-      const text = Array.isArray(parts)
-        ? parts.map((p) => p?.text || '').join('').trim()
-        : ''
-
-      if (text) {
-        return text
-      }
-      lastError = new WorkerApiError(
-        `مدل ${model} پاسخ متنی معتبری بازنگرداند.`,
-        502,
-        'INVALID_MODEL_RESPONSE'
-      )
-    } catch (err) {
-      if (err instanceof WorkerApiError && err.code === 'API_KEY_INVALID') {
-        throw err
-      }
-      if (err?.name === 'AbortError') {
-        lastError = new WorkerApiError('زمان انتظار پاسخ از مدل Gemini به پایان رسید.', 504, 'GEMINI_TIMEOUT')
-      } else if (err instanceof WorkerApiError) {
-        lastError = err
-      } else {
-        lastError = new WorkerApiError(
-          `خطای ارتباط با Gemini: ${err?.message || err}`,
-          502,
-          'GEMINI_UPSTREAM_ERROR'
-        )
-      }
-    } finally {
-      clearTimeout(timer)
+    if (!isModelUnavailable) {
+      throw err
     }
-  }
 
-  throw lastError || new WorkerApiError('خطا در برقراری ارتباط با مدل‌های هوش مصنوعی', 502, 'GEMINI_UPSTREAM_ERROR')
+    // Invalidate stale cached model and discover the newest stable flash-lite / flash model once
+    workingModelCache.delete(cacheKey)
+
+    const discovered = await discoverFallbackFlashModels(apiKey)
+    const fallbackCandidates = discovered.filter((m) => m !== initialModel).slice(0, 2)
+    if (fallbackCandidates.length === 0) {
+      throw new WorkerApiError(
+        `مرحله انتخاب مدل ناموفق بود: مدل «${initialModel}» در دسترس نیست و مدل جایگزین پایداری در حساب Gemini یافت نشد.`,
+        404,
+        'MODEL_UNAVAILABLE'
+      )
+    }
+
+    let lastErr = err
+    for (const candidateModel of fallbackCandidates) {
+      try {
+        const text = await callSingleGeminiModel(candidateModel, prompt, apiKey, responseJson, responseSchema)
+        cacheWorkingModel(cacheKey, candidateModel)
+        return text
+      } catch (candidateErr) {
+        lastErr = candidateErr
+        const candidateUnavailable =
+          candidateErr instanceof WorkerApiError &&
+          (candidateErr.status === 404 || candidateErr.code === 'MODEL_UNAVAILABLE')
+        if (!candidateUnavailable) {
+          throw candidateErr
+        }
+      }
+    }
+
+    throw lastErr
+  }
 }
 
 function inferSubjectFromTopic(rawTopic, providedSubject) {
@@ -556,43 +740,67 @@ async function handleAiRoutes(pathname, request, url, env) {
           ? 'سطح ساده و روان برای تثبیت مفاهیم کتاب درسی'
           : 'سطح استاندارد امتحانات کلاسی و نهایی پایه ششم'
 
-      const prompt = `شما آموزگار شایسته، دلسوز و حرفه‌ای پایه ششم ابتدایی هستید.
+      const typesText = Array.isArray(types) ? types.join('، ') : 'چهارگزینه‌ای، جای خالی، تشریحی'
+      const buildExamPrompt = (batchCount, batchInstruction = '') => `شما آموزگار شایسته، دلسوز و حرفه‌ای پایه ششم ابتدایی هستید.
 معلم از شما خواسته است برای این موضوع یک آزمون بسیار باکیفیت و استاندارد طراحی کنید:
 🎯 موضوع: «${rawTopic}»
 🎯 درس: «${effectiveSubject}»
 ${extraInstructions ? `🎯 توضیحات معلم: «${extraInstructions}»` : ''}
+${batchInstruction ? `🎯 بخش‌بندی: ${batchInstruction}` : ''}
 📊 سطح دشواری: ${difficultyDesc}
-🔢 تعداد کل سوالات: ${numCount} سوال
-📝 انواع سوالات مورد نظر: ${Array.isArray(types) ? types.join('، ') : 'چهارگزینه‌ای، جای خالی، تشریحی'}
+🔢 تعداد کل سوالات این بخش: ${batchCount} سوال
+📝 انواع سوالات مورد نظر: ${typesText}
 
 اصول طراحی:
 ۱. سوالات زنده، ملموس و متناسب با سن ۱۲ سالگی باشند.
-۲. در سوالات چهارگزینه‌ای ۴ گزینه متمایز و ایندکس صحیح متغیر (۰ تا ۳) در correctAnswer و متن دقیق در correctOptionText قرار دهید.
+۲. در سوالات چهارگزینه‌ای ۴ گزینه متمایز و ایندکس صحیح متغیر (۰ تا ۳ به صورت رشته مثل "2") در correctAnswer و متن دقیق در correctOptionText قرار دهید.
 ۳. در پاسخنامه و راهنمای تصحیح (rubricOrHint) دلیل درستی پاسخ را کامل توضیح دهید.
+۴. خروجی صرفاً آرایه JSON با دقیقاً ${batchCount} سوال باشد.`
 
-خروجی صرفاً یک آرایه JSON معتبر باشد:
-[
-  {
-    "id": "q1",
-    "type": "multiple_choice",
-    "question": "متن روان صورت سوال",
-    "options": ["گزینه ۱", "گزینه ۲", "گزینه ۳", "گزینه ۴"],
-    "correctAnswer": 2,
-    "correctOptionText": "گزینه ۳",
-    "rubricOrHint": "توضیح کامل پاسخنامه",
-    "points": 2
-  }
-]`
+      let parsed = []
+      if (numCount > 10) {
+        const firstBatchCount = Math.ceil(numCount / 2)
+        const secondBatchCount = numCount - firstBatchCount
+        const promptA = buildExamPrompt(
+          firstBatchCount,
+          `بخش اول (سوالات ۱ تا ${firstBatchCount}): تمرکز بر مفاهیم پایه، درک مطلب و کاربرد مستقیم.`
+        )
+        const promptB = buildExamPrompt(
+          secondBatchCount,
+          `بخش دوم (سوالات ${firstBatchCount + 1} تا ${numCount}): تمرکز بر سوالات تحلیلی، ترکیبی و متفاوت از بخش اول بدون تکرار.`
+        )
 
-      const jsonText = await callGeminiWithFallbacks(prompt, env, true)
-      const parsed = extractJsonArray(jsonText)
+        const [jsonTextA, jsonTextB] = await Promise.all([
+          callGeminiWithFallbacks(promptA, env, true, EXAM_QUESTIONS_RESPONSE_SCHEMA),
+          callGeminiWithFallbacks(promptB, env, true, EXAM_QUESTIONS_RESPONSE_SCHEMA),
+        ])
+
+        const arrA = extractJsonArray(jsonTextA)
+        const arrB = extractJsonArray(jsonTextB)
+        parsed = [
+          ...(Array.isArray(arrA) ? arrA : []),
+          ...(Array.isArray(arrB) ? arrB : []),
+        ]
+      } else {
+        const prompt = buildExamPrompt(numCount)
+        const jsonText = await callGeminiWithFallbacks(prompt, env, true, EXAM_QUESTIONS_RESPONSE_SCHEMA)
+        parsed = extractJsonArray(jsonText)
+      }
+
       if (!Array.isArray(parsed) || parsed.length === 0) {
         throw new WorkerApiError('قالب بازگشتی هوش مصنوعی معتبر نبود.', 502, 'INVALID_MODEL_RESPONSE')
       }
 
+      const runTs = Date.now()
+      const seenIds = new Set()
       const processedQuestions = parsed.map((q, qIdx) => {
         if (!q || typeof q !== 'object') return q
-        const baseId = q.id || `q_${Date.now()}_${qIdx}`
+        let baseId = String(q.id || '').trim()
+        if (!baseId || seenIds.has(baseId)) {
+          baseId = `q_${runTs}_${qIdx + 1}`
+        }
+        seenIds.add(baseId)
+
         if (q.type === 'multiple_choice' && Array.isArray(q.options) && q.options.length > 0) {
           const res = resolveCorrectOptionIndex(q)
           let finalIdx =
@@ -612,7 +820,11 @@ ${extraInstructions ? `🎯 توضیحات معلم: «${extraInstructions}»` :
               : cleanOptionText(q.options[finalIdx] || ''),
           }
         }
-        return { ...q, id: baseId }
+        const normalized = { ...q, id: baseId }
+        if (Array.isArray(normalized.options) && normalized.options.length === 0) {
+          delete normalized.options
+        }
+        return normalized
       })
 
       return jsonResponse(
@@ -707,11 +919,17 @@ ${text}
   }
 ]`
 
-      const jsonText = await callGeminiWithFallbacks(prompt, env, true)
+      const jsonText = await callGeminiWithFallbacks(prompt, env, true, EXAM_QUESTIONS_RESPONSE_SCHEMA)
       const parsed = extractJsonArray(jsonText)
+      const runTs = Date.now()
+      const seenIds = new Set()
       const processedQuestions = (Array.isArray(parsed) ? parsed : []).map((q, qIdx) => {
         if (!q || typeof q !== 'object') return q
-        const baseId = q.id || `q_conv_${Date.now()}_${qIdx}`
+        let baseId = String(q.id || '').trim()
+        if (!baseId || seenIds.has(baseId)) {
+          baseId = `q_conv_${runTs}_${qIdx + 1}`
+        }
+        seenIds.add(baseId)
         if (q.type === 'multiple_choice' && Array.isArray(q.options) && q.options.length > 0) {
           const res = resolveCorrectOptionIndex(q)
           let finalIdx =
@@ -731,7 +949,11 @@ ${text}
               : cleanOptionText(q.options[finalIdx] || ''),
           }
         }
-        return { ...q, id: baseId }
+        const normalized = { ...q, id: baseId }
+        if (Array.isArray(normalized.options) && normalized.options.length === 0) {
+          delete normalized.options
+        }
+        return normalized
       })
 
       return jsonResponse({ success: true, questions: processedQuestions }, 200, request)
@@ -874,6 +1096,136 @@ ${JSON.stringify(questions, null, 2)}
   }
 }
 
+async function proxyToSupabase(request, url, env) {
+  const supabaseBaseRaw = String(env.SUPABASE_URL || DEFAULT_SUPABASE_URL).trim().replace(/\/+$/, '')
+  if (!supabaseBaseRaw) {
+    return new Response(
+      JSON.stringify({
+        success: false,
+        code: 'SUPABASE_URL_MISSING',
+        error: 'متغیر SUPABASE_URL در تنظیمات Cloudflare Worker نامعتبر است.',
+      }),
+      {
+        status: 500,
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          ...getSupabaseCorsHeaders(request),
+          ...NO_CACHE_HEADERS,
+        },
+      }
+    )
+  }
+
+  const subPath = url.pathname === '/sb' ? '/' : url.pathname.slice(3) || '/'
+  let upstreamUrl
+  try {
+    upstreamUrl = new URL(subPath + url.search, supabaseBaseRaw)
+  } catch {
+    return new Response(
+      JSON.stringify({
+        success: false,
+        code: 'SUPABASE_URL_INVALID',
+        error: 'مقدار SUPABASE_URL در تنظیمات Cloudflare Worker نامعتبر است.',
+      }),
+      {
+        status: 500,
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          ...getSupabaseCorsHeaders(request),
+          ...NO_CACHE_HEADERS,
+        },
+      }
+    )
+  }
+
+  if (upstreamUrl.hostname === url.hostname) {
+    return new Response(
+      JSON.stringify({
+        success: false,
+        code: 'PROXY_LOOP_BLOCKED',
+        error: 'SUPABASE_URL نباید به آدرس خود Worker اشاره کند (جلوگیری از حلقه پروکسی).',
+      }),
+      {
+        status: 500,
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          ...getSupabaseCorsHeaders(request),
+          ...NO_CACHE_HEADERS,
+        },
+      }
+    )
+  }
+
+  // Forward original request headers (apikey, authorization, content-type, prefer, x-client-info, etc.) unchanged
+  const forwardedHeaders = new Headers(request.headers)
+  forwardedHeaders.delete('host')
+  forwardedHeaders.delete('cf-connecting-ip')
+  forwardedHeaders.delete('cf-ipcountry')
+  forwardedHeaders.delete('cf-ray')
+  forwardedHeaders.delete('cf-visitor')
+
+  const isWebSocketUpgrade =
+    (request.headers.get('Upgrade') || '').toLowerCase() === 'websocket'
+
+  try {
+    if (isWebSocketUpgrade) {
+      return await fetch(upstreamUrl.toString(), {
+        method: request.method,
+        headers: forwardedHeaders,
+      })
+    }
+
+    const init = {
+      method: request.method,
+      headers: forwardedHeaders,
+      redirect: 'manual',
+      cf: {
+        cacheTtl: 0,
+        cacheEverything: false,
+      },
+    }
+    if (request.method !== 'GET' && request.method !== 'HEAD') {
+      init.body = request.body
+    }
+
+    const upstreamRes = await fetch(upstreamUrl.toString(), init)
+    if (upstreamRes.status === 101 || upstreamRes.webSocket) {
+      return upstreamRes
+    }
+
+    const responseHeaders = new Headers(upstreamRes.headers)
+    const corsHeaders = getSupabaseCorsHeaders(request)
+    for (const [k, v] of Object.entries(corsHeaders)) {
+      responseHeaders.set(k, v)
+    }
+    for (const [k, v] of Object.entries(NO_CACHE_HEADERS)) {
+      responseHeaders.set(k, v)
+    }
+
+    return new Response(upstreamRes.body, {
+      status: upstreamRes.status,
+      statusText: upstreamRes.statusText,
+      headers: responseHeaders,
+    })
+  } catch (err) {
+    return new Response(
+      JSON.stringify({
+        success: false,
+        code: 'SUPABASE_PROXY_ERROR',
+        error: `خطا در ارتباط پروکسی با Supabase: ${err?.message || err}`,
+      }),
+      {
+        status: 502,
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          ...getSupabaseCorsHeaders(request),
+          ...NO_CACHE_HEADERS,
+        },
+      }
+    )
+  }
+}
+
 async function proxyToNetlify(request, url, env) {
   const upstreamRaw = String(env.NETLIFY_ORIGIN || '').trim().replace(/\/+$/, '')
   if (!upstreamRaw || upstreamRaw.includes('YOUR-NETLIFY-SITE')) {
@@ -932,6 +1284,20 @@ export default {
     const url = new URL(request.url)
     const pathname = url.pathname
 
+    if (request.method === 'OPTIONS' && (pathname === '/sb' || pathname.startsWith('/sb/'))) {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          ...getSupabaseCorsHeaders(request),
+          ...NO_CACHE_HEADERS,
+        },
+      })
+    }
+
+    if (pathname === '/sb' || pathname.startsWith('/sb/')) {
+      return proxyToSupabase(request, url, env)
+    }
+
     if (request.method === 'OPTIONS' && pathname.startsWith('/api/')) {
       return new Response(null, { status: 204, headers: getCorsHeaders(request) })
     }
@@ -945,6 +1311,7 @@ export default {
           hasNetlifyOrigin: Boolean(
             env.NETLIFY_ORIGIN && !String(env.NETLIFY_ORIGIN).includes('YOUR-NETLIFY-SITE')
           ),
+          hasSupabaseProxy: true,
         },
         200,
         request

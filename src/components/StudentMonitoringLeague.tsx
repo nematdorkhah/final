@@ -1,4 +1,5 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect, useCallback } from 'react'
+import { supabase } from '../supabaseClient'
 import {
   getLocalExams,
   getLocalSubmissions,
@@ -10,8 +11,14 @@ import {
 import { getSubmissionEffectiveScore, isSubmissionApprovedByTeacher, roundScore2 } from '../utils/persianSemanticGrader'
 import { isSameStudent, isTestStudentRecord } from '../classStudents'
 import { Exam, StudentExamSubmission } from '../types/examTypes'
-import TeacherDuolingoTracker from './TeacherDuolingoTracker'
+import TeacherDuolingoTracker, {
+  TizhooshanProgressRow,
+  buildTizhooshanStudentList,
+  computeTizhooshanKpis,
+} from './TeacherDuolingoTracker'
 import { sortByLastName, extractLastName } from '../utils/persianSort'
+import { toPersianDigits } from '../utils/persianNumbers'
+import { getStoredTeacherPassword } from '../services/geminiHybridService'
 
 interface StudentMonitoringLeagueProps {
   students: any[]
@@ -21,6 +28,7 @@ interface StudentMonitoringLeagueProps {
   homeworkPosts: any[]
   exams?: Exam[]
   examSubmissions?: StudentExamSubmission[]
+  teacherPassword?: string
   onOpenStudent: (studentId: string) => void
   initialSubTab?: 'league' | 'tizhooshan' | 'charts' | 'alerts'
 }
@@ -33,6 +41,7 @@ export default function StudentMonitoringLeague({
   homeworkPosts,
   exams: propExams,
   examSubmissions: propExamSubmissions,
+  teacherPassword,
   onOpenStudent,
   initialSubTab = 'league',
 }: StudentMonitoringLeagueProps) {
@@ -40,10 +49,81 @@ export default function StudentMonitoringLeague({
   const [sortBy, setSortBy] = useState<'score' | 'avg' | 'submissions' | 'streak' | 'attendance' | 'alphabet'>('score')
   const [filterSubject, setFilterSubject] = useState<string>('all')
   const [selectedExamId, setSelectedExamId] = useState<string>('all')
+  const [tizhooshanRows, setTizhooshanRows] = useState<TizhooshanProgressRow[]>([])
+  const [tizhooshanRefreshing, setTizhooshanRefreshing] = useState(false)
+  const [tizhooshanError, setTizhooshanError] = useState<string | null>(null)
+
+  const fetchTizhooshanProgress = useCallback(async () => {
+    const pwd = getStoredTeacherPassword(teacherPassword)
+    if (!pwd) {
+      setTizhooshanError('ورود معلم منقضی شده است؛ برای مشاهده پیشرفت تیزهوشان دوباره وارد شوید.')
+      setTizhooshanRefreshing(false)
+      return
+    }
+    setTizhooshanRefreshing(true)
+    setTizhooshanError(null)
+    try {
+      const { data, error } = await supabase.rpc('teacher_list_tizhooshan', {
+        p_password: pwd,
+      })
+      if (error) {
+        setTizhooshanError('خطا در دریافت اطلاعات تیزهوشان از سرور.')
+        console.warn('StudentMonitoringLeague teacher_list_tizhooshan error:', error)
+      } else if (Array.isArray(data)) {
+        setTizhooshanRows(data as TizhooshanProgressRow[])
+      }
+    } catch (err) {
+      setTizhooshanError('خطا در ارتباط با سرور برای دریافت اطلاعات تیزهوشان.')
+      console.warn('StudentMonitoringLeague teacher_list_tizhooshan exception:', err)
+    } finally {
+      setTizhooshanRefreshing(false)
+    }
+  }, [teacherPassword])
+
+  // Fetch Tizhooshan progress via Supabase RPC on mount & refresh every 20 seconds
+  useEffect(() => {
+    void fetchTizhooshanProgress()
+
+    const intervalId = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void fetchTizhooshanProgress()
+      }
+    }, 20000)
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void fetchTizhooshanProgress()
+      }
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
+
+    return () => {
+      window.clearInterval(intervalId)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+    }
+  }, [fetchTizhooshanProgress])
 
   const realStudents = useMemo(
     () => students.filter((s) => !isTestStudentRecord(s.id, s.full_name)),
     [students]
+  )
+
+  const tizhooshanStudents = useMemo(
+    () => buildTizhooshanStudentList(realStudents, tizhooshanRows),
+    [realStudents, tizhooshanRows]
+  )
+
+  const tizhooshanByStudentId = useMemo(() => {
+    const map = new Map<string, (typeof tizhooshanStudents)[number]>()
+    for (const item of tizhooshanStudents) {
+      map.set(item.studentId, item)
+    }
+    return map
+  }, [tizhooshanStudents])
+
+  const tizhooshanKpis = useMemo(
+    () => computeTizhooshanKpis(tizhooshanStudents),
+    [tizhooshanStudents]
   )
 
   const publishedExams = useMemo(
@@ -402,6 +482,63 @@ export default function StudentMonitoringLeague({
           ========================================================= */}
       {subTab === 'league' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          {/* Real Tizhooshan Summary Strip (Synced every 20s via teacher_list_tizhooshan) */}
+          <div
+            className="mobile-card hard"
+            style={{
+              padding: '12px 14px',
+              borderRadius: 16,
+              background: 'linear-gradient(135deg, #EEF2FF 0%, #F5F3FF 100%)',
+              border: '2px solid #4338CA',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 10,
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, fontWeight: 900, color: '#1E1B4B' }}>
+                <span>🦉</span>
+                <span>خلاصه زنده تمرین تیزهوشان کلاس</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSubTab('tizhooshan')}
+                style={{
+                  background: '#4338CA',
+                  color: '#FFFFFF',
+                  border: 'none',
+                  borderRadius: 8,
+                  padding: '4px 10px',
+                  fontSize: 11.5,
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                }}
+              >
+                مشاهده جزئیات تیزهوشان ←
+              </button>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 8 }}>
+              <div style={{ background: '#FFFFFF', borderRadius: 10, padding: '8px 10px', border: '1px solid #C7D2FE' }}>
+                <div style={{ fontSize: 11, color: '#64748B', fontWeight: 700 }}>مجموع XP</div>
+                <div style={{ fontSize: 15, fontWeight: 900, color: '#4338CA', marginTop: 2 }}>
+                  {toPersianDigits(tizhooshanKpis.totalClassXp)} XP ⚡
+                </div>
+              </div>
+              <div style={{ background: '#FFFFFF', borderRadius: 10, padding: '8px 10px', border: '1px solid #C7D2FE' }}>
+                <div style={{ fontSize: 11, color: '#64748B', fontWeight: 700 }}>دانش‌آموزان در حال تمرین</div>
+                <div style={{ fontSize: 15, fontWeight: 900, color: '#0891B2', marginTop: 2 }}>
+                  {toPersianDigits(tizhooshanKpis.activeCount)} از {toPersianDigits(realStudents.length)} نفر
+                </div>
+              </div>
+              <div style={{ background: '#FFFFFF', borderRadius: 10, padding: '8px 10px', border: '1px solid #C7D2FE' }}>
+                <div style={{ fontSize: 11, color: '#64748B', fontWeight: 700 }}>میانگین گام</div>
+                <div style={{ fontSize: 15, fontWeight: 900, color: '#15803D', marginTop: 2 }}>
+                  {toPersianDigits(tizhooshanKpis.avgStep)} از {toPersianDigits(tizhooshanKpis.totalSteps)} گام
+                </div>
+              </div>
+            </div>
+          </div>
+
           {/* Top 3 Podium (Only when active points exist) */}
           {sortedStudents.length >= 3 && sortedStudents[0].totalPoints > 0 && (
             <div
@@ -619,13 +756,30 @@ export default function StudentMonitoringLeague({
                         )}
                       </div>
 
-                      <div style={{ display: 'flex', gap: 8, fontSize: 11.5, color: '#64748B', marginTop: 3 }}>
+                      <div style={{ display: 'flex', gap: 8, fontSize: 11.5, color: '#64748B', marginTop: 3, flexWrap: 'wrap' }}>
                         <span>تکالیف: <strong>{s.subCount}</strong> از {s.totalHomework} ({s.homeworkRate}٪)</span>
                         <span>•</span>
                         <span>معدل: <strong>{s.avg !== null ? roundScore2(s.avg) : 'ثبت نشده'}</strong></span>
                         <span>•</span>
                         <span>حضور: <strong>{s.attendanceRate}٪</strong></span>
                       </div>
+                      {(() => {
+                        const tz = tizhooshanByStudentId.get(String(s.id))
+                        if (!tz) return null
+                        return (
+                          <div style={{ display: 'flex', gap: 8, fontSize: 11, color: '#4338CA', marginTop: 4, flexWrap: 'wrap', alignItems: 'center' }}>
+                            <span style={{ background: '#EEF2FF', border: '1px solid #C7D2FE', padding: '1px 7px', borderRadius: 999, fontWeight: 800 }}>
+                              🦉 گام {toPersianDigits(tz.currentStep)} از {toPersianDigits(tizhooshanKpis.totalSteps)}
+                            </span>
+                            <span style={{ background: '#EFF6FF', border: '1px solid #BFDBFE', color: '#1D4ED8', padding: '1px 7px', borderRadius: 999, fontWeight: 800 }}>
+                              ⚡ {toPersianDigits(tz.totalXp)} XP
+                            </span>
+                            <span style={{ color: '#64748B', fontWeight: 700 }}>
+                              🕒 آخرین فعالیت: <strong style={{ color: tz.hasStarted ? '#334155' : '#94A3B8' }}>{tz.lastActivityLabel}</strong>
+                            </span>
+                          </div>
+                        )
+                      })()}
                     </div>
                   </div>
 
@@ -1016,7 +1170,14 @@ export default function StudentMonitoringLeague({
           ========================================================= */}
       {subTab === 'tizhooshan' && (
         <div style={{ marginTop: 12 }}>
-          <TeacherDuolingoTracker students={realStudents} />
+          <TeacherDuolingoTracker
+            students={realStudents}
+            teacherPassword={teacherPassword}
+            externalProgressRows={tizhooshanRows}
+            externalRefreshing={tizhooshanRefreshing}
+            externalError={tizhooshanError}
+            onExternalRefresh={() => void fetchTizhooshanProgress()}
+          />
         </div>
       )}
     </div>

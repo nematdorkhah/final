@@ -1,5 +1,13 @@
+import { useMemo } from 'react'
 import { toPersianDigits } from '../utils/persianNumbers'
 import { roundScore2 } from '../utils/persianSemanticGrader'
+
+export interface KpiLoadingState {
+  students?: boolean
+  attendance?: boolean
+  homework?: boolean
+  grades?: boolean
+}
 
 export default function KpiCards({
   students,
@@ -9,6 +17,7 @@ export default function KpiCards({
   grades,
   statsRows,
   weakSubjects,
+  loadingState,
 }: {
   students: any[]
   attendanceToday: Record<string, string>
@@ -17,28 +26,58 @@ export default function KpiCards({
   grades: any[]
   statsRows: any[]
   weakSubjects: Array<{ subject: string; avg: number }>
+  loadingState?: KpiLoadingState
 }) {
-  const total = students.length
-  const presentToday = students.filter((s) => attendanceToday[s.id] === 'present').length
-  const lateToday = students.filter((s) => attendanceToday[s.id] === 'late').length
-  const unmarkedToday = Math.max(0, total - presentToday - lateToday)
+  const { total, presentToday, lateToday, unmarkedToday } = useMemo(() => {
+    const count = students.length
+    const present = students.filter((s) => attendanceToday[s.id] === 'present').length
+    const late = students.filter((s) => attendanceToday[s.id] === 'late').length
+    return {
+      total: count,
+      presentToday: present,
+      lateToday: late,
+      unmarkedToday: Math.max(0, count - present - late),
+    }
+  }, [students, attendanceToday])
 
-  const pendingHomework = homeworkPosts.reduce((sum, p) => {
-    const done = submissions.filter((s) => s.post_id === p.id).length
-    return sum + Math.max(0, total - done)
-  }, 0)
+  const pendingHomework = useMemo(() => {
+    return homeworkPosts.reduce((sum, p) => {
+      const done = submissions.filter((s) => s.post_id === p.id).length
+      return sum + Math.max(0, total - done)
+    }, 0)
+  }, [homeworkPosts, submissions, total])
 
-  const classAvg = grades.length
-    ? grades.reduce((sum: number, g: any) => {
+  const classAvg = useMemo(() => {
+    const gradedItems = grades.filter(
+      (g: any) =>
+        g &&
+        g.status !== 'pending_review' &&
+        g.status !== 'pending_submission' &&
+        g.score !== null &&
+        g.score !== undefined
+    )
+    if (!gradedItems.length) return null
+    return (
+      gradedItems.reduce((sum: number, g: any) => {
         const m = Number(g.max_score)
         const s = Number(g.score) || 0
         return sum + (m === 20 ? s : m > 0 ? (s / m) * 20 : s)
-      }, 0) / grades.length
-    : null
+      }, 0) / gradedItems.length
+    )
+  }, [grades])
 
-  const ranked = [...statsRows].filter((r) => r.avg !== null).sort((a, b) => b.avg - a.avg)
-  const best = ranked[0]
-  const worst = ranked[ranked.length - 1]
+  const { best, worst } = useMemo(() => {
+    const ranked = [...statsRows].filter((r) => r.avg !== null).sort((a, b) => b.avg - a.avg)
+    return {
+      best: ranked[0],
+      worst: ranked[ranked.length - 1],
+    }
+  }, [statsRows])
+
+  const isStudentsLoading = Boolean(loadingState?.students)
+  const isAttendanceLoading = Boolean(loadingState?.attendance)
+  const isHomeworkLoading = Boolean(loadingState?.homework)
+  const isGradesLoading = Boolean(loadingState?.grades)
 
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -53,13 +92,22 @@ export default function KpiCards({
           </span>
         </div>
         <div className="mt-3">
-          <div className="text-2xl font-black text-slate-900 tracking-tight">
-            {toPersianDigits(total)}{' '}
-            <span className="text-xs font-medium text-slate-500">نفر</span>
-          </div>
-          <div className="text-xs font-medium text-slate-500 mt-1">
-            دانش‌آموزان پایه ششم
-          </div>
+          {isStudentsLoading ? (
+            <div className="space-y-2 animate-pulse" aria-label="در حال بارگذاری تعداد دانش‌آموزان">
+              <div className="h-7 w-24 bg-slate-200 rounded-lg" />
+              <div className="h-3.5 w-32 bg-slate-100 rounded-md" />
+            </div>
+          ) : (
+            <>
+              <div className="text-2xl font-black text-slate-900 tracking-tight">
+                {toPersianDigits(total)}{' '}
+                <span className="text-xs font-medium text-slate-500">نفر</span>
+              </div>
+              <div className="text-xs font-medium text-slate-500 mt-1">
+                دانش‌آموزان پایه ششم
+              </div>
+            </>
+          )}
         </div>
       </div>
 
@@ -72,28 +120,41 @@ export default function KpiCards({
           <div className="w-10 h-10 rounded-xl bg-emerald-50 border border-emerald-200 flex items-center justify-center text-xl shrink-0">
             ✅
           </div>
-          <span
-            className={`text-xs font-bold px-2.5 py-1 rounded-full border ${
-              lateToday > 0
-                ? 'bg-amber-50 text-amber-700 border-amber-200'
-                : 'bg-emerald-50 text-emerald-700 border-emerald-200'
-            }`}
-          >
-            {lateToday > 0 ? `${toPersianDigits(lateToday)} تاخیر` : 'بدون تاخیر'}
-          </span>
+          {isAttendanceLoading ? (
+            <div className="h-6 w-20 bg-slate-100 rounded-full animate-pulse" />
+          ) : (
+            <span
+              className={`text-xs font-bold px-2.5 py-1 rounded-full border ${
+                lateToday > 0
+                  ? 'bg-amber-50 text-amber-700 border-amber-200'
+                  : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+              }`}
+            >
+              {lateToday > 0 ? `${toPersianDigits(lateToday)} تاخیر` : 'بدون تاخیر'}
+            </span>
+          )}
         </div>
         <div className="mt-3">
-          <div className="text-2xl font-black text-emerald-700 tracking-tight">
-            {toPersianDigits(presentToday)}{' '}
-            <span className="text-xs font-medium text-slate-500">
-              از {toPersianDigits(total)} حاضر
-            </span>
-          </div>
-          <div className="text-xs font-medium text-slate-500 mt-1">
-            {unmarkedToday > 0
-              ? `${toPersianDigits(unmarkedToday)} نفر نامشخص (کلیک جهت ثبت)`
-              : 'حضور و غیاب امروز کامل است'}
-          </div>
+          {isAttendanceLoading ? (
+            <div className="space-y-2 animate-pulse" aria-label="در حال بارگذاری حضور و غیاب">
+              <div className="h-7 w-28 bg-emerald-100 rounded-lg" />
+              <div className="h-3.5 w-36 bg-slate-100 rounded-md" />
+            </div>
+          ) : (
+            <>
+              <div className="text-2xl font-black text-emerald-700 tracking-tight">
+                {toPersianDigits(presentToday)}{' '}
+                <span className="text-xs font-medium text-slate-500">
+                  از {toPersianDigits(total)} حاضر
+                </span>
+              </div>
+              <div className="text-xs font-medium text-slate-500 mt-1">
+                {unmarkedToday > 0
+                  ? `${toPersianDigits(unmarkedToday)} نفر نامشخص (کلیک جهت ثبت)`
+                  : 'حضور و غیاب امروز کامل است'}
+              </div>
+            </>
+          )}
         </div>
       </div>
 
@@ -108,7 +169,7 @@ export default function KpiCards({
           </div>
           <span
             className={`text-xs font-bold px-2.5 py-1 rounded-full border ${
-              pendingHomework > 0
+              !isHomeworkLoading && pendingHomework > 0
                 ? 'bg-rose-50 text-rose-700 border-rose-200'
                 : 'bg-slate-100 text-slate-600 border-slate-200'
             }`}
@@ -117,13 +178,22 @@ export default function KpiCards({
           </span>
         </div>
         <div className="mt-3">
-          <div className="text-2xl font-black text-rose-700 tracking-tight">
-            {toPersianDigits(pendingHomework)}{' '}
-            <span className="text-xs font-medium text-slate-500">مورد</span>
-          </div>
-          <div className="text-xs font-medium text-slate-500 mt-1">
-            تکلیف بررسی یا تحویل‌نشده
-          </div>
+          {isHomeworkLoading ? (
+            <div className="space-y-2 animate-pulse" aria-label="در حال بارگذاری تکالیف">
+              <div className="h-7 w-24 bg-rose-100 rounded-lg" />
+              <div className="h-3.5 w-36 bg-slate-100 rounded-md" />
+            </div>
+          ) : (
+            <>
+              <div className="text-2xl font-black text-rose-700 tracking-tight">
+                {toPersianDigits(pendingHomework)}{' '}
+                <span className="text-xs font-medium text-slate-500">مورد</span>
+              </div>
+              <div className="text-xs font-medium text-slate-500 mt-1">
+                تکلیف بررسی یا تحویل‌نشده
+              </div>
+            </>
+          )}
         </div>
       </div>
 
@@ -138,18 +208,27 @@ export default function KpiCards({
           </span>
         </div>
         <div className="mt-3">
-          <div className="text-2xl font-black text-indigo-700 tracking-tight">
-            {classAvg !== null ? toPersianDigits(roundScore2(classAvg)) : '—'}{' '}
-            <span className="text-xs font-medium text-slate-500">/ ۲۰</span>
-          </div>
-          <div className="text-xs font-medium text-slate-500 mt-1">
-            میانگین ارزیابی‌های ثبت‌شده
-          </div>
+          {isGradesLoading ? (
+            <div className="space-y-2 animate-pulse" aria-label="در حال بارگذاری معدل کل">
+              <div className="h-7 w-24 bg-indigo-100 rounded-lg" />
+              <div className="h-3.5 w-36 bg-slate-100 rounded-md" />
+            </div>
+          ) : (
+            <>
+              <div className="text-2xl font-black text-indigo-700 tracking-tight">
+                {classAvg !== null ? toPersianDigits(roundScore2(classAvg)) : '—'}{' '}
+                <span className="text-xs font-medium text-slate-500">/ ۲۰</span>
+              </div>
+              <div className="text-xs font-medium text-slate-500 mt-1">
+                میانگین ارزیابی‌های ثبت‌شده
+              </div>
+            </>
+          )}
         </div>
       </div>
 
       {/* Weak Subjects Banner */}
-      {weakSubjects.length > 0 && (
+      {!isGradesLoading && weakSubjects.length > 0 && (
         <div className="col-span-1 sm:col-span-2 lg:col-span-4 bg-amber-50/70 border border-amber-200 rounded-2xl p-4">
           <div className="flex items-center gap-2 mb-2">
             <span className="text-lg">🎯</span>
@@ -171,7 +250,7 @@ export default function KpiCards({
       )}
 
       {/* Best & Needs Attention Banner */}
-      {best && worst && best.id !== worst.id && (
+      {!isGradesLoading && best && worst && best.id !== worst.id && (
         <div className="col-span-1 sm:col-span-2 lg:col-span-4 bg-white border border-slate-200 rounded-2xl p-4 shadow-xs">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="flex items-center gap-2.5">
