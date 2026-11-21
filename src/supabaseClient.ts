@@ -1,9 +1,18 @@
 import { createClient } from '@supabase/supabase-js'
 
-const apiBaseUrl =
+const envApiBaseUrl =
   typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL
     ? String(import.meta.env.VITE_API_BASE_URL).trim().replace(/\/+$/, '')
     : ''
+
+const runtimeWorkerOrigin =
+  typeof window !== 'undefined' &&
+  window.location?.origin &&
+  window.location?.hostname?.endsWith('.workers.dev')
+    ? window.location.origin.replace(/\/+$/, '')
+    : ''
+
+const apiBaseUrl = envApiBaseUrl || runtimeWorkerOrigin
 
 const fallbackSupabaseUrl =
   (typeof import.meta !== 'undefined' && import.meta.env?.VITE_SUPABASE_URL

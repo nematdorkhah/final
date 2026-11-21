@@ -41,42 +41,92 @@ import {
   isBackendStaticOnly,
   fetchFilteredPublishedPosts,
   recordFetchDiagnostic,
+  recordExamRetrievalDiagnostic,
+  withPromiseTimeout,
   sanitizeExamForStudent,
   normalizeQuizRowToExam,
+  ExamRetrievalDiagnostic,
 } from './networkResilience'
 
 const EXAMS_STORAGE_KEY = 'school_classroom_exams_v1'
+const TEACHER_EXAMS_STORAGE_KEY = 'school_classroom_teacher_exams_v1'
 const SUBMISSIONS_STORAGE_KEY = 'school_classroom_exam_subs_v1'
 
 // ----------------------------------------------------------------------
 // EXAM CRUD & PERSISTENCE
 // ----------------------------------------------------------------------
 
-export function getLocalExams(): Exam[] {
+function applyLegacyExamPatch(parsed: any[]): Exam[] {
+  parsed.forEach((e) => {
+    if (e && e.id === 'a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2' && Array.isArray(e.questions)) {
+      const q2 = e.questions.find((q: any) => q && q.id === 'q2')
+      if (q2) {
+        delete q2.awardFullScoreToAll
+        delete q2.allOptionsCorrect
+        delete q2.allAnswersCorrect
+        delete q2.isBonusToAll
+        q2.correctAnswer = 1
+      }
+    }
+  })
+  return parsed
+}
+
+function readExamsFromKey(key: string): Exam[] {
   try {
     if (typeof localStorage === 'undefined') return []
-    const raw = localStorage.getItem(EXAMS_STORAGE_KEY)
+    const raw = localStorage.getItem(key)
     if (!raw) return []
     const parsed = JSON.parse(raw)
-    if (Array.isArray(parsed)) {
-      parsed.forEach((e) => {
-        if (e && e.id === 'a0c2d8d2-3f0b-4af6-95ff-3608cf9e2aa2' && Array.isArray(e.questions)) {
-          const q2 = e.questions.find((q: any) => q && q.id === 'q2')
-          if (q2) {
-            delete q2.awardFullScoreToAll
-            delete q2.allOptionsCorrect
-            delete q2.allAnswersCorrect
-            delete q2.isBonusToAll
-            q2.correctAnswer = 1
-          }
-        }
-      })
-    }
-    return parsed
+    if (!Array.isArray(parsed)) return []
+    return applyLegacyExamPatch(parsed)
   } catch (e) {
-    console.error('Failed to parse local exams', e)
+    console.error(`Failed to parse local exams (${key})`, e)
     return []
   }
+}
+
+export function getLocalStudentExams(): Exam[] {
+  return readExamsFromKey(EXAMS_STORAGE_KEY)
+    .filter((e) => e && e.published !== false)
+    .map(sanitizeExamForStudent)
+}
+
+export function saveLocalStudentExams(exams: Exam[]) {
+  try {
+    if (typeof localStorage === 'undefined') return
+    const safePublished = (Array.isArray(exams) ? exams : [])
+      .filter((e) => e && e.published !== false)
+      .map(sanitizeExamForStudent)
+    localStorage.setItem(EXAMS_STORAGE_KEY, JSON.stringify(safePublished))
+  } catch (e) {
+    console.error('Failed to save local student exams', e)
+  }
+}
+
+export function getLocalTeacherExams(): Exam[] {
+  const teacherCached = readExamsFromKey(TEACHER_EXAMS_STORAGE_KEY)
+  if (teacherCached.length > 0) return teacherCached
+  return readExamsFromKey(EXAMS_STORAGE_KEY)
+}
+
+export function saveLocalTeacherExams(exams: Exam[]) {
+  try {
+    if (typeof localStorage === 'undefined') return
+    const cleanList = Array.isArray(exams) ? exams : []
+    localStorage.setItem(TEACHER_EXAMS_STORAGE_KEY, JSON.stringify(cleanList))
+    // Keep student published cache synced ONLY with published, sanitized exams (never leak drafts or answer keys)
+    saveLocalStudentExams(cleanList)
+  } catch (e) {
+    console.error('Failed to save local teacher exams', e)
+  }
+}
+
+export function getLocalExams(): Exam[] {
+  // Prefer teacher cache if present on teacher browser, otherwise student cache
+  const teacherCached = readExamsFromKey(TEACHER_EXAMS_STORAGE_KEY)
+  if (teacherCached.length > 0) return teacherCached
+  return readExamsFromKey(EXAMS_STORAGE_KEY)
 }
 
 export function saveLocalExams(exams: Exam[]) {
@@ -198,99 +248,299 @@ async function upsertSingleQuizRow(exam: Exam, teacherPass: string): Promise<Exa
   return normalized || exam
 }
 
+export interface LegacyMigrationDeps {
+  storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
+  fetchLegacyRow?: () => Promise<{ data: any; error: any }>
+  upsertQuiz?: (exam: Exam, teacherPass: string) => Promise<Exam>
+  verifyQuizzes?: (teacherPass: string) => Promise<any[]>
+}
+
 /**
- * One-time migration from legacy posts.__SYSTEM_EXAMS__ into public.quizzes.
- * Runs at most once per teacher browser, only if legacy metadata has not yet been migrated into quizzes,
- * then permanently disables itself via localStorage flag.
+ * Verified one-time migration from legacy posts.__SYSTEM_EXAMS__ into public.quizzes.
+ * - Never sets completion flag before every valid legacy exam is confirmed in public.quizzes.
+ * - Safely retries on temporary network/DB errors.
+ * - Prevents duplicate creation by checking existing quiz IDs first.
+ * - Preserves original exam IDs and metadata; never modifies or deletes legacy posts data.
  */
-async function migrateLegacySystemExamsOnce(teacherPass: string, existingRows: any[]): Promise<Exam[] | null> {
+export async function migrateLegacySystemExamsOnce(
+  teacherPass: string,
+  existingRows: any[],
+  deps?: LegacyMigrationDeps
+): Promise<Exam[] | null> {
   try {
     if (!teacherPass) return null
-    if (typeof localStorage !== 'undefined' && localStorage.getItem(LEGACY_SYSTEM_EXAMS_MIGRATED_KEY) === '1') {
+    const storage = deps?.storage ?? (typeof localStorage !== 'undefined' ? localStorage : undefined)
+    if (storage && storage.getItem(LEGACY_SYSTEM_EXAMS_MIGRATED_KEY) === '1') {
       return null
     }
 
-    // If SQL migration already populated the new columns on quizzes, mark complete and never read __SYSTEM_EXAMS__
-    const alreadyHasMigratedMetadata = existingRows.some(
-      (r) =>
-        r &&
-        (r.due_at !== undefined ||
-          r.scheduled_start !== undefined ||
-          r.results_published !== undefined ||
-          r.total_points !== undefined) &&
-        (r.due_at !== null || r.total_points !== null || r.mode === 'assignment' || r.results_published === true)
+    const fetchLegacyRow =
+      deps?.fetchLegacyRow ??
+      (async () =>
+        supabase
+          .from('posts')
+          .select('id, body')
+          .eq('title', '__SYSTEM_EXAMS__')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle())
+
+    const { data: systemRow, error: sysErr } = await withPromiseTimeout(
+      fetchLegacyRow(),
+      8000,
+      'Legacy system exams lookup timed out'
     )
-    if (alreadyHasMigratedMetadata) {
-      if (typeof localStorage !== 'undefined') {
-        localStorage.setItem(LEGACY_SYSTEM_EXAMS_MIGRATED_KEY, '1')
-      }
+
+    // Temporary failure reading legacy posts: do NOT set completion flag so next load retries cleanly
+    if (sysErr) {
+      console.warn('[ExamStore:migrateLegacySystemExamsOnce] Temporary error reading legacy __SYSTEM_EXAMS__:', sysErr)
       return null
     }
 
-    const { data: systemRow, error: sysErr } = await supabase
-      .from('posts')
-      .select('id, body')
-      .eq('title', '__SYSTEM_EXAMS__')
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle()
-
-    if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(LEGACY_SYSTEM_EXAMS_MIGRATED_KEY, '1')
+    if (!systemRow?.body) {
+      if (storage) storage.setItem(LEGACY_SYSTEM_EXAMS_MIGRATED_KEY, '1')
+      return null
     }
 
-    if (sysErr || !systemRow?.body) return null
-    const parsed = typeof systemRow.body === 'string' ? JSON.parse(systemRow.body) : systemRow.body
-    if (!Array.isArray(parsed) || parsed.length === 0) return null
+    let parsed: any
+    try {
+      parsed = typeof systemRow.body === 'string' ? JSON.parse(systemRow.body) : systemRow.body
+    } catch (parseErr) {
+      console.warn('[ExamStore:migrateLegacySystemExamsOnce] Could not parse __SYSTEM_EXAMS__ JSON:', parseErr)
+      return null
+    }
 
-    const migrated: Exam[] = []
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      if (storage) storage.setItem(LEGACY_SYSTEM_EXAMS_MIGRATED_KEY, '1')
+      return null
+    }
+
+    // Deduplicate valid UUID legacy records while preserving original IDs and metadata
+    const validLegacyMap = new Map<string, Exam>()
     for (const rawItem of parsed) {
-      if (!rawItem || !isValidUuid(rawItem.id)) continue
+      if (rawItem && isValidUuid(String(rawItem.id || ''))) {
+        validLegacyMap.set(String(rawItem.id), rawItem as Exam)
+      }
+    }
+    const validLegacyItems = Array.from(validLegacyMap.values())
+
+    if (validLegacyItems.length === 0) {
+      if (storage) storage.setItem(LEGACY_SYSTEM_EXAMS_MIGRATED_KEY, '1')
+      return null
+    }
+
+    const existingIds = new Set(
+      (Array.isArray(existingRows) ? existingRows : [])
+        .filter((r) => r && r.id)
+        .map((r) => String(r.id))
+    )
+
+    const missingLegacyItems = validLegacyItems.filter((item) => !existingIds.has(String(item.id)))
+
+    // If every valid legacy record already exists in public.quizzes, migration is verified complete
+    if (missingLegacyItems.length === 0) {
+      if (storage) storage.setItem(LEGACY_SYSTEM_EXAMS_MIGRATED_KEY, '1')
+      return null
+    }
+
+    const upsertQuiz = deps?.upsertQuiz ?? upsertSingleQuizRow
+    let failedCount = 0
+
+    for (const rawItem of missingLegacyItems) {
       try {
-        const saved = await upsertSingleQuizRow(rawItem as Exam, teacherPass)
-        migrated.push(saved)
+        await withPromiseTimeout(upsertQuiz(rawItem, teacherPass), 8000, 'Legacy quiz upsert timed out')
       } catch (itemErr) {
+        failedCount += 1
         console.warn('[ExamStore:migrateLegacySystemExamsOnce] Failed migrating item:', rawItem.id, itemErr)
       }
     }
 
-    return migrated.length > 0 ? migrated : null
-  } catch {
+    // Do NOT mark migration done if any record failed; next load will safely retry only missing IDs
+    if (failedCount > 0) {
+      return null
+    }
+
+    // Verify all migrated records now exist in public.quizzes before setting completion flag
+    const verifyQuizzes =
+      deps?.verifyQuizzes ??
+      (async (pass: string) => {
+        const { data: verifiedRows, error: verifyErr } = await supabase.rpc('teacher_list_quizzes', {
+          p_password: pass,
+        })
+        if (verifyErr) throw verifyErr
+        return Array.isArray(verifiedRows) ? verifiedRows : []
+      })
+
+    const verifiedRows = await withPromiseTimeout(
+      verifyQuizzes(teacherPass),
+      8000,
+      'Legacy migration verification timed out'
+    )
+    const verifiedIds = new Set(verifiedRows.filter((r) => r && r.id).map((r) => String(r.id)))
+    const allVerifiedPresent = validLegacyItems.every((item) => verifiedIds.has(String(item.id)))
+
+    if (!allVerifiedPresent) {
+      console.warn('[ExamStore:migrateLegacySystemExamsOnce] Verification incomplete; will retry on next load.')
+      return null
+    }
+
+    if (storage) {
+      storage.setItem(LEGACY_SYSTEM_EXAMS_MIGRATED_KEY, '1')
+    }
+
+    return verifiedRows.map((row) => normalizeQuizRowToExam(row)).filter((e): e is Exam => Boolean(e))
+  } catch (err) {
+    console.warn('[ExamStore:migrateLegacySystemExamsOnce] Unexpected error (flag NOT set):', err)
     return null
   }
 }
 
-export async function fetchAllExams(teacherPassword?: string): Promise<Exam[]> {
+export interface ExamsFetchResult {
+  exams: Exam[]
+  remoteOk: boolean
+  source: 'server' | 'cache' | 'error'
+  error: string | null
+  errorCode: string | null
+  fromCacheOnly: boolean
+  retryCount: number
+  durationMs: number
+  diagnostic: ExamRetrievalDiagnostic
+}
+
+function summarizeExamCounts(exams: Exam[]) {
+  const published = exams.filter((e) => e && e.published !== false)
+  const assignmentsCount = published.filter((e) => e.mode === 'assignment').length
+  const publishedExamsCount = published.filter((e) => e.mode !== 'assignment').length
+  return {
+    totalRecords: exams.length,
+    publishedExamsCount,
+    assignmentsCount,
+  }
+}
+
+export async function fetchAllExamsWithDiagnostics(
+  teacherPassword?: string,
+  options: { requestSource?: string; timeoutMs?: number } = {}
+): Promise<ExamsFetchResult> {
   const teacherPass = getStoredTeacherPassword(teacherPassword)
+  const rpcName = teacherPass ? 'teacher_list_quizzes' : 'student_list_published_quizzes'
+  const requestSource = options.requestSource || 'fetchAllExams'
+  const timeoutMs = options.timeoutMs ?? 12000
+  const start = Date.now()
 
-  // Single authoritative source of truth: public.quizzes via secure RPC (1 query)
+  // Single authoritative source of truth: public.quizzes via secure RPC
   try {
-    let rows: any[] = []
+    const outcome = await retryWithBackoff(
+      async () => {
+        if (teacherPass) {
+          const { data: rpcRows, error: rpcErr } = await withPromiseTimeout(
+            supabase.rpc('teacher_list_quizzes', { p_password: teacherPass }),
+            timeoutMs,
+            'زمان دریافت لیست آزمون‌ها از سرور به پایان رسید.'
+          )
+          if (rpcErr) {
+            const err: any = new Error(rpcErr.message || 'teacher_list_quizzes error')
+            err.code = rpcErr.code
+            err.status = (rpcErr as any).status
+            throw err
+          }
+          return Array.isArray(rpcRows) ? rpcRows : []
+        }
 
-    if (teacherPass) {
-      const { data: rpcRows, error: rpcErr } = await supabase.rpc('teacher_list_quizzes', {
-        p_password: teacherPass,
-      })
-      if (rpcErr) throw rpcErr
-      rows = Array.isArray(rpcRows) ? rpcRows : []
-    } else {
-      const { data: rpcRows, error: rpcErr } = await supabase.rpc('student_list_published_quizzes')
-      if (rpcErr) throw rpcErr
-      rows = Array.isArray(rpcRows) ? rpcRows : []
-    }
+        const { data: rpcRows, error: rpcErr } = await withPromiseTimeout(
+          supabase.rpc('student_list_published_quizzes'),
+          timeoutMs,
+          'زمان دریافت آزمون‌های منتشرشده به پایان رسید.'
+        )
+        if (rpcErr) {
+          const err: any = new Error(rpcErr.message || 'student_list_published_quizzes error')
+          err.code = rpcErr.code
+          err.status = (rpcErr as any).status
+          throw err
+        }
+        return Array.isArray(rpcRows) ? rpcRows : []
+      },
+      { maxRetries: 2, baseDelayMs: 350, stage: `exam_fetch_${rpcName}` }
+    )
 
-    // One-time legacy migration check (permanently disabled after first check/migration)
-    const migrated = await migrateLegacySystemExamsOnce(teacherPass, rows)
+    const rows = outcome.data
+    const migrated = teacherPass ? await migrateLegacySystemExamsOnce(teacherPass, rows) : null
     const finalExams = migrated
       ? migrated
       : rows.map((row) => normalizeQuizRowToExam(row)).filter((e): e is Exam => Boolean(e))
 
-    saveLocalExams(finalExams)
-    return finalExams
-  } catch (err) {
-    console.warn('[ExamStore:fetchAllExams] Quizzes query error, falling back to local cache:', err)
-    return getLocalExams()
+    // Confirmed server response: safely update role-appropriate cache (including genuine empty list)
+    if (teacherPass) {
+      saveLocalTeacherExams(finalExams)
+    } else {
+      saveLocalStudentExams(finalExams)
+    }
+
+    const counts = summarizeExamCounts(finalExams)
+    const durationMs = Date.now() - start
+    const diagnostic = recordExamRetrievalDiagnostic({
+      requestSource,
+      rpcName,
+      success: true,
+      errorCode: null,
+      errorMessage: null,
+      ...counts,
+      usedCache: false,
+      retryCount: outcome.retryCount,
+      durationMs,
+    })
+
+    return {
+      exams: finalExams,
+      remoteOk: true,
+      source: 'server',
+      error: null,
+      errorCode: null,
+      fromCacheOnly: false,
+      retryCount: outcome.retryCount,
+      durationMs,
+      diagnostic,
+    }
+  } catch (err: any) {
+    const durationMs = Date.now() - start
+    const errorCode = err?.code ? String(err.code) : err?.status ? String(err.status) : 'NETWORK_ERROR'
+    const errorMsg = String(err?.message || err || 'خطا در دریافت آزمون‌ها از پایگاه داده')
+    // Never overwrite local cache on failure; read role-appropriate cache only as fallback
+    const cached = teacherPass ? getLocalTeacherExams() : getLocalStudentExams()
+    const hasCache = cached.length > 0
+    const counts = summarizeExamCounts(cached)
+
+    const diagnostic = recordExamRetrievalDiagnostic({
+      requestSource,
+      rpcName,
+      success: false,
+      errorCode,
+      errorMessage: errorMsg,
+      ...counts,
+      usedCache: hasCache,
+      retryCount: 2,
+      durationMs,
+    })
+
+    console.warn(`[ExamStore:fetchAllExamsWithDiagnostics] ${rpcName} failed:`, errorCode, errorMsg)
+
+    return {
+      exams: cached,
+      remoteOk: false,
+      source: hasCache ? 'cache' : 'error',
+      error: errorMsg,
+      errorCode,
+      fromCacheOnly: hasCache,
+      retryCount: 2,
+      durationMs,
+      diagnostic,
+    }
   }
+}
+
+export async function fetchAllExams(teacherPassword?: string): Promise<Exam[]> {
+  const result = await fetchAllExamsWithDiagnostics(teacherPassword, { requestSource: 'fetchAllExams' })
+  return result.exams
 }
 
 export function isPromptLike(text: string): boolean {
@@ -326,8 +576,13 @@ export interface PublishedExamsResult {
   exams: Exam[]
   remoteOk: boolean
   remoteSourcesSucceeded: number
+  source: 'server' | 'cache' | 'error'
   error: string | null
+  errorCode: string | null
   fromCacheOnly: boolean
+  retryCount: number
+  durationMs: number
+  diagnostic?: ExamRetrievalDiagnostic
 }
 
 const inFlightPublishedExams = new Map<string, Promise<PublishedExamsResult>>()
@@ -335,54 +590,57 @@ const inFlightPublishedExams = new Map<string, Promise<PublishedExamsResult>>()
 export async function fetchPublishedExamsWithDiagnostics(
   forStudent = true,
   forceFresh = false,
-  options: { skipBackendApi?: boolean } = {}
+  options: { skipBackendApi?: boolean; requestSource?: string; timeoutMs?: number } = {}
 ): Promise<PublishedExamsResult> {
   const dedupeKey = `${forStudent ? '1' : '0'}:${forceFresh ? '1' : '0'}:${options.skipBackendApi ? '1' : '0'}`
-  const existingFlight = inFlightPublishedExams.get(dedupeKey)
-  if (existingFlight) {
-    return existingFlight
+  if (!forceFresh) {
+    const existingFlight = inFlightPublishedExams.get(dedupeKey)
+    if (existingFlight) {
+      return existingFlight
+    }
   }
 
   const runPromise = (async (): Promise<PublishedExamsResult> => {
-    const local = getLocalExams()
+    const local = forStudent ? getLocalStudentExams() : getLocalTeacherExams()
     const start = Date.now()
+    const timeoutMs = options.timeoutMs ?? 12000
+    const requestSource = options.requestSource || (forStudent ? 'student_published_fetch' : 'teacher_published_fetch')
+    const teacherPass = forStudent ? '' : getStoredTeacherPassword()
+    const rpcName = !forStudent && teacherPass ? 'teacher_list_quizzes' : 'student_list_published_quizzes'
 
-    // Single authoritative source of truth: public.quizzes (1 single query)
+    // Single authoritative source of truth: public.quizzes (1 single query with per-attempt timeout & backoff)
     try {
       const outcome = await retryWithBackoff(
         async () => {
-          if (forStudent) {
-            const { data: rpcRows, error: rpcErr } = await supabase.rpc('student_list_published_quizzes')
-            if (rpcErr) {
-              const err: any = new Error(rpcErr.message || 'student_list_published_quizzes error')
-              err.code = rpcErr.code
-              throw err
-            }
-            return Array.isArray(rpcRows) ? rpcRows : []
-          }
-
-          const teacherPass = getStoredTeacherPassword()
-          if (teacherPass) {
-            const { data: rpcRows, error: rpcErr } = await supabase.rpc('teacher_list_quizzes', {
-              p_password: teacherPass,
-            })
+          if (rpcName === 'teacher_list_quizzes' && teacherPass) {
+            const { data: rpcRows, error: rpcErr } = await withPromiseTimeout(
+              supabase.rpc('teacher_list_quizzes', { p_password: teacherPass }),
+              timeoutMs,
+              'زمان دریافت آزمون‌ها از سرور به پایان رسید.'
+            )
             if (rpcErr) {
               const err: any = new Error(rpcErr.message || 'teacher_list_quizzes error')
               err.code = rpcErr.code
+              err.status = (rpcErr as any).status
               throw err
             }
             return Array.isArray(rpcRows) ? rpcRows : []
           }
 
-          const { data: rpcRows, error: rpcErr } = await supabase.rpc('student_list_published_quizzes')
+          const { data: rpcRows, error: rpcErr } = await withPromiseTimeout(
+            supabase.rpc('student_list_published_quizzes'),
+            timeoutMs,
+            'زمان دریافت آزمون‌های منتشرشده از سرور به پایان رسید.'
+          )
           if (rpcErr) {
             const err: any = new Error(rpcErr.message || 'student_list_published_quizzes error')
             err.code = rpcErr.code
+            err.status = (rpcErr as any).status
             throw err
           }
           return Array.isArray(rpcRows) ? rpcRows : []
         },
-        { maxRetries: 2, baseDelayMs: 300, stage: 'supabase_quizzes' }
+        { maxRetries: 2, baseDelayMs: 350, stage: 'supabase_quizzes' }
       )
 
       const normalized = outcome.data
@@ -390,43 +648,99 @@ export async function fetchPublishedExamsWithDiagnostics(
         .filter((e): e is Exam => Boolean(e && e.published !== false))
 
       const finalExams = forStudent ? normalized.map(sanitizeExamForStudent) : normalized
-      saveLocalExams(finalExams)
+
+      // Update only the student cache when forStudent=true so teacher drafts/answer keys on shared browsers are never overwritten
+      if (forStudent) {
+        saveLocalStudentExams(finalExams)
+      } else if (teacherPass) {
+        const allNormalized = outcome.data
+          .map((row: any) => normalizeQuizRowToExam(row))
+          .filter((e): e is Exam => Boolean(e))
+        saveLocalTeacherExams(allNormalized)
+      } else {
+        saveLocalStudentExams(finalExams)
+      }
+
+      const counts = summarizeExamCounts(finalExams)
+      const durationMs = Date.now() - start
+      const diagnostic = recordExamRetrievalDiagnostic({
+        requestSource,
+        rpcName,
+        success: true,
+        errorCode: null,
+        errorMessage: null,
+        ...counts,
+        usedCache: false,
+        retryCount: outcome.retryCount,
+        durationMs,
+      })
 
       return {
         exams: finalExams,
         remoteOk: true,
         remoteSourcesSucceeded: 1,
+        source: 'server',
         error: null,
+        errorCode: null,
         fromCacheOnly: false,
+        retryCount: outcome.retryCount,
+        durationMs,
+        diagnostic,
       }
     } catch (err: any) {
+      const durationMs = Date.now() - start
+      const errorCode = err?.code ? String(err.code) : err?.status ? String(err.status) : 'NETWORK_ERROR'
       const errorMsg = String(err?.message || err || 'خطا در دریافت آزمون‌ها از پایگاه داده')
+      // NEVER overwrite local cache on failure
       const cached = local.filter((e) => e && e.published !== false)
       const finalExams = forStudent ? cached.map(sanitizeExamForStudent) : cached
+      const hasCache = finalExams.length > 0
+      const counts = summarizeExamCounts(finalExams)
 
       recordFetchDiagnostic({
         timestamp: new Date().toISOString(),
         examId: null,
         stage: 'fetch_published_exams_quizzes_failed',
         statusOrError: errorMsg,
-        durationMs: Date.now() - start,
+        durationMs,
         retryCount: 2,
         finalStatus: 'failed',
+      })
+
+      const diagnostic = recordExamRetrievalDiagnostic({
+        requestSource,
+        rpcName,
+        success: false,
+        errorCode,
+        errorMessage: errorMsg,
+        ...counts,
+        usedCache: hasCache,
+        retryCount: 2,
+        durationMs,
       })
 
       return {
         exams: finalExams,
         remoteOk: false,
         remoteSourcesSucceeded: 0,
+        source: hasCache ? 'cache' : 'error',
         error: errorMsg,
-        fromCacheOnly: true,
+        errorCode,
+        fromCacheOnly: hasCache,
+        retryCount: 2,
+        durationMs,
+        diagnostic,
       }
     }
   })().finally(() => {
-    inFlightPublishedExams.delete(dedupeKey)
+    if (inFlightPublishedExams.get(dedupeKey) === runPromise) {
+      inFlightPublishedExams.delete(dedupeKey)
+    }
   })
 
-  inFlightPublishedExams.set(dedupeKey, runPromise)
+  if (!forceFresh) {
+    inFlightPublishedExams.set(dedupeKey, runPromise)
+  }
   return runPromise
 }
 
@@ -557,14 +871,18 @@ export async function saveExam(exam: Exam, teacherPassword?: string): Promise<vo
   const savedExam = await Promise.race([saveWork(), timeoutPromise])
 
   // Update local cache ONLY after single-row quizzes upsert succeeds (never push localStorage list to server)
-  const current = getLocalExams()
+  const current = getLocalTeacherExams()
   const idx = current.findIndex((e) => e.id === savedExam.id)
   if (idx >= 0) {
     current[idx] = savedExam
   } else {
     current.unshift(savedExam)
   }
-  saveLocalExams(current)
+  saveLocalTeacherExams(current)
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('exams-updated', { detail: { examId: savedExam.id, saved: true } }))
+  }
 }
 
 export async function deleteExam(examId: string, teacherPassword?: string): Promise<boolean> {
@@ -585,8 +903,8 @@ export async function deleteExam(examId: string, teacherPassword?: string): Prom
   }
 
   // Clean local cache after remote deletion
-  const current = getLocalExams().filter((e) => e.id !== examId)
-  saveLocalExams(current)
+  const current = getLocalTeacherExams().filter((e) => e.id !== examId)
+  saveLocalTeacherExams(current)
 
   try {
     const currentSubs = getLocalSubmissions().filter((s) => s.examId !== examId)
@@ -809,13 +1127,58 @@ export async function syncExamSubmissionsToSupabase(
   return directSuccess
 }
 
+function isMissingRpcFunctionError(err: any): boolean {
+  if (!err) return false
+  const code = String(err.code || '')
+  const msg = String(err.message || '').toLowerCase()
+  return (
+    code === '42883' ||
+    code === 'PGRST202' ||
+    msg.includes('could not find the function') ||
+    (msg.includes('function public.') && msg.includes('does not exist'))
+  )
+}
+
+function getStoredStudentAccessCode(studentId?: string, explicitAccessCode?: string): string {
+  const cleanExplicit = String(explicitAccessCode || '').trim()
+  if (cleanExplicit) return cleanExplicit
+  const canon = studentId ? resolveCanonicalStudent(studentId) : undefined
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const rawSession = localStorage.getItem('class_auth_session')
+      if (rawSession) {
+        const parsed = JSON.parse(rawSession)
+        const s = parsed?.student
+        const sCode = String(s?.access_code || '').trim()
+        if (sCode) {
+          if (!studentId || isSameStudent(s?.id || sCode, studentId, s?.full_name)) {
+            return sCode
+          }
+        }
+      }
+      const rawLegacy = localStorage.getItem('student')
+      if (rawLegacy) {
+        const parsed = JSON.parse(rawLegacy)
+        const sCode = String(parsed?.access_code || '').trim()
+        if (sCode) {
+          if (!studentId || isSameStudent(parsed?.id || sCode, studentId, parsed?.full_name)) {
+            return sCode
+          }
+        }
+      }
+    }
+  } catch {}
+  return String(canon?.nationalCode || '').trim()
+}
+
 /**
- * Saves a student exam submission directly to Supabase posts table and quiz_submissions table.
+ * Saves a student exam submission directly to Supabase posts table and quiz_submissions via authenticated RPC.
  */
 export async function saveExamSubmissionDirectToSupabase(
   submission: StudentExamSubmission,
   exam: Exam,
-  teacherPassword?: string
+  teacherPassword?: string,
+  studentAccessCode?: string
 ): Promise<boolean> {
   let success = false
   const canonSubStudent = resolveCanonicalStudent(submission.studentId || submission.studentName)
@@ -959,53 +1322,77 @@ export async function saveExamSubmissionDirectToSupabase(
         submitted_at: normalizedSubmission.submittedAt || new Date().toISOString(),
       }
 
-      const { data: existingQs } = await supabase
-        .from('quiz_submissions')
-        .select('id, quiz_id, answers')
-        .eq('student_id', studentUUID)
-        .order('submitted_at', { ascending: false })
-        .limit(20)
-      const matchingQs = (existingQs || []).find((r: any) => (r.quiz_id || r.answers?.quiz_id || r.answers?.exam_id) === exam.id)
-
+      const effectiveAccessCode = getStoredStudentAccessCode(studentUUID, studentAccessCode)
+      const submittedAtIso = normalizedSubmission.submittedAt || new Date().toISOString()
       let qsErr: any = null
-      if (matchingQs?.id) {
-        const updRes = await supabase
-          .from('quiz_submissions')
-          .update({
-            answers: { ...(matchingQs.answers || {}), ...submissionAnswers },
-            score: earned,
-            submitted_at: normalizedSubmission.submittedAt || new Date().toISOString(),
-          })
-          .eq('id', matchingQs.id)
-        qsErr = updRes.error
-      } else {
-        // PRIMARY DIRECT CALL: supabase.from('quiz_submissions').insert(...)
-        const insRes = await supabase.from('quiz_submissions').insert({
-          student_id: studentUUID,
-          quiz_id: isExamUuid ? exam.id : null,
-          answers: submissionAnswers,
-          score: earned,
-          submitted_at: normalizedSubmission.submittedAt || new Date().toISOString(),
-        })
-        qsErr = insRes.error
+      let handledViaRpc = false
 
-        // If foreign key constraint failed on quiz_id (e.g. quiz was created outside quizzes table),
-        // retry with quiz_id: null to guarantee answers are safely stored in quiz_submissions table!
-        if (qsErr && isExamUuid && qsErr.code === '23503') {
-          console.warn('[ExamStore:saveExamSubmissionDirectToSupabase] FK on quiz_id, retrying with quiz_id: null...')
-          const fallbackRes = await supabase.from('quiz_submissions').insert({
+      // 3a. Primary Secure Path: Authenticated student_upsert_quiz_submission RPC (works with RLS enabled)
+      if (effectiveAccessCode) {
+        const rpcRes = await supabase.rpc('student_upsert_quiz_submission', {
+          p_student_id: studentUUID,
+          p_access_code: effectiveAccessCode,
+          p_quiz_id: isExamUuid ? exam.id : null,
+          p_answers: submissionAnswers,
+          p_score: earned,
+          p_submitted_at: submittedAtIso,
+        })
+        if (!rpcRes.error) {
+          handledViaRpc = true
+          qsErr = null
+        } else if (!isMissingRpcFunctionError(rpcRes.error)) {
+          // Do not bypass explicit auth/validation errors from the secure RPC
+          handledViaRpc = true
+          qsErr = rpcRes.error
+        }
+      }
+
+      // 3b. Pre-migration fallback ONLY if Phase 1 RPC has not been applied in Supabase yet
+      if (!handledViaRpc) {
+        const { data: existingQs } = await supabase
+          .from('quiz_submissions')
+          .select('id, quiz_id, answers')
+          .eq('student_id', studentUUID)
+          .order('submitted_at', { ascending: false })
+          .limit(20)
+        const matchingQs = (existingQs || []).find((r: any) => (r.quiz_id || r.answers?.quiz_id || r.answers?.exam_id) === exam.id)
+
+        if (matchingQs?.id) {
+          const updRes = await supabase
+            .from('quiz_submissions')
+            .update({
+              answers: { ...(matchingQs.answers || {}), ...submissionAnswers },
+              score: earned,
+              submitted_at: submittedAtIso,
+            })
+            .eq('id', matchingQs.id)
+          qsErr = updRes.error
+        } else {
+          const insRes = await supabase.from('quiz_submissions').insert({
             student_id: studentUUID,
-            quiz_id: null,
+            quiz_id: isExamUuid ? exam.id : null,
             answers: submissionAnswers,
             score: earned,
-            submitted_at: normalizedSubmission.submittedAt || new Date().toISOString(),
+            submitted_at: submittedAtIso,
           })
-          qsErr = fallbackRes.error
+          qsErr = insRes.error
+
+          if (qsErr && isExamUuid && qsErr.code === '23503') {
+            console.warn('[ExamStore:saveExamSubmissionDirectToSupabase] FK on quiz_id, retrying with quiz_id: null...')
+            const fallbackRes = await supabase.from('quiz_submissions').insert({
+              student_id: studentUUID,
+              quiz_id: null,
+              answers: submissionAnswers,
+              score: earned,
+              submitted_at: submittedAtIso,
+            })
+            qsErr = fallbackRes.error
+          }
         }
       }
 
       if (!qsErr) {
-        console.log('[ExamStore:saveExamSubmissionDirectToSupabase] Successfully synced quiz_submissions table!')
+        console.log('[ExamStore:saveExamSubmissionDirectToSupabase] Successfully synced quiz_submissions!')
         success = true
       } else {
         console.warn('[ExamStore:saveExamSubmissionDirectToSupabase] quiz_submissions save warning:', qsErr)
@@ -1399,7 +1786,8 @@ async function syncIndividualExamSubPost(
  */
 async function syncQuizSubmissionScoreToSupabase(
   submission: StudentExamSubmission,
-  exam: Exam
+  exam: Exam,
+  teacherPassword?: string
 ): Promise<{ ok: boolean; error?: string }> {
   try {
     const canon = resolveCanonicalStudent(submission.studentId || submission.studentName)
@@ -1408,21 +1796,9 @@ async function syncQuizSubmissionScoreToSupabase(
 
     const eff = getSubmissionEffectiveScore(exam, submission)
     const isApproved = isSubmissionApprovedByTeacher(submission) && eff.isApproved
-    const { data: rows, error: selErr } = await supabase
-      .from('quiz_submissions')
-      .select('id, quiz_id, answers')
-      .eq('student_id', studentUuid)
-      .order('submitted_at', { ascending: false })
-      .limit(20)
-
-    if (selErr) return { ok: false, error: selErr.message }
-
-    const matching = (rows || []).filter((r: any) => (r.quiz_id || r.answers?.quiz_id || r.answers?.exam_id) === exam.id)
-    if (matching.length === 0) return { ok: true }
-
-    const target = matching[0]
-    const updatedAnswers = {
-      ...(target.answers || submission.answers || {}),
+    const effectiveTeacherPass = getStoredTeacherPassword(teacherPassword)
+    const gradingAnswersPatch = {
+      ...(submission.answers || {}),
       exam_id: exam.id,
       quiz_id: exam.id,
       student_name: canon?.fullName || submission.studentName,
@@ -1437,6 +1813,42 @@ async function syncQuizSubmissionScoreToSupabase(
       approved_at: submission.teacherGrading?.approvedAt,
       questionScores: eff.questionScores,
       teacherGrading: submission.teacherGrading,
+    }
+
+    // 1. Primary Secure Path: Authenticated teacher_upsert_quiz_submission RPC (works with RLS enabled)
+    if (effectiveTeacherPass) {
+      const rpcRes = await supabase.rpc('teacher_upsert_quiz_submission', {
+        p_password: effectiveTeacherPass,
+        p_quiz_id: isValidUuid(exam.id) ? exam.id : null,
+        p_student_id: studentUuid,
+        p_answers: gradingAnswersPatch,
+        p_score: isApproved ? eff.scaledScore20 : 0,
+      })
+      if (!rpcRes.error) {
+        return { ok: true }
+      }
+      if (!isMissingRpcFunctionError(rpcRes.error)) {
+        return { ok: false, error: rpcRes.error.message }
+      }
+    }
+
+    // 2. Pre-migration fallback ONLY if Phase 1 RPC has not been applied in Supabase yet
+    const { data: rows, error: selErr } = await supabase
+      .from('quiz_submissions')
+      .select('id, quiz_id, answers')
+      .eq('student_id', studentUuid)
+      .order('submitted_at', { ascending: false })
+      .limit(20)
+
+    if (selErr) return { ok: false, error: selErr.message }
+
+    const matching = (rows || []).filter((r: any) => (r.quiz_id || r.answers?.quiz_id || r.answers?.exam_id) === exam.id)
+    if (matching.length === 0) return { ok: true }
+
+    const target = matching[0]
+    const updatedAnswers = {
+      ...(target.answers || {}),
+      ...gradingAnswersPatch,
     }
 
     const { error: updErr } = await supabase
@@ -1590,7 +2002,7 @@ export async function syncExamApprovedGradesToGradebook(
   if (!exam) {
     throw new Error(`آزمون با شناسه ${examId} یافت نشد.`)
   }
-  const subs = await fetchExamSubmissions(examId, undefined, true)
+  const subs = await fetchExamSubmissions(examId, undefined, true, teacherPass)
   const approvedAndReleased = subs.filter(
     (s) => isSubmissionApprovedByTeacher(s) && isExamResultsReleased(exam, s)
   )
@@ -1646,7 +2058,7 @@ export async function releaseExamResultsForAll(
   // Hydrate all submissions for this exam before updating
   let examSubsFresh: StudentExamSubmission[] = []
   try {
-    examSubsFresh = await fetchExamSubmissions(examId, undefined, true)
+    examSubsFresh = await fetchExamSubmissions(examId, undefined, true, teacherPass)
   } catch {
     examSubsFresh = getLocalSubmissions().filter((s) => s.examId === examId)
   }
@@ -1738,7 +2150,7 @@ export async function releaseExamResultsForAll(
     await Promise.allSettled(
       updatedExamSubsOnly.flatMap((s) => [
         syncIndividualExamSubPost(s, updatedExam),
-        syncQuizSubmissionScoreToSupabase(s, updatedExam),
+        syncQuizSubmissionScoreToSupabase(s, updatedExam, teacherPass),
       ])
     )
   }
@@ -1976,15 +2388,98 @@ const inFlightSubsPromises = new Map<string, Promise<StudentExamSubmission[]>>()
 const recentSubsFetchAt = new Map<string, number>()
 const SUBS_DEDUPE_TTL_MS = 4000
 
+function mapQuizSubmissionRowToSubmission(
+  qs: any,
+  studentMap: Map<string, string>,
+  fallbackExamId?: string
+): StudentExamSubmission | null {
+  if (!qs || typeof qs !== 'object') return null
+  const answersObj = qs.answers || {}
+  const targetExamId = qs.quiz_id || answersObj.quiz_id || answersObj.exam_id || fallbackExamId
+  if (!targetExamId) return null
+
+  const rawStudentName = answersObj.student_name || studentMap.get(String(qs.student_id || ''))
+  const canonRowStudent = resolveCanonicalStudent(
+    qs.student_id || answersObj.student_national_code || rawStudentName
+  )
+  const targetStudentId = canonRowStudent?.id || qs.student_id || answersObj.student_national_code
+  const targetStudentName = canonRowStudent?.fullName || rawStudentName || 'دانش‌آموز'
+  if (!targetStudentId) return null
+
+  const subId = `sub_${targetExamId}_${targetStudentId}`
+  const isApproved = Boolean(
+    answersObj.teacher_approved ||
+      answersObj.approved ||
+      answersObj.is_released ||
+      answersObj.isReleased
+  )
+  const rawScore = Number(
+    answersObj.raw_score ??
+      answersObj.totalScore ??
+      answersObj.earnedPoints ??
+      answersObj.teacherGrading?.totalScore
+  )
+  const scaledScore = Number(
+    qs.score ??
+      answersObj.score ??
+      answersObj.scaledScore20 ??
+      answersObj.teacherGrading?.scaledScore20
+  )
+  const existingTeacherGrading = answersObj.teacherGrading || {}
+  const qScores = answersObj.questionScores || existingTeacherGrading.questionScores
+  const qFeedbacks = answersObj.questionFeedbacks || existingTeacherGrading.questionFeedbacks
+  const teacherNotes = answersObj.teacherNotes || existingTeacherGrading.teacherNotes
+
+  let calculatedRaw: number | undefined = !isNaN(rawScore) && rawScore > 0 ? rawScore : undefined
+  if (qScores && typeof qScores === 'object' && Object.keys(qScores).length > 0) {
+    const sum = Object.values(qScores).reduce((acc: number, v: any) => acc + (Number(v) || 0), 0)
+    if (sum > 0) calculatedRaw = roundScore2(sum)
+  }
+  const validScaled = !isNaN(scaledScore) && scaledScore > 0 ? roundScore2(scaledScore) : undefined
+
+  return {
+    id: subId,
+    examId: String(targetExamId),
+    studentId: String(targetStudentId),
+    studentName: targetStudentName,
+    submittedAt: qs.submitted_at,
+    answers: answersObj,
+    syncStatus: 'synced',
+    isReleased: isApproved,
+    is_released: isApproved,
+    status: isApproved ? 'graded' : 'pending_approval',
+    teacherGrading: {
+      ...existingTeacherGrading,
+      totalScore: calculatedRaw,
+      scaledScore20: validScaled,
+      questionScores: qScores,
+      questionFeedbacks: qFeedbacks,
+      teacherNotes,
+      approved: isApproved,
+      approvedAt: answersObj.approved_at || existingTeacherGrading.approvedAt,
+    },
+  }
+}
+
 export async function fetchExamSubmissions(
   examId?: string,
   studentId?: string,
-  force = false
+  force = false,
+  teacherPassword?: string,
+  studentAccessCode?: string
 ): Promise<StudentExamSubmission[]> {
-  const dedupeKey = `${examId || '*'}::${studentId || '*'}`
+  const isTeacherQuery = !studentId
+  const effectiveTeacherPass = isTeacherQuery ? getStoredTeacherPassword(teacherPassword) : ''
+  const dedupeKey = `${examId || '*'}::${studentId || (effectiveTeacherPass ? 'teacher' : 'unauth')}`
   const existingPromise = inFlightSubsPromises.get(dedupeKey)
   if (existingPromise) {
     return existingPromise
+  }
+
+  // Never expose all student submissions to unauthenticated callers
+  if (isTeacherQuery && !effectiveTeacherPass) {
+    console.warn('[ExamStore:fetchExamSubmissions] Blocked unauthenticated teacher submissions query.')
+    return []
   }
 
   const lastAt = recentSubsFetchAt.get(dedupeKey) || 0
@@ -1996,38 +2491,16 @@ export async function fetchExamSubmissions(
   }
 
   const runPromise = (async () => {
-    const local = getLocalSubmissions()
     const fetchedList: StudentExamSubmission[] = []
 
-    // 0. Primary Fast Source: Authoritative backend API (/api/exams/submissions)
-    if (!isBackendStaticOnly()) {
-      try {
-        const teacherPass = typeof window !== 'undefined' ? sessionStorage.getItem('teacherPassword') || '' : ''
-        const params = new URLSearchParams()
-        if (examId) params.append('examId', examId)
-        if (studentId) params.append('studentId', studentId)
-        const json = await fetchApiJson<any>(
-          `/api/exams/submissions?${params.toString()}`,
-          { headers: teacherPass ? { 'x-teacher-password': teacherPass } : {} },
-          5500
-        )
-        if (json && json.success && Array.isArray(json.submissions)) {
-          json.submissions.forEach((s: StudentExamSubmission) => {
-            if (s && s.examId && s.studentId && (!examId || s.examId === examId)) {
-              fetchedList.push(s)
-            }
-          })
-        }
-      } catch (apiErr) {
-        console.warn('[ExamStore:fetchExamSubmissions] Backend API query warning:', apiErr)
-      }
-    }
-
-    // Build targeted Supabase queries in parallel
+    // Build targeted Supabase queries in parallel (never call legacy Express-only /api/exams/submissions)
     const canonStudent = studentId ? resolveCanonicalStudent(studentId) : undefined
     const targetStudentUuid = canonStudent?.id && isValidUuid(canonStudent.id)
       ? canonStudent.id
       : (studentId && isValidUuid(studentId) ? studentId : null)
+    const effectiveStudentAccessCode = !isTeacherQuery
+      ? getStoredStudentAccessCode(targetStudentUuid || studentId, studentAccessCode)
+      : ''
 
     const individualPattern = examId && targetStudentUuid
       ? `__EXAM_SUB__:${examId}:${targetStudentUuid}%`
@@ -2041,16 +2514,40 @@ export async function fetchExamSubmissions(
       ? `__EXAM_SUB__:%:${studentId}%`
       : '__EXAM_SUB__:%'
 
-    const qSubsQuery = targetStudentUuid
-      ? supabase
-          .from('quiz_submissions')
-          .select('id, quiz_id, student_id, score, submitted_at, answers')
-          .eq('student_id', targetStudentUuid)
-          .order('submitted_at', { ascending: false })
-      : supabase
-          .from('quiz_submissions')
-          .select('id, quiz_id, student_id, score, submitted_at, answers')
-          .order('submitted_at', { ascending: false })
+    // Primary authoritative quiz_submissions source:
+    // - Teacher mode: server-verified RPC `teacher_list_quiz_submissions(p_password)`
+    // - Student mode: server-verified RPC `student_list_my_quiz_submissions(p_student_id, p_access_code, p_exam_id)`
+    //   with safe pre-migration fallback ONLY if the RPC is not yet installed (42883 / PGRST202).
+    const qSubsQuery: Promise<{ data: any; error: any }> = isTeacherQuery
+      ? Promise.resolve(supabase.rpc('teacher_list_quiz_submissions', { p_password: effectiveTeacherPass }))
+      : targetStudentUuid
+      ? (async () => {
+          if (effectiveStudentAccessCode) {
+            const rpcRes = await supabase.rpc('student_list_my_quiz_submissions', {
+              p_student_id: targetStudentUuid,
+              p_access_code: effectiveStudentAccessCode,
+              p_exam_id: examId && isValidUuid(examId) ? examId : null,
+            })
+            if (!rpcRes.error || !isMissingRpcFunctionError(rpcRes.error)) {
+              return rpcRes
+            }
+          }
+          // Pre-migration fallback ONLY if Phase 1 RPC has not been applied in Supabase yet
+          const fallbackQuery = examId
+            ? supabase
+                .from('quiz_submissions')
+                .select('id, quiz_id, student_id, score, submitted_at, answers')
+                .eq('student_id', targetStudentUuid)
+                .eq('quiz_id', examId)
+                .order('submitted_at', { ascending: false })
+            : supabase
+                .from('quiz_submissions')
+                .select('id, quiz_id, student_id, score, submitted_at, answers')
+                .eq('student_id', targetStudentUuid)
+                .order('submitted_at', { ascending: false })
+          return fallbackQuery
+        })()
+      : Promise.resolve({ data: [], error: null })
 
     const indQuery = supabase
       .from('posts')
@@ -2072,7 +2569,11 @@ export async function fetchExamSubmissions(
       .limit(1)
       .maybeSingle()
 
-    const [indRes, altIndRes, qSubsRes, sysRes] = await Promise.allSettled([
+    const studentRosterPromise = isTeacherQuery
+      ? supabase.rpc('list_students_public')
+      : Promise.resolve({ data: [], error: null })
+
+    const [indRes, altIndRes, qSubsRes, sysRes, rosterRes] = await Promise.allSettled([
       indQuery,
       altNationalPattern
         ? supabase
@@ -2084,7 +2585,27 @@ export async function fetchExamSubmissions(
         : Promise.resolve({ data: [], error: null }),
       qSubsQuery,
       sysSubsQuery,
+      studentRosterPromise,
     ])
+
+    // Enforce server-side teacher authentication: if RPC explicitly rejected credentials, fail closed
+    if (isTeacherQuery && qSubsRes.status === 'fulfilled' && qSubsRes.value.error) {
+      const rpcErr: any = qSubsRes.value.error
+      const errMsg = String(rpcErr?.message || '').toLowerCase()
+      const errCode = String(rpcErr?.code || '')
+      if (
+        errCode === '42501' ||
+        errMsg.includes('unauthorized') ||
+        errMsg.includes('invalid password') ||
+        errMsg.includes('forbidden')
+      ) {
+        const authErr: any = new Error(rpcErr?.message || 'Unauthorized teacher')
+        authErr.code = errCode || '42501'
+        authErr.status = 401
+        throw authErr
+      }
+      console.warn('[ExamStore:fetchExamSubmissions] teacher_list_quiz_submissions warning:', rpcErr)
+    }
 
     const pushValidatedIndPost = (row: any) => {
       if (!row?.body) return
@@ -2096,6 +2617,7 @@ export async function fetchExamSubmissions(
         // Reject cross-exam corrupted posts where title prefix examId disagrees with body.examId
         if (titleExamId && parsed.examId !== titleExamId) return
         if (examId && parsed.examId !== examId) return
+        if (studentId && !isSameStudent(parsed.studentId, studentId, parsed.studentName)) return
         fetchedList.push(parsed)
       } catch {}
     }
@@ -2104,97 +2626,30 @@ export async function fetchExamSubmissions(
       altIndRes.value.data.forEach(pushValidatedIndPost)
     }
 
-    // 2. Individual submissions __EXAM_SUB__:%
+    // 1. Individual submissions __EXAM_SUB__:%
     if (indRes.status === 'fulfilled' && !indRes.value.error && Array.isArray(indRes.value.data)) {
       indRes.value.data.forEach(pushValidatedIndPost)
     }
 
-    // 3. Primary quiz_submissions table
+    // 2. Primary authoritative quiz_submissions rows
     if (qSubsRes.status === 'fulfilled' && !qSubsRes.value.error && Array.isArray(qSubsRes.value.data) && qSubsRes.value.data.length > 0) {
-      const qSubs = qSubsRes.value.data
-      let studentMap = new Map<string, string>()
-      try {
-        const { data: pubList } = await supabase.rpc('list_students_public')
-        if (Array.isArray(pubList)) {
-          pubList.forEach((st: any) => {
-            if (st.id && st.full_name) studentMap.set(st.id, st.full_name)
-          })
-        }
-      } catch {}
+      const studentMap = new Map<string, string>()
+      if (rosterRes.status === 'fulfilled' && !rosterRes.value.error && Array.isArray(rosterRes.value.data)) {
+        rosterRes.value.data.forEach((st: any) => {
+          if (st?.id && st?.full_name) studentMap.set(String(st.id), String(st.full_name))
+        })
+      }
 
-      qSubs.forEach((qs: any) => {
-        const answersObj = qs.answers || {}
-        const targetExamId = qs.quiz_id || answersObj.quiz_id || answersObj.exam_id || examId
-        if (!targetExamId) return
-        if (examId && targetExamId !== examId) return
-
-        const rawStudentName = answersObj.student_name || studentMap.get(qs.student_id)
-        const canonRowStudent = resolveCanonicalStudent(qs.student_id || answersObj.student_national_code || rawStudentName)
-        const targetStudentId = canonRowStudent?.id || qs.student_id || answersObj.student_national_code
-        const targetStudentName =
-          canonRowStudent?.fullName ||
-          rawStudentName ||
-          'دانش‌آموز'
-
-        if (targetExamId && targetStudentId) {
-          const subId = `sub_${targetExamId}_${targetStudentId}`
-          const isApproved = Boolean(
-            answersObj.teacher_approved ||
-              answersObj.approved ||
-              answersObj.is_released ||
-              answersObj.isReleased
-          )
-          const rawScore = Number(
-            answersObj.raw_score ??
-              answersObj.totalScore ??
-              answersObj.earnedPoints ??
-              answersObj.teacherGrading?.totalScore
-          )
-          const scaledScore = Number(
-            qs.score ??
-              answersObj.score ??
-              answersObj.scaledScore20 ??
-              answersObj.teacherGrading?.scaledScore20
-          )
-          const existingTeacherGrading = answersObj.teacherGrading || {}
-          const qScores = answersObj.questionScores || existingTeacherGrading.questionScores
-          const qFeedbacks = answersObj.questionFeedbacks || existingTeacherGrading.questionFeedbacks
-          const teacherNotes = answersObj.teacherNotes || existingTeacherGrading.teacherNotes
-
-          let calculatedRaw: number | undefined = !isNaN(rawScore) && rawScore > 0 ? rawScore : undefined
-          if (qScores && typeof qScores === 'object' && Object.keys(qScores).length > 0) {
-            const sum = Object.values(qScores).reduce((acc: number, v: any) => acc + (Number(v) || 0), 0)
-            if (sum > 0) calculatedRaw = roundScore2(sum)
-          }
-          const validScaled = !isNaN(scaledScore) && scaledScore > 0 ? roundScore2(scaledScore) : undefined
-
-          fetchedList.push({
-            id: subId,
-            examId: targetExamId,
-            studentId: String(targetStudentId),
-            studentName: targetStudentName,
-            submittedAt: qs.submitted_at,
-            answers: answersObj,
-            syncStatus: 'synced',
-            isReleased: isApproved,
-            is_released: isApproved,
-            status: isApproved ? 'graded' : 'pending_approval',
-            teacherGrading: {
-              ...existingTeacherGrading,
-              totalScore: calculatedRaw,
-              scaledScore20: validScaled,
-              questionScores: qScores,
-              questionFeedbacks: qFeedbacks,
-              teacherNotes: teacherNotes,
-              approved: isApproved,
-              approvedAt: answersObj.approved_at || existingTeacherGrading.approvedAt,
-            },
-          })
-        }
+      qSubsRes.value.data.forEach((qs: any) => {
+        const mapped = mapQuizSubmissionRowToSubmission(qs, studentMap, examId)
+        if (!mapped) return
+        if (examId && mapped.examId !== examId) return
+        if (studentId && !isSameStudent(mapped.studentId, studentId, mapped.studentName)) return
+        fetchedList.push(mapped)
       })
     }
 
-    // 4. Authoritative __SYSTEM_EXAM_SUBMISSIONS__ snapshot (always checked in parallel so newer teacher approvals/regrades reach students immediately)
+    // 3. Authoritative __SYSTEM_EXAM_SUBMISSIONS__ snapshot (for legacy teacher approvals/regrades)
     if (sysRes.status === 'fulfilled' && !sysRes.value.error && sysRes.value.data?.body) {
       try {
         const parsed = typeof sysRes.value.data.body === 'string'
@@ -2248,12 +2703,16 @@ export function getStudentExamSubmission(examId: string, studentId: string): Stu
  * Preview regrading previous exam submissions using the corrected semantic algorithm.
  * Compares stored scores vs new calculated scores per student and question without mutating state.
  */
-export async function previewRegradeExamSubmissions(examId: string): Promise<RegradePreviewResult> {
-  const exams = await fetchAllExams()
+export async function previewRegradeExamSubmissions(
+  examId: string,
+  teacherPassword?: string
+): Promise<RegradePreviewResult> {
+  const teacherPass = getStoredTeacherPassword(teacherPassword)
+  const exams = await fetchAllExams(teacherPass)
   const exam = exams.find((e) => e.id === examId)
   if (!exam) throw new Error(`آزمون با شناسه ${examId} یافت نشد.`)
 
-  const submissions = await fetchExamSubmissions(examId)
+  const submissions = await fetchExamSubmissions(examId, undefined, true, teacherPass)
   const items: RegradeDiffItem[] = []
   let submissionsWithChanges = 0
   let approvedCount = 0
@@ -2351,7 +2810,7 @@ export async function applyRegradeExamSubmissions(params: {
   const exam = exams.find((e) => e.id === examId)
   if (!exam) throw new Error(`آزمون با شناسه ${examId} یافت نشد.`)
 
-  const submissions = await fetchExamSubmissions(examId, undefined, true)
+  const submissions = await fetchExamSubmissions(examId, undefined, true, teacherPassword)
   const allLocal = mergeSubmissionsDeduplicated(getLocalSubmissions(), submissions)
   let updatedCount = 0
   const nowIso = new Date().toISOString()
@@ -2465,7 +2924,7 @@ export async function applyRegradeExamSubmissions(params: {
     await Promise.allSettled(
       syncedApprovedSubs.flatMap((s) => [
         syncIndividualExamSubPost(s, exam),
-        syncQuizSubmissionScoreToSupabase(s, exam),
+        syncQuizSubmissionScoreToSupabase(s, exam, teacherPass),
       ])
     )
     gradeSyncSummary = await syncApprovedSubmissionsBatchToGradebook({
@@ -2999,8 +3458,9 @@ export function submitStudentExamOptimistic(params: {
   studentId: string
   studentName: string
   answers: Record<string, any>
+  studentAccessCode?: string
 }): StudentExamSubmission {
-  const { exam, studentId, studentName, answers } = params
+  const { exam, studentId, studentName, answers, studentAccessCode } = params
 
   // 1. Instant client-side deterministic evaluation (< 5ms)
   // Check if exam questions have correct answers available (e.g. offline/teacher mode).
@@ -3127,7 +3587,7 @@ export function submitStudentExamOptimistic(params: {
 
   // 5. Fire off non-blocking background synchronization (Zero wait for the user!)
   setTimeout(() => {
-    runBackgroundExamSync(optimisticSubmission, exam).catch((e) => {
+    runBackgroundExamSync(optimisticSubmission, exam, studentAccessCode).catch((e) => {
       console.warn('[Background Sync] Non-blocking worker warning:', e)
     })
   }, 20)
@@ -3144,6 +3604,7 @@ export async function submitStudentExam(params: {
   studentId: string
   studentName: string
   answers: Record<string, any>
+  studentAccessCode?: string
 }): Promise<StudentExamSubmission> {
   return submitStudentExamOptimistic(params)
 }
@@ -3154,11 +3615,12 @@ export async function submitStudentExam(params: {
  */
 export async function runBackgroundExamSync(
   submission: StudentExamSubmission,
-  exam: Exam
+  exam: Exam,
+  studentAccessCode?: string
 ): Promise<void> {
   try {
-    // A. Direct Supabase Persistence: quiz_submissions table + posts table (no backend server required)
-    const syncedOk = await saveExamSubmissionDirectToSupabase(submission, exam)
+    // A. Direct Supabase Persistence: authenticated quiz_submissions RPC + posts table
+    const syncedOk = await saveExamSubmissionDirectToSupabase(submission, exam, undefined, studentAccessCode)
     if (!syncedOk) {
       throw new Error('Supabase direct persistence returned false')
     }
@@ -3229,7 +3691,7 @@ export async function approveExamSubmission(params: {
   )
   if (!sub) {
     try {
-      const remote = await fetchExamSubmissions(exam.id, undefined, true)
+      const remote = await fetchExamSubmissions(exam.id, undefined, true, teacherPass)
       all = mergeSubmissionsDeduplicated(all, remote)
       sub = all.find(
         (s) =>
@@ -3340,7 +3802,7 @@ export async function approveExamSubmission(params: {
     await Promise.allSettled([
       syncExamSubmissionsToSupabase([sub], teacherPass, { preserveExplicitUpdates: true }),
       syncIndividualExamSubPost(sub, exam),
-      syncQuizSubmissionScoreToSupabase(sub, exam),
+      syncQuizSubmissionScoreToSupabase(sub, exam, teacherPass),
     ])
   } catch (err) {
     console.warn('[approveExamSubmission] Failed to sync approval to Supabase:', err)

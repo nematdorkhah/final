@@ -100,8 +100,16 @@ export default function NewPostForm({
       if (error) throw error
 
       // Instant Realtime Broadcast (<50ms) to all connected student devices
-      const finalPost = createdPost || {
-        id: String(Date.now()),
+      const rawCreated = Array.isArray(createdPost) ? createdPost[0] : createdPost
+      const resolvedPostId =
+        typeof rawCreated === 'string'
+          ? rawCreated
+          : rawCreated && typeof rawCreated === 'object' && rawCreated.id
+          ? String(rawCreated.id)
+          : String(Date.now())
+
+      const finalPost = {
+        id: resolvedPostId,
         type: postType,
         title: fullTitle,
         body: body.trim(),
@@ -109,6 +117,7 @@ export default function NewPostForm({
         publish_at: publishDate.toISOString(),
         attachment_path: attachmentPath,
         created_at: new Date().toISOString(),
+        ...(rawCreated && typeof rawCreated === 'object' ? rawCreated : {}),
       }
 
       await realtimeSync.broadcast({

@@ -14,18 +14,16 @@ import StudentReportCard from '../components/StudentReportCard'
 import MathRenderer from '../components/MathRenderer'
 import { Exam, StudentExamSubmission } from '../types/examTypes'
 import {
-  fetchPublishedExams,
   fetchPublishedExamsWithDiagnostics,
   fetchExamSubmissions,
   fetchStudentExamReview,
   StudentExamReviewQuestionItem,
   getStudentExamSubmission,
   sanitizeExamTitle,
-  getLocalExams,
-  saveLocalExams,
+  getLocalStudentExams,
+  saveLocalStudentExams,
   getLocalSubmissions,
   flushPendingExamSyncQueue,
-  extractExamsFromPosts,
   isExamResultsReleased,
   mergeSubmissionsDeduplicated,
   buildCanonicalGradesList,
@@ -48,6 +46,8 @@ import {
   fetchFilteredPublishedPosts,
   sanitizeExamForStudent,
   isBackendStaticOnly,
+  parseExamTimestampMs,
+  classifyExamForStudent,
 } from '../utils/networkResilience'
 
 
@@ -106,17 +106,24 @@ export default function StudentDashboard({
   })
   const [exams, setExams] = useState<Exam[]>(() => {
     try {
-      const cached = getLocalExams()
+      const cached = getLocalStudentExams()
       if (Array.isArray(cached) && cached.length > 0) {
         return cached.filter((e) => e.published !== false)
       }
     } catch {}
     return []
   })
+  const [examsDataSource, setExamsDataSource] = useState<'loading' | 'server' | 'cache' | 'error'>(() => {
+    try {
+      const hasCachedExams = getLocalStudentExams().some((e) => e && e.published !== false)
+      return hasCachedExams ? 'cache' : 'loading'
+    } catch {}
+    return 'loading'
+  })
   const [takingExam, setTakingExam] = useState<Exam | null>(null)
   const [fetchStatus, setFetchStatus] = useState<'loading' | 'ready' | 'error'>(() => {
     try {
-      const hasCachedExams = getLocalExams().some((e) => e && e.published !== false)
+      const hasCachedExams = getLocalStudentExams().some((e) => e && e.published !== false)
       const rawPosts = typeof localStorage !== 'undefined' ? localStorage.getItem('cached_published_posts') : null
       const hasCachedPosts = Boolean(rawPosts && JSON.parse(rawPosts).length > 0)
       if (hasCachedExams || hasCachedPosts) return 'ready'
@@ -125,7 +132,7 @@ export default function StudentDashboard({
   })
   const [examsFetchStatus, setExamsFetchStatus] = useState<'loading' | 'ready' | 'error'>(() => {
     try {
-      const hasCachedExams = getLocalExams().some((e) => e && e.published !== false)
+      const hasCachedExams = getLocalStudentExams().some((e) => e && e.published !== false)
       if (hasCachedExams) return 'ready'
     } catch {}
     return 'loading'
@@ -141,7 +148,7 @@ export default function StudentDashboard({
   const [submissionsFetchStatus, setSubmissionsFetchStatus] = useState<'loading' | 'ready' | 'error'>('loading')
   const [loading, setLoading] = useState(() => {
     try {
-      const hasCachedExams = getLocalExams().some((e) => e && e.published !== false)
+      const hasCachedExams = getLocalStudentExams().some((e) => e && e.published !== false)
       const rawPosts = typeof localStorage !== 'undefined' ? localStorage.getItem('cached_published_posts') : null
       const hasCachedPosts = Boolean(rawPosts && JSON.parse(rawPosts).length > 0)
       if (hasCachedExams || hasCachedPosts) return false
@@ -209,18 +216,10 @@ export default function StudentDashboard({
     return () => clearInterval(timer)
   }, [])
 
-  // Helper to format remaining time until exam starts
+  // Helper to format remaining time until exam starts (consistent UTC/ISO parsing)
   function getExamCountdownInfo(scheduledStartTime?: string) {
-    if (!scheduledStartTime) {
-      return {
-        isStarted: true,
-        timeLabel: '--:--',
-        remainingText: 'در حال برگزاری',
-        badgeText: '🟢 آماده برگزاری',
-      }
-    }
-    const startMs = new Date(scheduledStartTime).getTime()
-    if (isNaN(startMs)) {
+    const startMs = parseExamTimestampMs(scheduledStartTime)
+    if (startMs === null) {
       return {
         isStarted: true,
         timeLabel: '--:--',
@@ -230,8 +229,8 @@ export default function StudentDashboard({
     }
     const diffMs = startMs - (currentTime + serverTimeOffsetRef.current)
 
-    // Exact scheduled time formatted in Persian
-    const startDate = new Date(scheduledStartTime)
+    // Exact scheduled time formatted in Persian local display
+    const startDate = new Date(startMs)
     const hours = startDate.getHours().toString().padStart(2, '0')
     const minutes = startDate.getMinutes().toString().padStart(2, '0')
     const timeLabel = `${toPersianDigits(hours)}:${toPersianDigits(minutes)}`
@@ -329,8 +328,8 @@ export default function StudentDashboard({
 
     const seq = ++requestSeqRef.current
     const runPromise = (async () => {
-      // 1. Instant Cache Hydration: If local data exists, clear blocking loading screen immediately
-      const localExams = getLocalExams().filter((e) => e && e.published !== false)
+      // 1. Instant Cache Hydration: Show temporary cached data while fetching authoritative server data
+      const localExams = getLocalStudentExams().filter((e) => e && e.published !== false)
       const localPosts = (() => {
         try {
           const raw = typeof localStorage !== 'undefined' ? localStorage.getItem('cached_published_posts') : null
@@ -342,11 +341,11 @@ export default function StudentDashboard({
       const hasCachedData = localExams.length > 0 || localPosts.length > 0
 
       if (localExams.length > 0) {
-        setExams(localExams)
+        setExams((prev) => (prev.length > 0 ? prev : localExams))
       }
       const localSubs = getLocalSubmissions()
       if (localSubs.length > 0) {
-        setMyExamSubs(localSubs)
+        setMyExamSubs((prev) => (prev.length > 0 ? prev : localSubs))
       }
 
       if (hasLoadedOnce.current || hasCachedData || isBackground) {
@@ -355,6 +354,7 @@ export default function StudentDashboard({
         setLoading(true)
         setFetchStatus('loading')
         setExamsFetchStatus('loading')
+        setExamsDataSource('loading')
       }
       if (!isBackground) {
         setLoadError(null)
@@ -430,11 +430,10 @@ export default function StudentDashboard({
                 .filter((e: Exam) => e && e.published !== false)
                 .map(sanitizeExamForStudent)
               setExams(validExams)
-              if (validExams.length > 0) {
-                saveLocalExams(validExams)
-              }
+              saveLocalStudentExams(validExams)
               setFetchStatus('ready')
               setExamsFetchStatus('ready')
+              setExamsDataSource('server')
               setLoading(false)
               hasLoadedOnce.current = true
             }
@@ -452,7 +451,10 @@ export default function StudentDashboard({
 
       // Each Supabase stream resolves and updates UI independently — no single timeout can break the others
       const postsPromise = withTimeout<any[]>(
-        fetchFilteredPublishedPosts(supabase, { includeScheduledFuture: false }),
+        fetchFilteredPublishedPosts(supabase, {
+          includeScheduledFuture: false,
+          serverNowMs: Date.now() + serverTimeOffsetRef.current,
+        }),
         10000
       ).then((rows) => {
         if (seq !== requestSeqRef.current || !Array.isArray(rows)) return
@@ -468,13 +470,22 @@ export default function StudentDashboard({
         setLoading(false)
       })
 
-      const examsPromise = fetchPublishedExamsWithDiagnostics(true, force, { skipBackendApi: true }).then((diag) => {
+      const examsPromise = withTimeout(
+        fetchPublishedExamsWithDiagnostics(true, force, {
+          skipBackendApi: true,
+          requestSource: isBackground ? 'student_dashboard_bg' : 'student_dashboard',
+        }),
+        30000
+      ).then((diag) => {
         if (seq !== requestSeqRef.current) return
         if (diag.remoteOk) {
           examsRemoteOk = true
           setExams(diag.exams)
           setExamsFetchStatus('ready')
+          setExamsDataSource('server')
           setFetchStatus('ready')
+          setSyncWarning(null)
+          setLoadError(null)
           setLoading(false)
           hasLoadedOnce.current = true
         }
@@ -530,7 +541,7 @@ export default function StudentDashboard({
       })
 
       const examSubsPromise = withTimeout<StudentExamSubmission[]>(
-        fetchExamSubmissions(undefined, canonicalStudentId, force),
+        fetchExamSubmissions(undefined, canonicalStudentId, force, undefined, canonicalAccessCode),
         10000
       ).then((list) => {
         if (seq !== requestSeqRef.current) return
@@ -564,21 +575,26 @@ export default function StudentDashboard({
       if (!gradesRemoteOk) setGradesFetchStatus(myGrades.length > 0 ? 'ready' : 'error')
       if (!subsRemoteOk) setSubmissionsFetchStatus(myExamSubs.length > 0 ? 'ready' : 'error')
 
-      // STRICT 3-STATE EVALUATION FOR EXAMS & POSTS:
-      // Never mark examsFetchStatus as 'ready' simply because grades/attendance loaded if exam sources actually failed!
+      // STRICT SERVER-VS-CACHE-VS-ERROR EVALUATION FOR EXAMS & POSTS:
+      // Never treat stale cached exams as verified server data; always warn clearly when remote exam retrieval failed.
       if (examsRemoteOk && postsRemoteOk) {
         hasRemoteSyncedRef.current = true
         setFetchStatus('ready')
         setExamsFetchStatus('ready')
+        setExamsDataSource('server')
         setLoadError(null)
         setSyncWarning(null)
       } else if (isBackground && (hasLoadedOnce.current || hasCachedData)) {
         if (examsRemoteOk || postsRemoteOk) {
           hasRemoteSyncedRef.current = true
         }
-        // Silent background poll: never flash error banners or spinners if prior data is already loaded
         if (examsRemoteOk) {
           setExamsFetchStatus('ready')
+          setExamsDataSource('server')
+          setSyncWarning(null)
+        } else {
+          setExamsDataSource((prev) => (prev === 'server' || localExams.length > 0 ? 'cache' : 'error'))
+          setSyncWarning('ارتباط با سرور برای دریافت جدیدترین آزمون‌ها برقرار نشد؛ نسخه ذخیره‌شده قبلی نمایش داده می‌شود.')
         }
         if (postsRemoteOk) {
           setFetchStatus('ready')
@@ -587,22 +603,25 @@ export default function StudentDashboard({
         hasRemoteSyncedRef.current = true
         setFetchStatus(postsRemoteOk || localPosts.length > 0 ? 'ready' : 'error')
         setExamsFetchStatus(examsRemoteOk ? 'ready' : (localExams.length > 0 ? 'ready' : 'error'))
+        setExamsDataSource(examsRemoteOk ? 'server' : (localExams.length > 0 ? 'cache' : 'error'))
         if (!examsRemoteOk) {
-          setSyncWarning('ارتباط برای دریافت جدیدترین آزمون‌ها برقرار نشد؛ لطفاً اتصال اینترنت را بررسی کرده و دوباره تلاش کنید.')
+          setSyncWarning('ارتباط برای دریافت جدیدترین آزمون‌ها برقرار نشد؛ در صورت وجود، نسخه ذخیره‌شده قبلی نمایش داده می‌شود. لطفاً دوباره تلاش کنید.')
           setLoadError('دریافت جدیدترین آزمون‌ها از پایگاه داده با خطا مواجه شد.')
         } else {
           setLoadError(null)
           setSyncWarning(null)
         }
       } else if (hasCachedData) {
-        // Keep cached exams/posts visible, warn clearly instead of pretending server is empty
+        // Keep cached exams/posts visible, warn clearly instead of pretending server is verified/empty
         setFetchStatus(localPosts.length > 0 || localExams.length > 0 ? 'ready' : 'error')
         setExamsFetchStatus(localExams.length > 0 ? 'ready' : 'error')
+        setExamsDataSource(localExams.length > 0 ? 'cache' : 'error')
         setSyncWarning('اتصال به سرور با خطا مواجه شد؛ اطلاعات ذخیره‌شده قبلی نمایش داده می‌شود. برای دریافت جدیدترین آزمون‌ها دوباره تلاش کنید.')
         setLoadError('اختلال در دریافت اطلاعات جدید از سرور.')
       } else {
         setFetchStatus('error')
         setExamsFetchStatus('error')
+        setExamsDataSource('error')
         setLoadError('خطا در دریافت اطلاعات و آزمون‌ها از سرور. لطفاً اتصال اینترنت را بررسی کرده و دکمه «تلاش مجدد» را بزنید.')
       }
     })().finally(() => {
@@ -629,7 +648,10 @@ export default function StudentDashboard({
     }
 
     const refreshPostsSection = async () => {
-      const rows = await fetchFilteredPublishedPosts(supabase, { includeScheduledFuture: false })
+      const rows = await fetchFilteredPublishedPosts(supabase, {
+        includeScheduledFuture: false,
+        serverNowMs: Date.now() + serverTimeOffsetRef.current,
+      })
       if (!isMounted || !Array.isArray(rows)) return
       const cleanPosts = rows.filter((post: any) => !isSystemRecord(post))
       setPosts(cleanPosts)
@@ -641,11 +663,22 @@ export default function StudentDashboard({
     }
 
     const refreshExamsSection = async () => {
-      const diag = await fetchPublishedExamsWithDiagnostics(true, true, { skipBackendApi: true })
-      if (!isMounted || !diag.remoteOk) return
+      const diag = await fetchPublishedExamsWithDiagnostics(true, true, {
+        skipBackendApi: true,
+        requestSource: 'student_realtime_or_poll',
+      })
+      if (!isMounted) return
+      if (!diag.remoteOk) {
+        setExamsDataSource((prev) => (prev === 'server' || diag.exams.length > 0 ? 'cache' : 'error'))
+        setSyncWarning('بروزرسانی لحظه‌ای آزمون‌ها از سرور ناموفق بود؛ در صورت وجود نسخه قبلی نمایش داده می‌شود.')
+        return
+      }
       setExams(diag.exams)
       setExamsFetchStatus('ready')
+      setExamsDataSource('server')
       setFetchStatus('ready')
+      setSyncWarning(null)
+      setLoadError(null)
       hasLoadedOnce.current = true
     }
 
@@ -665,9 +698,9 @@ export default function StudentDashboard({
     }
 
     const refreshQuizSubmissionsSection = async () => {
-      const { canonicalStudentId } = resolveStudentCredentials()
+      const { canonicalStudentId, canonicalAccessCode } = resolveStudentCredentials()
       if (!canonicalStudentId) return
-      const list = await fetchExamSubmissions(undefined, canonicalStudentId, true)
+      const list = await fetchExamSubmissions(undefined, canonicalStudentId, true, undefined, canonicalAccessCode)
       if (!isMounted || !Array.isArray(list)) return
       setMyExamSubs(list)
       setSubmissionsFetchStatus('ready')
@@ -801,11 +834,12 @@ export default function StudentDashboard({
                 const next = exists
                   ? prev.map((e) => (e.id === safeExam.id ? { ...e, ...safeExam } : e))
                   : [safeExam, ...prev]
-                saveLocalExams(next)
+                saveLocalStudentExams(next)
                 return next
               })
               setFetchStatus('ready')
               setExamsFetchStatus('ready')
+              setExamsDataSource('server')
               setLoadError(null)
               setSyncWarning(null)
             }
@@ -816,7 +850,7 @@ export default function StudentDashboard({
         } else if (event.action === 'delete' && event.id) {
           setExams((prev) => {
             const next = prev.filter((e) => e.id !== event.id)
-            saveLocalExams(next)
+            saveLocalStudentExams(next)
             return next
           })
         }
@@ -852,11 +886,14 @@ export default function StudentDashboard({
           const res = await fetchStudentPollFingerprint(canonicalStudentId, canonicalAccessCode)
           if (!isMounted || res.skipped) return
 
-          // On RPC error: NEVER run full loadAll; back off to 2 minutes and rely on Realtime if connected
+          // On RPC error: back off to 2 minutes, and if Realtime isn't subscribed, still refresh posts & exams directly
           if (!res.ok || !res.data) {
             hasRpcError = true
             lastRpcErrorAt = Date.now()
             currentPollDelayMs = ERROR_BACKOFF_POLL_MS
+            if (!realtimeSync.getIsSubscribed() || immediate) {
+              await Promise.allSettled([refreshPostsSection(), refreshExamsSection()])
+            }
             return
           }
 
@@ -942,6 +979,8 @@ export default function StudentDashboard({
       flushPendingExamSyncQueue().catch(() => {})
       if (hasValidStudentUuid) {
         scheduleBackupPoll(true)
+      } else {
+        Promise.allSettled([refreshPostsSection(), refreshExamsSection()])
       }
     }
 
@@ -950,6 +989,8 @@ export default function StudentDashboard({
         realtimeSync.init()
         if (hasValidStudentUuid) {
           scheduleBackupPoll(true)
+        } else {
+          Promise.allSettled([refreshPostsSection(), refreshExamsSection()])
         }
       }
     }
@@ -964,8 +1005,9 @@ export default function StudentDashboard({
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       window.removeEventListener('online', handleReconnect)
     }
+    // Re-initialize safely if logged-in student or teacher-previewed student changes
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [student?.id, student?.access_code])
 
   function stageFile(postId: string, file: File) {
     setStagedFiles((s) => ({ ...s, [postId]: file }))
@@ -1044,7 +1086,7 @@ export default function StudentDashboard({
 
   // Combined grades merging Supabase grades, exams, homework assignments, and submissions via shared canonical builder
   const combinedGrades = useMemo(() => {
-    const localExams = exams.length > 0 ? exams : getLocalExams()
+    const localExams = exams.length > 0 ? exams : getLocalStudentExams()
     const allSubs = mergeSubmissionsDeduplicated([], myExamSubs.length > 0 ? myExamSubs : getLocalSubmissions())
     return buildCanonicalGradesList({
       studentId: student.id,
@@ -1236,7 +1278,10 @@ export default function StudentDashboard({
           15000
         ),
         withFetchTimeout(fetchPublishedExamsWithDiagnostics(true, true, { skipBackendApi: true }), 15000),
-        withFetchTimeout(fetchExamSubmissions(undefined, canonicalStudentId, true), 15000),
+        withFetchTimeout(
+          fetchExamSubmissions(undefined, canonicalStudentId, true, undefined, String(canonicalAccessCode || '')),
+          15000
+        ),
       ])
 
       if (seq !== reportCardReqSeqRef.current) return
@@ -1300,7 +1345,7 @@ export default function StudentDashboard({
         g.matchedExam ||
         g.exam ||
         exams.find((e) => e.id === g.examId) ||
-        getLocalExams().find((e) => e.id === g.examId) ||
+        getLocalStudentExams().find((e) => e.id === g.examId) ||
         null
 
       if (!targetExam && g.skill) {
@@ -1585,26 +1630,44 @@ export default function StudentDashboard({
               </span>
             </div>
 
-            {/* Server Sync / Fetch Error Banner on Home Tab */}
-            {(fetchStatus === 'error' || examsFetchStatus === 'error' || syncWarning) && (
-              <div className="bg-rose-50 border border-rose-200 rounded-2xl p-4 sm:p-5 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            {/* Server Sync / Fetch Error or Stale Cache Banner on Home Tab */}
+            {(fetchStatus === 'error' || examsFetchStatus === 'error' || examsDataSource === 'cache' || syncWarning) && (
+              <div
+                className={`${
+                  fetchStatus === 'error' || examsFetchStatus === 'error'
+                    ? 'bg-rose-50 border-rose-200'
+                    : 'bg-amber-50 border-amber-200'
+                } border rounded-2xl p-4 sm:p-5 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3`}
+              >
                 <div className="flex items-start gap-3">
                   <span className="text-xl shrink-0">⚠️</span>
                   <div>
-                    <h4 className="text-xs sm:text-sm font-black text-rose-900">
+                    <h4
+                      className={`text-xs sm:text-sm font-black ${
+                        fetchStatus === 'error' || examsFetchStatus === 'error' ? 'text-rose-900' : 'text-amber-900'
+                      }`}
+                    >
                       {fetchStatus === 'error' || examsFetchStatus === 'error'
                         ? 'خطا در دریافت آزمون‌ها و تکالیف از سرور'
-                        : 'اختلال در به‌روزرسانی لحظه‌ای'}
+                        : 'نمایش نسخه موقت — در انتظار همگام‌سازی با سرور'}
                     </h4>
-                    <p className="text-xs text-rose-800 mt-0.5 leading-relaxed">
-                      {loadError || syncWarning}
+                    <p
+                      className={`text-xs mt-0.5 leading-relaxed ${
+                        fetchStatus === 'error' || examsFetchStatus === 'error' ? 'text-rose-800' : 'text-amber-800'
+                      }`}
+                    >
+                      {loadError || syncWarning || 'برای اطمینان از مشاهده جدیدترین آزمون‌ها و تکالیف، دکمه بروزرسانی را بزنید.'}
                     </p>
                   </div>
                 </div>
                 <button
                   type="button"
                   onClick={() => loadAll(true)}
-                  className="px-4 py-2 text-xs font-black bg-rose-600 hover:bg-rose-700 text-white rounded-xl shadow-xs transition-colors cursor-pointer shrink-0 inline-flex items-center justify-center gap-1.5"
+                  className={`px-4 py-2 text-xs font-black text-white rounded-xl shadow-xs transition-colors cursor-pointer shrink-0 inline-flex items-center justify-center gap-1.5 ${
+                    fetchStatus === 'error' || examsFetchStatus === 'error'
+                      ? 'bg-rose-600 hover:bg-rose-700'
+                      : 'bg-amber-600 hover:bg-amber-700'
+                  }`}
                 >
                   <span>🔄</span>
                   <span>تلاش مجدد</span>
@@ -1612,18 +1675,120 @@ export default function StudentDashboard({
               </div>
             )}
 
-            {/* Online Exams Section */}
-            {activeExams.length > 0 && (
+            {/* Scheduled Future Exams Section (Always visible, clearly separated, locked until start time) */}
+            {(() => {
+              const nowAligned = currentTime + serverTimeOffsetRef.current
+              const upcomingScheduledExams = activeExams.filter((exam) => {
+                const info = classifyExamForStudent(exam, nowAligned)
+                return info.isPublished && !info.isStarted
+              })
+              if (upcomingScheduledExams.length === 0) return null
+              return (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-base sm:text-lg font-black text-amber-900 tracking-tight flex items-center gap-2">
+                      <span>⏳</span>
+                      <span>آزمون‌های زمان‌بندی‌شده (شروع به‌زودی)</span>
+                    </h3>
+                    <span className="text-[11px] font-black bg-amber-100 text-amber-900 px-2.5 py-1 rounded-lg border border-amber-200">
+                      {toPersianDigits(upcomingScheduledExams.length)} آزمون پیش‌رو
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {upcomingScheduledExams.map((exam) => {
+                      const countdown = getExamCountdownInfo(exam.scheduledStartTime)
+                      const isUntimedExam =
+                        exam.mode === 'assignment' || Boolean(exam.isUntimed) || !exam.durationMinutes || Number(exam.durationMinutes) <= 0
+                      const startMs = parseExamTimestampMs(exam.scheduledStartTime)
+                      return (
+                        <div
+                          key={exam.id}
+                          className="bg-amber-50/40 border-2 border-amber-200 rounded-2xl p-4.5 sm:p-5 shadow-xs flex flex-col justify-between"
+                        >
+                          <div>
+                            <div className="flex items-start justify-between gap-3 mb-2">
+                              <div>
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <span className="text-[11px] font-black bg-blue-50 text-blue-700 px-2.5 py-0.5 rounded-md border border-blue-100">
+                                    {exam.subject}
+                                  </span>
+                                  <span className="text-[11px] font-black bg-amber-100 text-amber-900 px-2 py-0.5 rounded-md">
+                                    {isUntimedExam ? '🌱 تکلیف آنلاین' : '⏱️ آزمون زمان‌دار'}
+                                  </span>
+                                </div>
+                                <h4 className="text-base font-black text-slate-900 mt-1.5 mb-1">
+                                  {sanitizeExamTitle(exam.title, exam.subject)}
+                                </h4>
+                                {exam.description && exam.description.trim() && (
+                                  <p className="text-xs text-slate-600 leading-relaxed line-clamp-2">
+                                    {toPersianDigits(exam.description.trim())}
+                                  </p>
+                                )}
+                              </div>
+                              <span className="text-[11px] font-black px-2.5 py-1 rounded-lg border whitespace-nowrap bg-amber-100 text-amber-900 border-amber-300">
+                                ⏰ شروع به زودی
+                              </span>
+                            </div>
+
+                            <div className="my-3 p-3 bg-amber-50 border border-amber-200 rounded-xl flex items-center justify-between gap-2.5 flex-wrap">
+                              <div className="flex items-center gap-2">
+                                <span className="text-xl animate-pulse">⏳</span>
+                                <div>
+                                  <div className="text-xs font-black text-amber-900">
+                                    آغاز: ساعت {countdown.timeLabel} · {countdown.remainingText}
+                                  </div>
+                                  <div className="text-[11px] text-amber-700 font-medium mt-0.5">
+                                    به‌محض فرارسیدن زمان شروع، دکمه ورود به‌طور خودکار فعال می‌شود.
+                                  </div>
+                                </div>
+                              </div>
+                              <span className="text-[11px] font-black bg-amber-200/70 text-amber-900 px-2 py-0.5 rounded-md">
+                                شمارش معکوس زنده
+                              </span>
+                            </div>
+
+                            <p className="text-xs text-slate-600 mb-3">
+                              {toPersianDigits(exam.questions.length)} سوال ({toPersianDigits(exam.totalPoints)} نمره) ·{' '}
+                              {isUntimedExam ? 'بدون محدودیت زمانی' : `مدت: ${toPersianDigits(exam.durationMinutes)} دقیقه`}
+                              {startMs ? ` · زمان شروع: ${toPersianDigits(new Date(startMs).toLocaleString('fa-IR'))}` : ''}
+                            </p>
+                          </div>
+
+                          <button
+                            type="button"
+                            disabled
+                            className="w-full py-2.5 px-3 text-xs font-black rounded-xl bg-slate-200 text-slate-500 cursor-not-allowed inline-flex items-center justify-center gap-1.5"
+                          >
+                            <span>🔒</span>
+                            <span>ورود در ساعت {countdown.timeLabel} فعال می‌شود</span>
+                          </button>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )
+            })()}
+
+            {/* Active Online Exams & Assignments Section */}
+            {(() => {
+              const nowAligned = currentTime + serverTimeOffsetRef.current
+              const startedExams = activeExams.filter((exam) => {
+                const info = classifyExamForStudent(exam, nowAligned)
+                return info.isPublished && info.isStarted
+              })
+              if (startedExams.length === 0) return null
+              return (
               <div className="space-y-3.5">
                 <div className="flex items-center justify-between">
                   <h3 className="text-base sm:text-lg font-black text-slate-900 tracking-tight flex items-center gap-2">
                     <span>📝</span>
-                    <span>آزمون‌های آنلاین کلاسی</span>
+                    <span>آزمون‌ها و تکالیف آنلاین فعال</span>
                   </h3>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {activeExams.map((exam) => {
+                  {startedExams.map((exam) => {
                     const sub = mySubByExamId.get(exam.id) || getStudentExamSubmission(exam.id, student.id)
                     const isSubmitted = Boolean(sub)
                     const countdown = getExamCountdownInfo(exam.scheduledStartTime)
@@ -1635,8 +1800,9 @@ export default function StudentDashboard({
                     )
                     const isGraded = matchedGrade?.status === 'graded' && matchedGrade.score !== null && matchedGrade.score !== undefined
                     const isPendingReview = matchedGrade?.status === 'pending_review' || (isSubmitted && !isGraded)
-                    const isUntimedExam = exam.mode === 'assignment' || Boolean(exam.isUntimed) || !exam.durationMinutes || Number(exam.durationMinutes) <= 0
-                    const isPastDue = Boolean(exam.dueDate && new Date(exam.dueDate).getTime() < (currentTime + serverTimeOffsetRef.current))
+                    const examClass = classifyExamForStudent(exam, nowAligned)
+                    const isUntimedExam = examClass.isAssignment
+                    const isPastDue = examClass.isPastDue
                     const isUntimedEditable = isUntimedExam && !isPastDue && !isGraded
                     const hasDraft = !isSubmitted && typeof localStorage !== 'undefined' && Boolean(
                       localStorage.getItem(`exam_draft_${exam.id}_${student.id}`) ||
@@ -1657,6 +1823,11 @@ export default function StudentDashboard({
                               <h4 className="text-base font-black text-slate-900 mt-1.5 mb-1">
                                 {sanitizeExamTitle(exam.title, exam.subject)}
                               </h4>
+                              {exam.description && exam.description.trim() && (
+                                <p className="text-xs text-slate-600 leading-relaxed line-clamp-2 mb-1">
+                                  {toPersianDigits(exam.description.trim())}
+                                </p>
+                              )}
                             </div>
 
                             <span
@@ -1808,7 +1979,8 @@ export default function StudentDashboard({
                   })}
                 </div>
               </div>
-            )}
+              )
+            })()}
 
             {/* Homework Posts Section on Home Tab */}
             {homeworkPosts.length > 0 && (
@@ -1938,42 +2110,62 @@ export default function StudentDashboard({
                     )
                     const isGraded = matchedGrade?.status === 'graded' && matchedGrade.score !== null && matchedGrade.score !== undefined
                     const isPendingReview = matchedGrade?.status === 'pending_review' || (isSubmitted && !isGraded)
-                    const isUntimedExam = assignment.mode === 'assignment' || Boolean(assignment.isUntimed) || !assignment.durationMinutes || Number(assignment.durationMinutes) <= 0
-                    const isPastDue = Boolean(assignment.dueDate && new Date(assignment.dueDate).getTime() < (currentTime + serverTimeOffsetRef.current))
+                    const nowAligned = currentTime + serverTimeOffsetRef.current
+                    const assignmentClass = classifyExamForStudent(assignment, nowAligned)
+                    const countdown = getExamCountdownInfo(assignment.scheduledStartTime)
+                    const isStarted = assignmentClass.isStarted
+                    const isUntimedExam = assignmentClass.isAssignment
+                    const isPastDue = assignmentClass.isPastDue
                     const isUntimedEditable = isUntimedExam && !isPastDue && !isGraded
                     const hasDraft = !isSubmitted && typeof localStorage !== 'undefined' && Boolean(
                       localStorage.getItem(`exam_draft_${assignment.id}_${student.id}`) ||
                         localStorage.getItem(`exam_draft_${assignment.id}`)
                     )
-                    const isQuizMode = assignment.mode !== 'assignment'
+                    const isQuizMode = !isUntimedExam
+                    const isLockedFuture = !isStarted && !isSubmitted && !hasDraft
+                    const handleOpenAssignment = () => {
+                      if (isLockedFuture) return
+                      sessionStorage.setItem('active_taking_exam_id', assignment.id)
+                      setTakingExam(assignment)
+                    }
                     return (
                       <div
                         key={assignment.id}
-                        className={`rounded-2xl p-4.5 transition-all flex flex-col justify-between cursor-pointer group ${
-                          !isSubmitted && !hasDraft
-                            ? 'bg-gradient-to-br from-blue-50/80 via-white to-indigo-50/60 border-2 border-blue-400 hover:border-blue-600 shadow-sm hover:shadow-md ring-2 ring-blue-100/70'
+                        className={`rounded-2xl p-4.5 transition-all flex flex-col justify-between group ${
+                          isLockedFuture
+                            ? 'bg-amber-50/40 border-2 border-amber-200 cursor-not-allowed'
+                            : !isSubmitted && !hasDraft
+                            ? 'bg-gradient-to-br from-blue-50/80 via-white to-indigo-50/60 border-2 border-blue-400 hover:border-blue-600 shadow-sm hover:shadow-md ring-2 ring-blue-100/70 cursor-pointer'
                             : hasDraft
-                            ? 'bg-indigo-50/50 border-2 border-indigo-400 hover:border-indigo-600 shadow-xs'
+                            ? 'bg-indigo-50/50 border-2 border-indigo-400 hover:border-indigo-600 shadow-xs cursor-pointer'
                             : isGraded
-                            ? 'bg-white hover:bg-slate-50/60 border border-slate-200/90 hover:border-slate-300 shadow-2xs'
-                            : 'bg-white hover:bg-amber-50/30 border border-amber-200 hover:border-amber-400 shadow-2xs'
+                            ? 'bg-white hover:bg-slate-50/60 border border-slate-200/90 hover:border-slate-300 shadow-2xs cursor-pointer'
+                            : 'bg-white hover:bg-amber-50/30 border border-amber-200 hover:border-amber-400 shadow-2xs cursor-pointer'
                         }`}
-                        onClick={() => setTakingExam(assignment)}
+                        onClick={handleOpenAssignment}
                       >
                         <div>
                           <div className="flex justify-between items-start gap-2 mb-2">
                             <div>
                               <div className="flex items-center gap-1.5 flex-wrap">
                                 <span className={`text-[11px] font-black px-2.5 py-0.5 rounded-md ${
-                                  !isSubmitted && !hasDraft ? 'bg-blue-600 text-white' : 'bg-blue-100 text-blue-800'
+                                  isLockedFuture
+                                    ? 'bg-amber-100 text-amber-900'
+                                    : !isSubmitted && !hasDraft
+                                    ? 'bg-blue-600 text-white'
+                                    : 'bg-blue-100 text-blue-800'
                                 }`}>
-                                  {assignment.subject || 'عمومی'} · {isQuizMode ? 'آزمون آنلاین' : 'تکلیف تعاملی'}
+                                  {assignment.subject || 'عمومی'} · {isQuizMode ? '⏱️ آزمون آنلاین' : '🌱 تکلیف تعاملی'}
                                 </span>
-                                {!isSubmitted && !hasDraft && (
+                                {isLockedFuture ? (
+                                  <span className="text-[10px] font-black bg-amber-100 text-amber-900 px-2 py-0.5 rounded-md">
+                                    ⏳ شروع: ساعت {countdown.timeLabel}
+                                  </span>
+                                ) : !isSubmitted && !hasDraft ? (
                                   <span className="text-[10px] font-black bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-md animate-pulse">
                                     🟢 جدید · آماده انجام
                                   </span>
-                                )}
+                                ) : null}
                                 {hasDraft && (
                                   <span className="text-[10px] font-black bg-indigo-100 text-indigo-800 px-2 py-0.5 rounded-md">
                                     ✏️ دارای پیش‌نویس
@@ -1983,6 +2175,11 @@ export default function StudentDashboard({
                               <h4 className="text-base font-black text-slate-900 group-hover:text-blue-700 transition-colors mt-2 mb-1">
                                 {sanitizeExamTitle(assignment.title, assignment.subject)}
                               </h4>
+                              {assignment.description && assignment.description.trim() && (
+                                <p className="text-xs text-slate-600 leading-relaxed line-clamp-2 mb-1">
+                                  {toPersianDigits(assignment.description.trim())}
+                                </p>
+                              )}
                             </div>
                             <span
                               className={`text-[11px] font-black px-2.5 py-1 rounded-lg border whitespace-nowrap ${
@@ -1990,6 +2187,8 @@ export default function StudentDashboard({
                                   ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
                                   : isPendingReview
                                   ? 'bg-amber-50 text-amber-800 border-amber-200'
+                                  : isLockedFuture
+                                  ? 'bg-amber-100 text-amber-900 border-amber-300'
                                   : hasDraft
                                   ? 'bg-indigo-50 text-indigo-800 border-indigo-200'
                                   : 'bg-rose-50 text-rose-700 border-rose-200 font-black'
@@ -1999,11 +2198,19 @@ export default function StudentDashboard({
                                 ? `✅ نمره: ${toPersianDigits(matchedGrade.score)} از ۲۰`
                                 : isPendingReview
                                 ? '⏳ در انتظار تایید معلم'
+                                : isLockedFuture
+                                ? '⏰ شروع به زودی'
                                 : hasDraft
                                 ? '✏️ دارای پیش‌نویس'
                                 : '⭕ در انتظار حل'}
                             </span>
                           </div>
+
+                          {isLockedFuture && (
+                            <div className="my-2 p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-[11.5px] font-bold text-amber-900">
+                              ⏳ {countdown.remainingText} (آغاز در ساعت {countdown.timeLabel})
+                            </div>
+                          )}
 
                           <div className="text-xs text-slate-500 mb-3 space-y-1">
                             <div className="font-semibold text-slate-600">
@@ -2020,23 +2227,28 @@ export default function StudentDashboard({
 
                         <button
                           type="button"
-                          className={`w-full py-2.5 px-3 text-xs font-black rounded-xl transition-all cursor-pointer inline-flex items-center justify-center gap-1.5 ${
-                            !isSubmitted && !hasDraft
-                              ? 'text-white bg-blue-600 hover:bg-blue-700 group-hover:bg-blue-700 shadow-sm'
+                          disabled={isLockedFuture}
+                          className={`w-full py-2.5 px-3 text-xs font-black rounded-xl transition-all inline-flex items-center justify-center gap-1.5 ${
+                            isLockedFuture
+                              ? 'text-slate-500 bg-slate-200 cursor-not-allowed'
+                              : !isSubmitted && !hasDraft
+                              ? 'text-white bg-blue-600 hover:bg-blue-700 group-hover:bg-blue-700 shadow-sm cursor-pointer'
                               : hasDraft
-                              ? 'text-white bg-indigo-600 hover:bg-indigo-700 shadow-sm ring-2 ring-indigo-200'
+                              ? 'text-white bg-indigo-600 hover:bg-indigo-700 shadow-sm ring-2 ring-indigo-200 cursor-pointer'
                               : isGraded
-                              ? 'text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200'
+                              ? 'text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 cursor-pointer'
                               : isUntimedEditable
-                              ? 'text-white bg-blue-600 hover:bg-blue-700 shadow-sm'
-                              : 'text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200'
+                              ? 'text-white bg-blue-600 hover:bg-blue-700 shadow-sm cursor-pointer'
+                              : 'text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200 cursor-pointer'
                           }`}
                           onClick={(e) => {
                             e.stopPropagation()
-                            setTakingExam(assignment)
+                            handleOpenAssignment()
                           }}
                         >
-                          {isGraded
+                          {isLockedFuture
+                            ? `🔒 آغاز در ساعت ${countdown.timeLabel} (${countdown.remainingText})`
+                            : isGraded
                             ? '📊 مشاهده کارنامه و نمره'
                             : isUntimedEditable && isSubmitted
                             ? '✏️ مشاهده یا ویرایش پاسخ‌ها'

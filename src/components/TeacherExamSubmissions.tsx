@@ -80,7 +80,7 @@ export default function TeacherExamSubmissions({
     setIsRefreshing(true)
     try {
       const [fresh] = await Promise.all([
-        fetchExamSubmissions(exam.id, undefined, true),
+        fetchExamSubmissions(exam.id, undefined, true, teacherPassword),
         loadGradebookStatus(),
       ])
       setSubmissions(mergeSubmissionsDeduplicated([], fresh))

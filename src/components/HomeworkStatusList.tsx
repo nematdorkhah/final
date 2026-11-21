@@ -1,6 +1,14 @@
-import { useState, useMemo, useEffect, useCallback } from 'react'
+import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
 import { toPersianDigits } from '../utils/persianNumbers'
-import { getLocalExams, getLocalSubmissions, fetchExamSubmissions, deleteExam } from '../utils/examStore'
+import {
+  fetchAllExamsWithDiagnostics,
+  fetchPublishedExamsWithDiagnostics,
+  getLocalSubmissions,
+  fetchExamSubmissions,
+  deleteExam,
+} from '../utils/examStore'
+import { Exam } from '../types/examTypes'
+import { isSameStudent } from '../classStudents'
 import { sortByLastName } from '../utils/persianSort'
 import { supabase } from '../supabaseClient'
 import AttachmentViewerModal from './AttachmentViewerModal'
@@ -12,17 +20,22 @@ export default function HomeworkStatusList({
   submissions,
   students,
   teacherPassword,
+  exams: propExams,
   onRefresh,
 }: {
   homeworkPosts: any[]
   submissions: any[]
   students: any[]
   teacherPassword?: string
+  exams?: Exam[]
   onRefresh?: () => void
 }) {
   const [expandedAssignmentId, setExpandedAssignmentId] = useState<string | null>(null)
   const [filterModeMap, setFilterModeMap] = useState<Record<string, 'all' | 'submitted' | 'missing'>>({})
   const [serverExamSubs, setServerExamSubs] = useState<any[]>([])
+  const [onlineAssignments, setOnlineAssignments] = useState<Exam[]>([])
+  const [assignmentsSyncState, setAssignmentsSyncState] = useState<'loading' | 'server' | 'cache' | 'error'>('loading')
+  const [assignmentsSyncError, setAssignmentsSyncError] = useState<string | null>(null)
   const [refreshing, setRefreshing] = useState(false)
   const [viewingAttachment, setViewingAttachment] = useState<{ url: string; title: string } | null>(null)
   const [whatsappModalData, setWhatsappModalData] = useState<WhatsappPosterData | null>(null)
@@ -33,6 +46,15 @@ export default function HomeworkStatusList({
     isOnlineExam: boolean
     count: number
   } | null>(null)
+  const isMountedRef = useRef(true)
+  const fetchSeqRef = useRef(0)
+
+  useEffect(() => {
+    isMountedRef.current = true
+    return () => {
+      isMountedRef.current = false
+    }
+  }, [])
 
   function handleExportWhatsapp(assignment: any) {
     if (assignment.isOnlineExam && assignment.raw) {
@@ -68,41 +90,79 @@ export default function HomeworkStatusList({
     }
   }
 
-  // Fetch online exam/assignment submissions directly from Supabase
+  // Fetch authoritative online assignments (mode === 'assignment') and submissions directly from Supabase
+  const fetchAuthoritativeOnlineAssignments = useCallback(async () => {
+    const seq = ++fetchSeqRef.current
+    try {
+      const result = teacherPassword
+        ? await fetchAllExamsWithDiagnostics(teacherPassword, { requestSource: 'homework_status_list' })
+        : await fetchPublishedExamsWithDiagnostics(false, true, { requestSource: 'homework_status_list' })
+
+      if (!isMountedRef.current || seq !== fetchSeqRef.current) return
+
+      const filteredAssignments = (result.exams || []).filter(
+        (e) => Boolean(e && e.mode === 'assignment' && e.published !== false)
+      )
+
+      if (result.remoteOk) {
+        setOnlineAssignments(filteredAssignments)
+        setAssignmentsSyncState('server')
+        setAssignmentsSyncError(null)
+      } else if (filteredAssignments.length > 0) {
+        // Keep cached assignments visible, but clearly mark as temporary cache
+        setOnlineAssignments(filteredAssignments)
+        setAssignmentsSyncState('cache')
+        setAssignmentsSyncError(result.error || 'خطا در اتصال به سرور؛ نمایش نسخه حافظه موقت تکالیف آنلاین.')
+      } else {
+        setAssignmentsSyncState((prev) => (prev === 'server' ? 'cache' : 'error'))
+        setAssignmentsSyncError(result.error || 'خطا در دریافت تکالیف آنلاین از سرور.')
+      }
+    } catch (err: any) {
+      if (!isMountedRef.current || seq !== fetchSeqRef.current) return
+      console.warn('[HomeworkStatusList] Failed loading online assignments from Supabase:', err)
+      setAssignmentsSyncState((prev) => (prev === 'server' ? 'cache' : 'error'))
+      setAssignmentsSyncError(err?.message || 'خطا در دریافت تکالیف آنلاین از سرور.')
+    }
+  }, [teacherPassword])
+
   const fetchServerExamSubs = useCallback(async () => {
     try {
-      const subs = await fetchExamSubmissions()
-      if (Array.isArray(subs)) {
+      const subs = await fetchExamSubmissions(undefined, undefined, false, teacherPassword)
+      if (isMountedRef.current && Array.isArray(subs)) {
         setServerExamSubs(subs)
       }
     } catch (err) {
       console.warn('Failed to load exam submissions from Supabase', err)
     }
-  }, [])
+  }, [teacherPassword])
 
   useEffect(() => {
+    fetchAuthoritativeOnlineAssignments()
     fetchServerExamSubs()
-  }, [fetchServerExamSubs])
+  }, [fetchAuthoritativeOnlineAssignments, fetchServerExamSubs])
 
   useEffect(() => {
     const handleExamsUpdated = () => {
+      fetchAuthoritativeOnlineAssignments()
       fetchServerExamSubs()
       if (onRefresh) onRefresh()
     }
     window.addEventListener('exams-updated', handleExamsUpdated)
     return () => window.removeEventListener('exams-updated', handleExamsUpdated)
-  }, [fetchServerExamSubs, onRefresh])
+  }, [fetchAuthoritativeOnlineAssignments, fetchServerExamSubs, onRefresh])
 
   const handleRefresh = async (e?: React.MouseEvent) => {
     if (e) e.stopPropagation()
     setRefreshing(true)
     try {
-      await fetchServerExamSubs()
+      await Promise.allSettled([fetchAuthoritativeOnlineAssignments(), fetchServerExamSubs()])
       if (onRefresh) {
         onRefresh()
       }
     } finally {
-      setTimeout(() => setRefreshing(false), 500)
+      setTimeout(() => {
+        if (isMountedRef.current) setRefreshing(false)
+      }, 400)
     }
   }
 
@@ -139,7 +199,7 @@ export default function HomeworkStatusList({
       if (onRefresh) {
         onRefresh()
       }
-      await fetchServerExamSubs()
+      await Promise.allSettled([fetchAuthoritativeOnlineAssignments(), fetchServerExamSubs()])
     } catch (err: any) {
       console.error('Delete assignment failed:', err)
       alert('خطا در حذف تکلیف: ' + (err?.message || 'مشکل در برقراری ارتباط'))
@@ -148,15 +208,19 @@ export default function HomeworkStatusList({
     }
   }
 
-  // Load interactive online assignments from local store
-  const localAssignments = useMemo(() => {
-    try {
-      const allExams = getLocalExams()
-      return allExams.filter((e) => e.mode === 'assignment')
-    } catch {
-      return []
+  // Authoritative online assignments from Supabase quizzes (fallback to parent propExams while loading; never localStorage-only)
+  const authoritativeOnlineAssignments = useMemo(() => {
+    if (assignmentsSyncState === 'server') {
+      return onlineAssignments
     }
-  }, [])
+    if (onlineAssignments.length > 0) {
+      return onlineAssignments
+    }
+    if (Array.isArray(propExams) && propExams.length > 0) {
+      return propExams.filter((e) => Boolean(e && e.mode === 'assignment' && e.published !== false))
+    }
+    return []
+  }, [assignmentsSyncState, onlineAssignments, propExams])
 
   const examSubmissions = useMemo(() => {
     const local = getLocalSubmissions()
@@ -166,34 +230,43 @@ export default function HomeworkStatusList({
     return Array.from(map.values())
   }, [serverExamSubs])
 
-  // Combine standard homework and interactive assignments
+  // Combine standard homework posts and authoritative online assignments without duplication
   const allAssignments = useMemo(() => {
-    const list: any[] = [
-      ...homeworkPosts.map((hp) => ({
-        id: hp.id,
+    const dedupMap = new Map<string, any>()
+
+    for (const hp of homeworkPosts || []) {
+      if (!hp?.id) continue
+      dedupMap.set(String(hp.id), {
+        id: String(hp.id),
         title: hp.title,
         due_at: hp.due_at,
         created_at: hp.publish_at || hp.created_at,
         isOnlineExam: false,
         raw: hp,
-      })),
-      ...localAssignments.map((la) => ({
-        id: la.id,
-        title: `[تکلیف آنلاین] ${la.title}`,
-        due_at: la.dueDate,
-        created_at: la.createdAt || la.scheduledStartTime,
+      })
+    }
+
+    for (const oa of authoritativeOnlineAssignments) {
+      if (!oa?.id) continue
+      dedupMap.set(String(oa.id), {
+        id: String(oa.id),
+        title: `[تکلیف آنلاین] ${oa.title}`,
+        due_at: oa.dueDate,
+        created_at: oa.createdAt || oa.scheduledStartTime,
         isOnlineExam: true,
-        raw: la,
-      })),
-    ]
+        raw: oa,
+      })
+    }
+
+    const list = Array.from(dedupMap.values())
 
     // Sort newest first
     return list.sort((a, b) => {
       const dateA = a.created_at ? new Date(a.created_at).getTime() : 0
       const dateB = b.created_at ? new Date(b.created_at).getTime() : 0
-      return dateB - dateA
+      return (Number.isFinite(dateB) ? dateB : 0) - (Number.isFinite(dateA) ? dateA : 0)
     })
-  }, [homeworkPosts, localAssignments])
+  }, [homeworkPosts, authoritativeOnlineAssignments])
 
   // Sort students alphabetically by family name (نام خانوادگی)
   const sortedStudents = useMemo(() => {
@@ -206,7 +279,9 @@ export default function HomeworkStatusList({
       return sortedStudents.map((s) => {
         if (assignment.isOnlineExam) {
           const sub = examSubmissions.find(
-            (es) => String(es.examId) === String(assignment.id) && String(es.studentId) === String(s.id)
+            (es) =>
+              String(es.examId) === String(assignment.id) &&
+              isSameStudent(es.studentId, s.id, es.studentName, s.full_name)
           )
           const isSubmitted = Boolean(sub)
           const score = sub?.teacherGrading?.totalScore ?? sub?.aiGrading?.totalScore ?? (sub as any)?.studentScore
@@ -254,6 +329,49 @@ export default function HomeworkStatusList({
   )
 
   if (allAssignments.length === 0) {
+    if (assignmentsSyncState === 'loading') {
+      return (
+        <div
+          className="mobile-card hard"
+          style={{ padding: 18, background: '#FFFFFF', textAlign: 'center', color: '#475569', borderRadius: 14 }}
+        >
+          ⏳ در حال دریافت تکالیف کلاسی و آنلاین از سرور...
+        </div>
+      )
+    }
+
+    if (assignmentsSyncState === 'error') {
+      return (
+        <div
+          className="mobile-card hard"
+          style={{
+            padding: 18,
+            background: '#FEF2F2',
+            border: '1.5px solid #FCA5A5',
+            textAlign: 'center',
+            color: '#991B1B',
+            borderRadius: 14,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            gap: 10,
+          }}
+        >
+          <div style={{ fontWeight: 900, fontSize: 13.5 }}>⚠️ خطا در دریافت تکالیف آنلاین از سرور</div>
+          <div style={{ fontSize: 12 }}>{assignmentsSyncError || 'ارتباط با پایگاه داده برقرار نشد.'}</div>
+          <button
+            type="button"
+            className="upload-btn"
+            onClick={handleRefresh}
+            disabled={refreshing}
+            style={{ background: '#DC2626', color: '#FFFFFF', border: 'none', padding: '6px 14px', fontSize: 12 }}
+          >
+            {refreshing ? '⏳ در حال تلاش...' : '🔄 تلاش مجدد'}
+          </button>
+        </div>
+      )
+    }
+
     return (
       <div
         className="mobile-card hard"
@@ -266,6 +384,41 @@ export default function HomeworkStatusList({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {/* Sync Warning Banner if online assignments fell back to cache or failed */}
+      {(assignmentsSyncState === 'cache' || assignmentsSyncState === 'error') && (
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: 8,
+            background: assignmentsSyncState === 'error' ? '#FEF2F2' : '#FFFBEB',
+            border: assignmentsSyncState === 'error' ? '1.5px solid #FCA5A5' : '1.5px solid #FCD34D',
+            color: assignmentsSyncState === 'error' ? '#991B1B' : '#92400E',
+            padding: '10px 14px',
+            borderRadius: 12,
+            fontSize: 12.5,
+            fontWeight: 700,
+          }}
+        >
+          <span>
+            ⚠️{' '}
+            {assignmentsSyncState === 'cache'
+              ? 'ارتباط با سرور برای دریافت جدیدترین تکالیف آنلاین برقرار نشد (نمایش نسخه موقت).'
+              : assignmentsSyncError || 'دریافت تکالیف آنلاین از سرور ناموفق بود.'}
+          </span>
+          <button
+            type="button"
+            className="upload-btn"
+            onClick={handleRefresh}
+            disabled={refreshing}
+            style={{ fontSize: 11.5, padding: '4px 10px', background: '#FFFFFF' }}
+          >
+            🔄 تلاش مجدد
+          </button>
+        </div>
+      )}
       {/* Top action bar: Total assignments count and instant refresh */}
       <div
         style={{

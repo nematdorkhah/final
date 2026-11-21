@@ -12,9 +12,9 @@ import {
 import { fetchFilteredPublishedPosts } from '../utils/networkResilience'
 import { Exam, StudentExamSubmission } from '../types/examTypes'
 import {
-  fetchAllExams,
+  fetchAllExamsWithDiagnostics,
   fetchExamSubmissions,
-  getLocalExams,
+  getLocalTeacherExams,
   getLocalSubmissions,
   mergeSubmissionsDeduplicated,
 } from '../utils/examStore'
@@ -131,7 +131,7 @@ export function useClassroomData(teacherPassword: string) {
   const [attendanceToday, setAttendanceToday] = useState<Record<string, string>>({})
   const [allAttendance, setAllAttendance] = useState<any[]>([])
   const [grades, setGrades] = useState<any[]>([])
-  const [exams, setExams] = useState<Exam[]>(() => getLocalExams())
+  const [exams, setExams] = useState<Exam[]>(() => getLocalTeacherExams())
   const [examSubmissions, setExamSubmissions] = useState<StudentExamSubmission[]>(() =>
     mergeSubmissionsDeduplicated([], getLocalSubmissions())
   )
@@ -296,18 +296,25 @@ export function useClassroomData(teacherPassword: string) {
             if (!isMountedRef.current) return
             setGrades(Array.isArray(res?.data) ? res.data : [])
           } else if (key === 'exams') {
-            const loadedExams = await withTimeout(
-              fetchAllExams(effectivePassword),
+            const examFetchResult = await withTimeout(
+              fetchAllExamsWithDiagnostics(effectivePassword, { requestSource: 'classroom_hook' }),
               RESOURCE_TIMEOUT_MS,
               'زمان بارگذاری آزمون‌ها به پایان رسید.'
             )
             if (!isMountedRef.current) return
-            if (Array.isArray(loadedExams)) {
-              setExams(loadedExams)
+            if (!examFetchResult.remoteOk) {
+              // Preserve existing valid exams or fallback cache without falsely reporting server success
+              if (examFetchResult.exams.length > 0) {
+                setExams((prev) => (prev.length > 0 ? prev : examFetchResult.exams))
+              }
+              const err: any = new Error(examFetchResult.error || 'خطا در دریافت آزمون‌ها از سرور')
+              err.code = examFetchResult.errorCode || undefined
+              throw err
             }
+            setExams(examFetchResult.exams)
           } else if (key === 'examSubmissions') {
             const loadedExamSubs = await withTimeout(
-              fetchExamSubmissions(undefined, undefined, true),
+              fetchExamSubmissions(undefined, undefined, true, effectivePassword),
               RESOURCE_TIMEOUT_MS,
               'زمان بارگذاری پاسخنامه‌های آزمون به پایان رسید.'
             )

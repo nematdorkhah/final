@@ -1322,6 +1322,18 @@ export default {
       return handleAiRoutes(pathname, request, url, env)
     }
 
+    if (pathname === '/api' || pathname.startsWith('/api/')) {
+      return jsonResponse(
+        {
+          success: false,
+          code: 'API_ROUTE_NOT_SUPPORTED',
+          error: `مسیر ${pathname} در محیط استقرار استاتیک پشتیبانی نمی‌شود و باید از طریق RPCهای امن Supabase فراخوانی شود.`,
+        },
+        404,
+        request
+      )
+    }
+
     return proxyToNetlify(request, url, env)
   },
 }

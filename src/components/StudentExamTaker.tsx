@@ -16,6 +16,7 @@ import {
 import { toPersianDigits } from '../utils/persianNumbers'
 import MathRenderer from './MathRenderer'
 import { safeNumber, safeScore, safeScaled20, getSubmissionEffectiveScore } from '../utils/persianSemanticGrader'
+import { classifyExamForStudent } from '../utils/networkResilience'
 
 interface StudentExamDraft {
   examId: string
@@ -80,8 +81,10 @@ export default function StudentExamTaker({
     return () => window.removeEventListener('exam_submission_updated', handleUpdate)
   }, [exam.id, student.id])
 
-  const isAssignment = exam.mode === 'assignment' || Boolean(exam.isUntimed) || Number(exam.durationMinutes) <= 0
-  const isPastDue = Boolean(exam.dueDate && new Date(exam.dueDate) < new Date())
+  const scheduleClassification = classifyExamForStudent(exam)
+  const isAssignment = scheduleClassification.isAssignment
+  const isPastDue = scheduleClassification.isPastDue
+  const isLockedNotYetStarted = !existingSubmission && (!scheduleClassification.isPublished || !scheduleClassification.isStarted)
 
   // Cloud draft sync debounce timer ref
   const cloudDraftTimerRef = useRef<any>(null)
@@ -385,6 +388,7 @@ export default function StudentExamTaker({
         studentId: student.id,
         studentName: student.full_name,
         answers: targetAnswers,
+        studentAccessCode: student.access_code,
       })
 
       // 2. Celebratory confetti animation
@@ -414,6 +418,40 @@ export default function StudentExamTaker({
   const minutes = Math.floor(timeLeftSeconds / 60)
   const seconds = timeLeftSeconds % 60
   const formattedTime = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+
+  // Defense-in-depth: never expose questions for unpublished drafts or future scheduled exams before start time
+  if (isLockedNotYetStarted) {
+    const startLabel = scheduleClassification.startMs
+      ? toPersianDigits(new Date(scheduleClassification.startMs).toLocaleString('fa-IR'))
+      : 'نامشخص'
+    return (
+      <div
+        dir="rtl"
+        className="fixed inset-0 z-[99999] bg-slate-900/80 backdrop-blur-md flex items-center justify-center p-4 font-sans"
+      >
+        <div className="bg-white border-2 border-amber-300 rounded-2xl p-6 max-w-md w-full text-center shadow-xl space-y-3">
+          <div className="text-4xl">⏳</div>
+          <h3 className="text-base font-black text-slate-900">
+            {!scheduleClassification.isPublished
+              ? 'این آزمون هنوز منتشر نشده است'
+              : 'زمان شروع این آزمون هنوز فرا نرسیده است'}
+          </h3>
+          <p className="text-xs text-slate-600 leading-relaxed">
+            {!scheduleClassification.isPublished
+              ? 'آموزگار هنوز این آزمون را برای دانش‌آموزان منتشر نکرده است.'
+              : `زمان آغاز آزمون: ${startLabel}. به محض رسیدن زمان مقرر، می‌توانید وارد صفحه آزمون شوید.`}
+          </p>
+          <button
+            type="button"
+            onClick={onClose}
+            className="w-full py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-black cursor-pointer"
+          >
+            بازگشت به داشبورد
+          </button>
+        </div>
+      </div>
+    )
+  }
 
   // If student has submitted:
   if (submittedResult || existingSubmission) {

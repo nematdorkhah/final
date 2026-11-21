@@ -98,9 +98,13 @@ export default function TeacherDashboard({
     return false
   }
 
-  const now = new Date()
+  const nowMs = Date.now() + 2 * 60 * 1000
   const cleanPosts = posts.filter((p) => !isSystemRecord(p))
-  const publishedPosts = cleanPosts.filter((p) => new Date(p.publish_at) <= now)
+  const publishedPosts = cleanPosts.filter((p) => {
+    if (!p.publish_at) return true
+    const pubMs = new Date(p.publish_at).getTime()
+    return Number.isNaN(pubMs) || pubMs <= nowMs
+  })
   const homeworkPosts = publishedPosts.filter((p) => p.type === 'homework')
 
   const combinedGrades = useMemo(() => {
@@ -498,6 +502,7 @@ export default function TeacherDashboard({
                 submissions={submissions}
                 students={sortedStudents}
                 teacherPassword={teacherPassword}
+                exams={exams}
                 onRefresh={reload}
               />
             </div>

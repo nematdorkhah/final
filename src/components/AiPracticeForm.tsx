@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../supabaseClient'
+import { realtimeSync } from '../services/realtimeSync'
 import { generatePractice, generateSamplePreview, generateAnnouncement } from '../aiPractice'
 import TextbookManager from './TextbookManager'
 import TeacherExamBuilder from './TeacherExamBuilder'
@@ -93,13 +94,15 @@ export default function AiPracticeForm({
     if (!draft) return
     setPublishing(true)
     setErr('')
-    const { error } = await supabase.rpc('teacher_create_post', {
+    // Backdate by 5 minutes to defeat any device/DB clock skew so students see the homework immediately
+    const publishAtIso = new Date(Date.now() - 5 * 60 * 1000).toISOString()
+    const { data: createdPost, error } = await supabase.rpc('teacher_create_post', {
       p_password: teacherPassword,
       p_type: draft.type,
       p_title: draft.title,
       p_body: draft.body,
       p_due_at: null,
-      p_publish_at: new Date().toISOString(),
+      p_publish_at: publishAtIso,
       p_attachment_path: null,
     })
     setPublishing(false)
@@ -107,6 +110,35 @@ export default function AiPracticeForm({
       setErr('خطا: ' + error.message)
       return
     }
+    const rawCreated = Array.isArray(createdPost) ? createdPost[0] : createdPost
+    const resolvedPostId =
+      typeof rawCreated === 'string'
+        ? rawCreated
+        : rawCreated && typeof rawCreated === 'object' && rawCreated.id
+        ? String(rawCreated.id)
+        : String(Date.now())
+
+    const finalPost = {
+      id: resolvedPostId,
+      type: draft.type,
+      title: draft.title,
+      body: draft.body,
+      due_at: null,
+      publish_at: publishAtIso,
+      attachment_path: null,
+      created_at: new Date().toISOString(),
+      ...(rawCreated && typeof rawCreated === 'object' ? rawCreated : {}),
+    }
+
+    await realtimeSync
+      .broadcast({
+        type: 'post',
+        action: 'create',
+        item: finalPost,
+        id: finalPost.id,
+      })
+      .catch(() => {})
+
     onDone()
   }
 

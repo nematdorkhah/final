@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   Exam,
   ExamQuestion,
@@ -9,7 +9,7 @@ import {
 } from '../types/examTypes'
 import MathRenderer from './MathRenderer'
 import {
-  fetchAllExams,
+  fetchAllExamsWithDiagnostics,
   saveExam,
   deleteExam,
   generateAiExamQuestions,
@@ -33,6 +33,7 @@ import { CLASS_STUDENTS_ROSTER, isTestStudentRecord } from '../classStudents'
 import { sortByLastName } from '../utils/persianSort'
 import { toPersianDigits } from '../utils/persianNumbers'
 import { realtimeSync } from '../services/realtimeSync'
+import { parseExamTimestampMs } from '../utils/networkResilience'
 import WhatsappPosterModal from './WhatsappPosterModal'
 import { WhatsappPosterData } from '../types/whatsappPoster'
 import {
@@ -109,6 +110,15 @@ export default function TeacherExamBuilder({
   initialPracticeText?: string
 }) {
   const [exams, setExams] = useState<Exam[]>([])
+  const [examsSyncState, setExamsSyncState] = useState<
+    'loading' | 'server_loaded' | 'cached_fallback' | 'error' | 'empty_confirmed'
+  >('loading')
+  const [examsSyncError, setExamsSyncError] = useState<string | null>(null)
+  const [examsLastSyncedAt, setExamsLastSyncedAt] = useState<string | null>(null)
+  const [isLoadingExams, setIsLoadingExams] = useState(false)
+  const examsLoadSeqRef = useRef(0)
+  const isMountedRef = useRef(true)
+  const hasServerLoadedOnceRef = useRef(false)
   const [activeView, setActiveView] = useState<'list' | 'create' | 'review_subs'>('list')
   const [selectedExamForSubs, setSelectedExamForSubs] = useState<Exam | null>(null)
   const [selectedSubForGrading, setSelectedSubForGrading] = useState<StudentExamSubmission | null>(null)
@@ -183,7 +193,7 @@ export default function TeacherExamBuilder({
   const [isUntimed, setIsUntimed] = useState(false)
   const [assignmentDays, setAssignmentDays] = useState(5)
   const [customDueDateTime, setCustomDueDateTime] = useState('')
-  const [scheduleType, setScheduleType] = useState<'now' | 'tomorrow_10' | 'tomorrow_17' | 'custom'>('tomorrow_10')
+  const [scheduleType, setScheduleType] = useState<'now' | 'tomorrow_10' | 'tomorrow_17' | 'custom'>('now')
   const [customDateTime, setCustomDateTime] = useState('')
   const [durationMinutes, setDurationMinutes] = useState(30)
   const [savingExam, setSavingExam] = useState(false)
@@ -198,14 +208,60 @@ export default function TeacherExamBuilder({
   const [isApplyingRegrade, setIsApplyingRegrade] = useState(false)
   const [regradeResultSummary, setRegradeResultSummary] = useState<string | null>(null)
 
-  useEffect(() => {
-    loadExams()
-  }, [])
+  const loadExams = useCallback(async () => {
+    const seq = ++examsLoadSeqRef.current
+    setIsLoadingExams(true)
+    if (!hasServerLoadedOnceRef.current) {
+      setExamsSyncState((prev) => (prev === 'server_loaded' ? prev : 'loading'))
+    }
 
-  async function loadExams() {
-    const list = await fetchAllExams(teacherPassword)
-    setExams(list)
-  }
+    try {
+      const result = await fetchAllExamsWithDiagnostics(teacherPassword, {
+        requestSource: 'teacher_exam_builder',
+      })
+      if (!isMountedRef.current || seq !== examsLoadSeqRef.current) return
+
+      if (result.remoteOk) {
+        hasServerLoadedOnceRef.current = true
+        setExams(result.exams)
+        setExamsSyncError(null)
+        setExamsLastSyncedAt(new Date().toLocaleTimeString('fa-IR'))
+        setExamsSyncState(result.exams.length === 0 ? 'empty_confirmed' : 'server_loaded')
+      } else {
+        setExamsSyncError(result.error || 'خطا در ارتباط با پایگاه داده')
+        setExams((prev) => {
+          // Never overwrite fresh in-memory server data with stale local cache on temporary failure
+          const nextExams = prev.length > 0 ? prev : result.exams
+          setExamsSyncState(nextExams.length > 0 ? 'cached_fallback' : 'error')
+          return nextExams
+        })
+      }
+    } catch (err: any) {
+      if (!isMountedRef.current || seq !== examsLoadSeqRef.current) return
+      setExamsSyncError(err?.message || 'خطا در دریافت لیست آزمون‌ها از سرور')
+      setExams((prev) => {
+        setExamsSyncState(prev.length > 0 ? 'cached_fallback' : 'error')
+        return prev
+      })
+    } finally {
+      if (isMountedRef.current && seq === examsLoadSeqRef.current) {
+        setIsLoadingExams(false)
+      }
+    }
+  }, [teacherPassword])
+
+  useEffect(() => {
+    isMountedRef.current = true
+    loadExams()
+    const handleExamsUpdated = () => {
+      loadExams()
+    }
+    window.addEventListener('exams-updated', handleExamsUpdated)
+    return () => {
+      isMountedRef.current = false
+      window.removeEventListener('exams-updated', handleExamsUpdated)
+    }
+  }, [loadExams])
 
   function handleStartEditExam(exam: Exam) {
     const existingSubs = getExamSubmissions(exam.id)
@@ -379,10 +435,6 @@ export default function TeacherExamBuilder({
       })
 
       const totalPoints = generatedQuestions.reduce((sum, q) => sum + (Number(q.points) || 2), 0)
-      const now = new Date()
-      const tomorrow10 = new Date(now)
-      tomorrow10.setDate(tomorrow10.getDate() + 1)
-      tomorrow10.setHours(10, 0, 0, 0)
 
       const rawPrompt = examTopic.trim()
       let cleanTitle = examCustomTitle.trim()
@@ -399,7 +451,7 @@ export default function TeacherExamBuilder({
         title: cleanTitle,
         subject: examSubject,
         description: `آزمون کلاسی شامل ${generatedQuestions.length} سوال متنوع طراحی‌شده برای دانش‌آموزان پایه ششم.`,
-        scheduledStartTime: tomorrow10.toISOString(),
+        scheduledStartTime: new Date().toISOString(),
         durationMinutes: 30,
         questions: generatedQuestions,
         totalPoints,
@@ -409,6 +461,7 @@ export default function TeacherExamBuilder({
 
       setDraftExam(newDraft)
       setExamTitle(newDraft.title)
+      setScheduleType('now')
       setConfirmedQuestionIds(new Set())
       setRejectedQuestionIds(new Set())
       setCreatingStep('questions')
@@ -420,10 +473,6 @@ export default function TeacherExamBuilder({
   }
 
   function handleCreateManualBlank() {
-    const now = new Date()
-    const tomorrow10 = new Date(now)
-    tomorrow10.setDate(tomorrow10.getDate() + 1)
-    tomorrow10.setHours(10, 0, 0, 0)
 
     const rawPrompt = examTopic.trim()
     let cleanTitle = examCustomTitle.trim()
@@ -440,7 +489,7 @@ export default function TeacherExamBuilder({
       title: cleanTitle,
       subject: examSubject,
       description: 'آزمون طراحی‌شده توسط آموزگار',
-      scheduledStartTime: tomorrow10.toISOString(),
+      scheduledStartTime: new Date().toISOString(),
       durationMinutes: 30,
       questions: [],
       totalPoints: 0,
@@ -450,6 +499,7 @@ export default function TeacherExamBuilder({
 
     setDraftExam(blankDraft)
     setExamTitle(blankDraft.title)
+    setScheduleType('now')
     setConfirmedQuestionIds(new Set())
     setRejectedQuestionIds(new Set())
     setCreatingStep('questions')
@@ -616,7 +666,8 @@ export default function TeacherExamBuilder({
   function calculateScheduledTime(): string {
     const now = new Date()
     if (scheduleType === 'now') {
-      return now.toISOString()
+      // Backdate by 2 minutes to defeat minor device clock skew so students can start immediately
+      return new Date(now.getTime() - 2 * 60 * 1000).toISOString()
     } else if (scheduleType === 'tomorrow_10') {
       const d = new Date(now)
       d.setDate(d.getDate() + 1)
@@ -632,7 +683,7 @@ export default function TeacherExamBuilder({
         const parsed = new Date(customDateTime)
         if (!isNaN(parsed.getTime())) return parsed.toISOString()
       }
-      return now.toISOString()
+      return new Date(now.getTime() - 2 * 60 * 1000).toISOString()
     }
   }
 
@@ -766,7 +817,7 @@ export default function TeacherExamBuilder({
     // Fresh fetch from Supabase to load all student submissions & verify grades table
     setIsRefreshingSubs(true)
     Promise.all([
-      fetchExamSubmissions(exam.id),
+      fetchExamSubmissions(exam.id, undefined, true, teacherPassword),
       loadGradebookStatus(),
     ])
       .catch((err) => console.warn('Could not fetch submissions from Supabase:', err))
@@ -780,7 +831,7 @@ export default function TeacherExamBuilder({
     setGradeSyncErrorBanner(null)
     try {
       await Promise.all([
-        fetchExamSubmissions(selectedExamForSubs.id),
+        fetchExamSubmissions(selectedExamForSubs.id, undefined, true, teacherPassword),
         loadGradebookStatus(),
       ])
       setReleaseFeedbackMsg('✓ پاسخ‌های دانش‌آموزان و وضعیت جدول grades از پایگاه‌داده به‌روز شدند.')
@@ -842,7 +893,7 @@ export default function TeacherExamBuilder({
       )
       await loadExams()
       await Promise.all([
-        fetchExamSubmissions(selectedExamForSubs.id),
+        fetchExamSubmissions(selectedExamForSubs.id, undefined, true, teacherPassword),
         loadGradebookStatus(),
       ])
       if (!isCurrentlyReleased) {
@@ -888,7 +939,7 @@ export default function TeacherExamBuilder({
       )
       await loadExams()
       await Promise.all([
-        fetchExamSubmissions(selectedExamForSubs.id),
+        fetchExamSubmissions(selectedExamForSubs.id, undefined, true, teacherPassword),
         loadGradebookStatus(),
       ])
       const gs = res.gradeSyncSummary
@@ -961,7 +1012,7 @@ export default function TeacherExamBuilder({
     setRegradeResultSummary(null)
     setOverrideApprovedRegrade(false)
     try {
-      const preview = await previewRegradeExamSubmissions(examId)
+      const preview = await previewRegradeExamSubmissions(examId, teacherPassword)
       setRegradePreview(preview)
     } catch (err: any) {
       alert('خطا در محاسبه پیش‌نمایش بازتصحیح: ' + (err?.message || 'خطای سرور'))
@@ -981,7 +1032,7 @@ export default function TeacherExamBuilder({
         teacherPassword,
       })
       await Promise.all([
-        fetchExamSubmissions(regradePreview.examId),
+        fetchExamSubmissions(regradePreview.examId, undefined, true, teacherPassword),
         loadGradebookStatus(),
       ])
       const gs = res.gradeSyncSummary
@@ -1034,11 +1085,152 @@ export default function TeacherExamBuilder({
           ======================================================== */}
       {activeView === 'list' && (
         <div>
-          {exams.length === 0 ? (
+          {/* Explicit Sync Source & Status Bar */}
+          {(() => {
+            const publishedCount = exams.filter((e) => e.published !== false).length
+            const draftCount = exams.filter((e) => e.published === false).length
+            const isServerOk = examsSyncState === 'server_loaded' || examsSyncState === 'empty_confirmed'
+            const isCached = examsSyncState === 'cached_fallback'
+            const isError = examsSyncState === 'error'
+            const bg = isError
+              ? '#FEF2F2'
+              : isCached
+              ? '#FFFBEB'
+              : isServerOk
+              ? '#F0FDF4'
+              : '#F8FAFC'
+            const border = isError
+              ? '#FCA5A5'
+              : isCached
+              ? '#FCD34D'
+              : isServerOk
+              ? '#BBF7D0'
+              : '#E2E8F0'
+            const color = isError
+              ? '#991B1B'
+              : isCached
+              ? '#92400E'
+              : isServerOk
+              ? '#166534'
+              : '#475569'
+
+            return (
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
+                  gap: 8,
+                  padding: '10px 14px',
+                  marginBottom: 14,
+                  borderRadius: 12,
+                  background: bg,
+                  border: `1.5px solid ${border}`,
+                  color,
+                  fontSize: 12.5,
+                  fontWeight: 700,
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <span>
+                    {isLoadingExams && exams.length === 0
+                      ? '⏳ در حال دریافت لیست آزمون‌ها از سرور...'
+                      : isError
+                      ? '❌ خطا در دریافت لیست آزمون‌ها از سرور'
+                      : isCached
+                      ? '⚠️ نمایش حافظه موقت (ارتباط با سرور برقرار نشد)'
+                      : examsSyncState === 'empty_confirmed'
+                      ? '✅ متصل به سرور — هیچ آزمونی ثبت نشده است'
+                      : `✅ داده‌های سرور بارگذاری شد (${toPersianDigits(publishedCount)} منتشرشده${draftCount > 0 ? ` · ${toPersianDigits(draftCount)} پیش‌نویس` : ''})`}
+                  </span>
+                  {examsLastSyncedAt && isServerOk && (
+                    <span style={{ fontSize: 11, opacity: 0.8 }}>
+                      آخرین همگام‌سازی: {examsLastSyncedAt}
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => loadExams()}
+                  disabled={isLoadingExams}
+                  style={{
+                    padding: '5px 11px',
+                    borderRadius: 9,
+                    border: `1.5px solid ${border}`,
+                    background: '#FFFFFF',
+                    color: '#0F172A',
+                    fontSize: 12,
+                    fontWeight: 800,
+                    cursor: isLoadingExams ? 'wait' : 'pointer',
+                  }}
+                >
+                  {isLoadingExams ? '⏳ در حال بررسی...' : '🔄 بروزرسانی از سرور'}
+                </button>
+              </div>
+            )
+          })()}
+
+          {examsSyncState === 'cached_fallback' && examsSyncError && (
+            <div
+              style={{
+                background: '#FFFBEB',
+                border: '1px solid #F59E0B',
+                color: '#92400E',
+                borderRadius: 10,
+                padding: '8px 12px',
+                fontSize: 12,
+                fontWeight: 700,
+                marginBottom: 12,
+              }}
+            >
+              جزئیات خطای اتصال: {examsSyncError} — آزمون‌های ذخیره‌شده قبلی موقتاً نمایش داده می‌شوند.
+            </div>
+          )}
+
+          {exams.length === 0 && examsSyncState === 'loading' ? (
+            <div className="mobile-empty-state" style={{ padding: '36px 16px', textAlign: 'center' }}>
+              <div style={{ fontSize: 38, marginBottom: 10 }}>⏳</div>
+              <h3 style={{ fontSize: 16, fontWeight: 900, color: 'var(--black)', margin: '0 0 6px 0' }}>
+                در حال دریافت لیست آزمون‌ها از پایگاه داده...
+              </h3>
+              <p style={{ fontSize: 13, color: '#64748B', maxWidth: 360, margin: '0 auto' }}>
+                لطفاً چند لحظه صبر کنید تا لیست کامل آزمون‌ها و تکالیف آنلاین از سرور بارگذاری شود.
+              </p>
+            </div>
+          ) : exams.length === 0 && examsSyncState === 'error' ? (
+            <div
+              className="mobile-empty-state"
+              style={{
+                padding: '32px 16px',
+                textAlign: 'center',
+                background: '#FEF2F2',
+                border: '2px solid #FCA5A5',
+                borderRadius: 16,
+              }}
+            >
+              <div style={{ fontSize: 40, marginBottom: 10 }}>📡</div>
+              <h3 style={{ fontSize: 16, fontWeight: 900, color: '#991B1B', margin: '0 0 6px 0' }}>
+                خطا در دریافت لیست آزمون‌ها از سرور
+              </h3>
+              <p style={{ fontSize: 13, color: '#7F1D1D', maxWidth: 420, margin: '0 auto 14px auto', lineHeight: 1.6 }}>
+                {examsSyncError || 'ارتباط با پایگاه داده برقرار نشد. آزمون‌های شما حذف نشده‌اند؛ لطفاً اتصال اینترنت را بررسی کرده و دوباره تلاش کنید.'}
+              </p>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => loadExams()}
+                disabled={isLoadingExams}
+                style={{ background: '#DC2626', borderColor: '#991B1B' }}
+              >
+                {isLoadingExams ? '⏳ در حال تلاش مجدد...' : '🔄 تلاش مجدد برای دریافت از سرور'}
+              </button>
+            </div>
+          ) : exams.length === 0 ? (
             <div className="mobile-empty-state" style={{ padding: '36px 16px', textAlign: 'center' }}>
               <div style={{ fontSize: 44, marginBottom: 12 }}>📝</div>
               <h3 style={{ fontSize: 17, fontWeight: 900, color: 'var(--black)', margin: '0 0 6px 0' }}>
-                هنوز هیچ آزمونی طراحی نشده است
+                هنوز هیچ آزمونی در سرور ثبت نشده است
               </h3>
               <p style={{ fontSize: 13, color: '#64748B', maxWidth: 360, margin: '0 auto 18px auto' }}>
                 می‌توانید با دستیار هوش مصنوعی تنها با وارد کردن درس و مبحث، آزمون‌های استاندارد چهارگزینه‌ای، جای خالی و تشریحی بسازید.
@@ -1060,8 +1252,10 @@ export default function TeacherExamBuilder({
                 const subs = getExamSubmissions(exam.id)
                 const pendingSubs = subs.filter((s) => !s.teacherGrading?.approved)
                 const approvedSubs = subs.filter((s) => s.teacherGrading?.approved)
-                const startTimeDate = new Date(exam.scheduledStartTime || exam.createdAt || Date.now())
-                const isUpcoming = startTimeDate.getTime() > Date.now()
+                const startMs = parseExamTimestampMs(exam.scheduledStartTime || exam.createdAt) ?? Date.now()
+                const startTimeDate = new Date(startMs)
+                const isUpcoming = startMs > Date.now()
+                const isPublished = exam.published !== false
 
                 return (
                   <div
@@ -1071,13 +1265,13 @@ export default function TeacherExamBuilder({
                       padding: 16,
                       background: '#FFFFFF',
                       borderRadius: 16,
-                      border: '2px solid var(--black)',
+                      border: isPublished ? '2px solid var(--black)' : '2px dashed #94A3B8',
                       boxShadow: '0 4px 0 var(--black)',
                     }}
                   >
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
                       <div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
                           <span
                             style={{
                               background: '#DBEAFE',
@@ -1092,19 +1286,33 @@ export default function TeacherExamBuilder({
                           </span>
                           <span
                             style={{
-                              background: exam.mode === 'assignment' ? '#ECFDF5' : isUpcoming ? '#FEF3C7' : '#DCFCE7',
-                              color: exam.mode === 'assignment' ? '#065F46' : isUpcoming ? '#92400E' : '#166534',
+                              background: !isPublished
+                                ? '#F1F5F9'
+                                : exam.mode === 'assignment'
+                                ? '#ECFDF5'
+                                : isUpcoming
+                                ? '#FEF3C7'
+                                : '#DCFCE7',
+                              color: !isPublished
+                                ? '#475569'
+                                : exam.mode === 'assignment'
+                                ? '#065F46'
+                                : isUpcoming
+                                ? '#92400E'
+                                : '#166534',
                               fontSize: 12,
                               fontWeight: 800,
                               padding: '2px 8px',
                               borderRadius: 999,
                             }}
                           >
-                            {exam.mode === 'assignment'
-                              ? '📝 تکلیف تعاملی'
+                            {!isPublished
+                              ? '🔒 پیش‌نویس (منتشرنشده)'
+                              : exam.mode === 'assignment'
+                              ? '📝 تکلیف تعاملی منتشرشده'
                               : isUpcoming
-                              ? '⏳ زمان‌بندی شده'
-                              : '🟢 آزمون فعال'}
+                              ? '⏳ آزمون زمان‌بندی‌شده (منتشرشده)'
+                              : '🟢 آزمون فعال (منتشرشده)'}
                           </span>
                         </div>
                         <h3 style={{ fontSize: 16, fontWeight: 900, margin: '2px 0 6px 0', color: '#0F172A' }}>
@@ -1217,14 +1425,7 @@ export default function TeacherExamBuilder({
                             fontSize: 13,
                             padding: '6px 12px',
                           }}
-                          onClick={() => {
-                            setDraftExam(exam)
-                            setExamTitle(sanitizeExamTitle(exam.title, exam.subject))
-                            setDurationMinutes(Number(exam.durationMinutes) || 30)
-                            setConfirmedQuestionIds(new Set(exam.questions.map((q) => q.id)))
-                            setActiveView('create')
-                            setCreatingStep('questions')
-                          }}
+                          onClick={() => handleStartEditExam(exam)}
                           title="ویرایش یا افزودن سوالات بیشتر به این آزمون"
                         >
                           ✏️ ویرایش و افزودن سوال ({exam.questions.length})
@@ -2134,6 +2335,7 @@ export default function TeacherExamBuilder({
                     onClick={() => {
                       setExamMode('assignment')
                       setIsUntimed(true)
+                      if (!isEditingExisting) setScheduleType('now')
                     }}
                     style={{
                       padding: '12px 14px',
@@ -2181,6 +2383,22 @@ export default function TeacherExamBuilder({
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 10 }}>
                   <button
                     type="button"
+                    onClick={() => setScheduleType('now')}
+                    style={{
+                      padding: '8px 14px',
+                      borderRadius: 10,
+                      fontSize: 13,
+                      fontWeight: 800,
+                      border: '2px solid var(--black)',
+                      background: scheduleType === 'now' ? '#DCFCE7' : '#FFFFFF',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    همین الان فعال شود (پیشنهادی) 🟢
+                  </button>
+
+                  <button
+                    type="button"
                     onClick={() => setScheduleType('tomorrow_10')}
                     style={{
                       padding: '8px 14px',
@@ -2192,7 +2410,7 @@ export default function TeacherExamBuilder({
                       cursor: 'pointer',
                     }}
                   >
-                    فردا ساعت ۱۰:۰۰ صبح (پیشنهادی) ☀️
+                    فردا ساعت ۱۰:۰۰ صبح ☀️
                   </button>
 
                   <button
@@ -2209,22 +2427,6 @@ export default function TeacherExamBuilder({
                     }}
                   >
                     فردا ساعت ۱۷:۰۰ عصر 🌇
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setScheduleType('now')}
-                    style={{
-                      padding: '8px 14px',
-                      borderRadius: 10,
-                      fontSize: 13,
-                      fontWeight: 800,
-                      border: '2px solid var(--black)',
-                      background: scheduleType === 'now' ? '#DCFCE7' : '#FFFFFF',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    همین الان فعال شود 🟢
                   </button>
 
                   <button
