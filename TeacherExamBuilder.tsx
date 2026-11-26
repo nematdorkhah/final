@@ -1,0 +1,4025 @@
+import { useState, useEffect, useRef, useCallback } from 'react'
+import {
+  Exam,
+  ExamQuestion,
+  QuestionType,
+  StudentExamSubmission,
+  RegradePreviewResult,
+  RegradeDiffItem,
+} from '../types/examTypes'
+import MathRenderer from './MathRenderer'
+import {
+  fetchAllExamsWithDiagnostics,
+  saveExam,
+  deleteExam,
+  generateAiExamQuestions,
+  regenerateSingleAiQuestion,
+  convertPracticeTextToQuestions,
+  getExamSubmissions,
+  fetchExamSubmissions,
+  approveExamSubmission,
+  releaseExamResultsForAll,
+  previewRegradeExamSubmissions,
+  applyRegradeExamSubmissions,
+  sanitizeExamTitle,
+  isPromptLike,
+  generateUuid,
+  isExamResultsReleased,
+  findGradebookRowForExamSubmission,
+  syncExamApprovedGradesToGradebook,
+  fetchTeacherGradebookRows,
+  getLocalTeacherExams,
+} from '../utils/examStore'
+import { CLASS_STUDENTS_ROSTER, isTestStudentRecord } from '../classStudents'
+import { sortByLastName } from '../utils/persianSort'
+import { toPersianDigits } from '../utils/persianNumbers'
+import { realtimeSync } from '../services/realtimeSync'
+import { parseExamTimestampMs } from '../utils/networkResilience'
+import { getServerNowMs } from '../supabaseClient'
+import { useExamIntegrityLogs } from './ExamIntegrityAlerts'
+import { IntegrityEvent, summarizeIntegrityEvents, describeIntegrityEvent } from '../services/examIntegrity'
+import WhatsappPosterModal from './WhatsappPosterModal'
+import { WhatsappPosterData } from '../types/whatsappPoster'
+import {
+  resolveCorrectOptionIndex,
+  resolveStudentSelectedOption,
+  cleanOptionText,
+  safeNumber,
+  safeScore,
+  safeScaled20,
+  roundScore2,
+  getExamMaxPoints,
+  validateExamQuestion,
+  validateExam,
+  evaluateEntireExamSubmission,
+  getSubmissionEffectiveScore,
+  isSubmissionApprovedByTeacher,
+} from '../utils/persianSemanticGrader'
+
+
+const SUBJECT_PRESETS = [
+  'فارسی',
+  'ریاضی',
+  'علوم تجربی',
+  'هدیه‌های آسمان',
+  'مطالعات اجتماعی',
+  'هوش و استعداد تحلیلی (تیزهوشان)',
+]
+
+const TOPIC_SUGGESTIONS: Record<string, string[]> = {
+  'فارسی': [
+    'آرایه‌های ادبی، تشبیه و کنایه درس ۱ و ۲',
+    'ستایش و فصل اول فارسی ششم',
+    'دانش زبانی و دستور زبان (فعل، فاعل، مفعول)',
+    'آزمون جامع نوبت اول فارسی',
+  ],
+  'ریاضی': [
+    'کسرها و محاسبات با اعداد مخلوط',
+    'اعداد اعشاری و تقسیم',
+    'مساحت، حجم و اندازه‌گیری',
+    'نسبت، تناسب و درصد',
+  ],
+  'علوم تجربی': [
+    'سرگذشت دفتر من و آزمایش‌ها',
+    'سفر به اعماق زمین و زلزله',
+    'دستگاه گردش خون و تنفس',
+    'نیرو و انرژی در زندگی روزمره',
+  ],
+  'هدیه‌های آسمان': [
+    'یکتاپرستی و نعمت‌های پروردگار',
+    'احکام نماز و روزه در پایه ششم',
+    'سیره پیامبر اکرم (ص) و اهل بیت',
+  ],
+  'مطالعات اجتماعی': [
+    'فصل دوستی و تصمیم‌گیری',
+    'منابع انرژی و مصرف بهینه',
+    'ایران و همسایگان',
+  ],
+  'هوش و استعداد تحلیلی (تیزهوشان)': [
+    'هوش کلامی و درک مطلب پیشرفته',
+    'الگوهای عددی و ماتریس‌های تصویری',
+    'استدلال منطقی و هوش تحلیلی تیزهوشان',
+  ],
+}
+
+export default function TeacherExamBuilder({
+  teacherPassword,
+  students,
+  onDone,
+  initialPracticeText,
+  initialPracticeTitle,
+  onInitialPracticeConsumed,
+}: {
+  teacherPassword: string
+  students: any[]
+  onDone?: () => void
+  initialPracticeText?: string
+  initialPracticeTitle?: string
+  onInitialPracticeConsumed?: () => void
+}) {
+  // Show the last known list instantly; the server list replaces it as soon as it arrives
+  const [exams, setExams] = useState<Exam[]>(() => getLocalTeacherExams())
+  const [examsSyncState, setExamsSyncState] = useState<
+    'loading' | 'server_loaded' | 'cached_fallback' | 'error' | 'empty_confirmed'
+  >('loading')
+  const [examsSyncError, setExamsSyncError] = useState<string | null>(null)
+  const [examsLastSyncedAt, setExamsLastSyncedAt] = useState<string | null>(null)
+  const [isLoadingExams, setIsLoadingExams] = useState(false)
+  const examsLoadSeqRef = useRef(0)
+  const isMountedRef = useRef(true)
+  const hasServerLoadedOnceRef = useRef(false)
+  const [activeView, setActiveView] = useState<'list' | 'create' | 'review_subs'>('list')
+  const [selectedExamForSubs, setSelectedExamForSubs] = useState<Exam | null>(null)
+  const [selectedSubForGrading, setSelectedSubForGrading] = useState<StudentExamSubmission | null>(null)
+  const [teacherScoresDraft, setTeacherScoresDraft] = useState<Record<string, number>>({})
+  const [teacherNoteDraft, setTeacherNoteDraft] = useState('')
+  const [gradingSuccessMsg, setGradingSuccessMsg] = useState('')
+  const [whatsappModalData, setWhatsappModalData] = useState<WhatsappPosterData | null>(null)
+  const [isReleasingResults, setIsReleasingResults] = useState(false)
+  const [isRefreshingSubs, setIsRefreshingSubs] = useState(false)
+  const [releaseFeedbackMsg, setReleaseFeedbackMsg] = useState('')
+  const [, setSubsRefreshKey] = useState(0)
+  const [subsDisplayLayout, setSubsDisplayLayout] = useState<'table' | 'cards'>('table')
+  const [gradebookRows, setGradebookRows] = useState<any[]>([])
+  const [gradebookFetchState, setGradebookFetchState] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle')
+  const [gradebookFetchError, setGradebookFetchError] = useState<string | null>(null)
+  const [gradeSyncErrorBanner, setGradeSyncErrorBanner] = useState<string | null>(null)
+  const [isSyncingGradesTable, setIsSyncingGradesTable] = useState(false)
+
+  function handleExportWhatsappExam(exam: Exam) {
+    setWhatsappModalData({
+      type: exam.mode === 'assignment' ? 'homework' : 'exam',
+      title: sanitizeExamTitle(exam.title, exam.subject),
+      subject: exam.subject || 'عمومی',
+      body: exam.description || '',
+      questions: (exam.questions || []).map((q) => ({
+        id: q.id,
+        question: q.question,
+        type: q.type,
+        options: q.options,
+        points: q.points,
+      })),
+      dueAt: exam.dueDate || exam.scheduledEndTime || null,
+      createdAt: exam.createdAt || exam.scheduledStartTime || null,
+      teacherName: 'آموزگار پایه ششم',
+      totalPoints: exam.totalPoints,
+      durationMinutes: exam.durationMinutes,
+    })
+  }
+
+  // Creation & Editing state
+  const [creatingStep, setCreatingStep] = useState<'prompt' | 'questions' | 'schedule'>('prompt')
+  const [promptMode, setPromptMode] = useState<'ai_generate' | 'paste_practice'>('ai_generate')
+  const [pastedPracticeText, setPastedPracticeText] = useState('')
+  const [examSubject, setExamSubject] = useState(SUBJECT_PRESETS[0])
+  const [examCustomTitle, setExamCustomTitle] = useState('')
+  const [examTopic, setExamTopic] = useState('')
+  const [examCount, setExamCount] = useState(5)
+  const [selectedTypes, setSelectedTypes] = useState<QuestionType[]>([
+    'multiple_choice',
+    'fill_in_the_blank',
+    'descriptive',
+  ])
+  const [examDifficulty, setExamDifficulty] = useState<'easy' | 'medium' | 'hard'>('medium')
+  const [extraInstructions, setExtraInstructions] = useState('')
+  const [isAiGenerating, setIsAiGenerating] = useState(false)
+  const [aiError, setAiError] = useState('')
+
+  // Draft exam
+  const [draftExam, setDraftExam] = useState<Exam | null>(null)
+  const [confirmedQuestionIds, setConfirmedQuestionIds] = useState<Set<string>>(new Set())
+  const [rejectedQuestionIds, setRejectedQuestionIds] = useState<Set<string>>(new Set())
+  const [regeneratingQId, setRegeneratingQId] = useState<string | null>(null)
+  const [regenSuccessMsg, setRegenSuccessMsg] = useState<string | null>(null)
+
+  // Question editing modal
+  const [editingQ, setEditingQ] = useState<ExamQuestion | null>(null)
+  const [isNewQuestionModal, setIsNewQuestionModal] = useState(false)
+
+  // Scheduling
+  const [examTitle, setExamTitle] = useState('')
+  const [examMode, setExamMode] = useState<'exam' | 'assignment'>('exam')
+  const [isUntimed, setIsUntimed] = useState(false)
+  const [assignmentDays, setAssignmentDays] = useState(5)
+  const [customDueDateTime, setCustomDueDateTime] = useState('')
+  const [scheduleType, setScheduleType] = useState<'now' | 'tomorrow_10' | 'tomorrow_17' | 'custom'>('now')
+  const [customDateTime, setCustomDateTime] = useState('')
+  const [durationMinutes, setDurationMinutes] = useState(30)
+  const [savingExam, setSavingExam] = useState(false)
+  const [isEditingExisting, setIsEditingExisting] = useState(false)
+  const [deleteConfirmExam, setDeleteConfirmExam] = useState<Exam | null>(null)
+  const [examEditWarningExam, setExamEditWarningExam] = useState<Exam | null>(null)
+
+  // Regrading states
+  const [regradePreview, setRegradePreview] = useState<RegradePreviewResult | null>(null)
+  const [isLoadingRegrade, setIsLoadingRegrade] = useState(false)
+  const [overrideApprovedRegrade, setOverrideApprovedRegrade] = useState(false)
+  const [isApplyingRegrade, setIsApplyingRegrade] = useState(false)
+  const [regradeResultSummary, setRegradeResultSummary] = useState<string | null>(null)
+
+  const loadExams = useCallback(async () => {
+    const seq = ++examsLoadSeqRef.current
+    setIsLoadingExams(true)
+    if (!hasServerLoadedOnceRef.current) {
+      setExamsSyncState((prev) => (prev === 'server_loaded' ? prev : 'loading'))
+    }
+
+    try {
+      const result = await fetchAllExamsWithDiagnostics(teacherPassword, {
+        requestSource: 'teacher_exam_builder',
+      })
+      if (!isMountedRef.current || seq !== examsLoadSeqRef.current) return
+
+      if (result.remoteOk) {
+        hasServerLoadedOnceRef.current = true
+        setExams(result.exams)
+        setExamsSyncError(null)
+        setExamsLastSyncedAt(new Date().toLocaleTimeString('fa-IR'))
+        setExamsSyncState(result.exams.length === 0 ? 'empty_confirmed' : 'server_loaded')
+      } else {
+        setExamsSyncError(result.error || 'خطا در ارتباط با پایگاه داده')
+        setExams((prev) => {
+          // Never overwrite fresh in-memory server data with stale local cache on temporary failure
+          const nextExams = prev.length > 0 ? prev : result.exams
+          setExamsSyncState(nextExams.length > 0 ? 'cached_fallback' : 'error')
+          return nextExams
+        })
+      }
+    } catch (err: any) {
+      if (!isMountedRef.current || seq !== examsLoadSeqRef.current) return
+      setExamsSyncError(err?.message || 'خطا در دریافت لیست آزمون‌ها از سرور')
+      setExams((prev) => {
+        setExamsSyncState(prev.length > 0 ? 'cached_fallback' : 'error')
+        return prev
+      })
+    } finally {
+      if (isMountedRef.current && seq === examsLoadSeqRef.current) {
+        setIsLoadingExams(false)
+      }
+    }
+  }, [teacherPassword])
+
+  // Live exam-integrity log (leaving page / screenshot keys / copy) shown in the answer-sheet table
+  const integrityLogs = useExamIntegrityLogs(teacherPassword, 15000, activeView === 'review_subs')
+
+  // "تکلیف هوشمند" → convert the AI-written practice text into an interactive ONLINE assignment that
+  // students answer in the app and the teacher can grade/regrade with AI.
+  const consumedPracticeRef = useRef<string>('')
+  useEffect(() => {
+    const text = String(initialPracticeText || '').trim()
+    if (!text || consumedPracticeRef.current === text) return
+    consumedPracticeRef.current = text
+    onInitialPracticeConsumed?.()
+    setActiveView('create')
+    setCreatingStep('prompt')
+    setAiError('')
+    setIsAiGenerating(true)
+    ;(async () => {
+      try {
+        const questions = await convertPracticeTextToQuestions(text, examSubject, teacherPassword)
+        if (!Array.isArray(questions) || questions.length === 0) {
+          throw new Error('هیچ سوالی از متن تمرین استخراج نشد.')
+        }
+        const title = String(initialPracticeTitle || '').trim() || `تکلیف ${examSubject}`
+        const newDraft: Exam = {
+          id: typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : generateUuid(),
+          title,
+          subject: examSubject,
+          description: `تکلیف آنلاین شامل ${questions.length} سوال — پاسخ‌ها در سامانه ثبت و با هوش مصنوعی تصحیح می‌شوند.`,
+          scheduledStartTime: new Date().toISOString(),
+          durationMinutes: 0,
+          isUntimed: true,
+          mode: 'assignment',
+          questions,
+          totalPoints: questions.reduce((sum, q) => sum + (Number(q.points) || 2), 0),
+          createdAt: new Date().toISOString(),
+          published: false,
+        }
+        setExamMode('assignment')
+        setIsUntimed(true)
+        setDraftExam(newDraft)
+        setExamTitle(title)
+        setScheduleType('now')
+        setConfirmedQuestionIds(new Set(questions.map((q) => q.id)))
+        setRejectedQuestionIds(new Set())
+        setCreatingStep('questions')
+      } catch (err: any) {
+        setAiError('خطا در تبدیل تمرین به تکلیف آنلاین: ' + (err?.message || 'لطفاً دوباره تلاش کنید.'))
+      } finally {
+        setIsAiGenerating(false)
+      }
+    })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialPracticeText])
+
+  useEffect(() => {
+    isMountedRef.current = true
+    loadExams()
+    const handleExamsUpdated = () => {
+      loadExams()
+    }
+    window.addEventListener('exams-updated', handleExamsUpdated)
+    return () => {
+      isMountedRef.current = false
+      window.removeEventListener('exams-updated', handleExamsUpdated)
+    }
+  }, [loadExams])
+
+  function handleStartEditExam(exam: Exam) {
+    const existingSubs = getExamSubmissions(exam.id)
+    if (existingSubs.length > 0) {
+      setExamEditWarningExam(exam)
+      return
+    }
+    proceedWithEditExam(exam)
+  }
+
+  function proceedWithEditExam(exam: Exam) {
+    setExamEditWarningExam(null)
+    setIsEditingExisting(true)
+    setDraftExam(exam)
+    setExamTitle(exam.title || '')
+    setExamSubject(exam.subject || SUBJECT_PRESETS[0])
+    setExamMode(exam.mode || 'exam')
+    setIsUntimed(Boolean(exam.isUntimed || exam.mode === 'assignment'))
+    setDurationMinutes(exam.durationMinutes || 30)
+
+    if (exam.dueDate) {
+      const d = new Date(exam.dueDate)
+      if (!isNaN(d.getTime())) {
+        const pad = (n: number) => String(n).padStart(2, '0')
+        setCustomDueDateTime(
+          `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+        )
+      } else {
+        setCustomDueDateTime('')
+      }
+    } else {
+      setCustomDueDateTime('')
+    }
+
+    if (exam.scheduledStartTime) {
+      setScheduleType('custom')
+      const d = new Date(exam.scheduledStartTime)
+      if (!isNaN(d.getTime())) {
+        const pad = (n: number) => String(n).padStart(2, '0')
+        setCustomDateTime(
+          `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+        )
+      } else {
+        setCustomDateTime('')
+      }
+    } else {
+      setScheduleType('now')
+    }
+
+    // Confirm all existing questions
+    setConfirmedQuestionIds(new Set((exam.questions || []).map((q) => q.id)))
+    setRejectedQuestionIds(new Set())
+
+    // Direct transition to questions editing step
+    setActiveView('create')
+    setCreatingStep('questions')
+  }
+
+  function handleCancelEdit() {
+    setIsEditingExisting(false)
+    setDraftExam(null)
+    setActiveView('list')
+    setCreatingStep('prompt')
+  }
+
+  function handleTopicChange(text: string) {
+    setExamTopic(text)
+    const lower = text.toLowerCase()
+    if (
+      lower.includes('ریاضی') ||
+      lower.includes('کسر') ||
+      lower.includes('اعشار') ||
+      lower.includes('مساحت') ||
+      lower.includes('محیط') ||
+      lower.includes('حجم') ||
+      lower.includes('تناسب') ||
+      lower.includes('مختصات') ||
+      lower.includes('تقارن') ||
+      lower.includes('زاویه') ||
+      lower.includes('احتمال') ||
+      lower.includes('اعداد صحیح') ||
+      lower.includes('هندسه')
+    ) {
+      setExamSubject('ریاضی')
+    } else if (
+      lower.includes('فارسی') ||
+      lower.includes('شعر') ||
+      lower.includes('آرایه') ||
+      lower.includes('تشبیه') ||
+      lower.includes('کنایه') ||
+      lower.includes('مفعول') ||
+      lower.includes('نهاد') ||
+      lower.includes('مسند') ||
+      lower.includes('انشا') ||
+      lower.includes('نگارش') ||
+      lower.includes('ستایش')
+    ) {
+      setExamSubject('فارسی')
+    } else if (
+      lower.includes('علوم') ||
+      lower.includes('زلزله') ||
+      lower.includes('سنگ') ||
+      lower.includes('زمین') ||
+      lower.includes('میکروسکوپ') ||
+      lower.includes('سلول') ||
+      lower.includes('نیرو') ||
+      lower.includes('اهرم') ||
+      lower.includes('انرژی') ||
+      lower.includes('گردش خون') ||
+      lower.includes('تنفس') ||
+      lower.includes('اسید') ||
+      lower.includes('کاغذ')
+    ) {
+      setExamSubject('علوم تجربی')
+    } else if (
+      lower.includes('تیزهوشان') ||
+      lower.includes('المپیاد') ||
+      lower.includes('هوش') ||
+      lower.includes('استعداد تحلیلی') ||
+      lower.includes('مکعب') ||
+      lower.includes('تاس')
+    ) {
+      setExamSubject('هوش و استعداد تحلیلی')
+    } else if (
+      lower.includes('هدیه') ||
+      lower.includes('دینی') ||
+      lower.includes('پیامبر') ||
+      lower.includes('امام') ||
+      lower.includes('نماز') ||
+      lower.includes('وضو') ||
+      lower.includes('قرآن')
+    ) {
+      setExamSubject('هدیه‌های آسمان')
+    } else if (
+      lower.includes('اجتماعی') ||
+      lower.includes('تاریخ') ||
+      lower.includes('جغرافیا') ||
+      lower.includes('مدنی') ||
+      lower.includes('اصفهان')
+    ) {
+      setExamSubject('مطالعات اجتماعی')
+    }
+  }
+
+  function handleToggleType(type: QuestionType) {
+    if (selectedTypes.includes(type)) {
+      if (selectedTypes.length > 1) {
+        setSelectedTypes(selectedTypes.filter((t) => t !== type))
+      }
+    } else {
+      setSelectedTypes([...selectedTypes, type])
+    }
+  }
+
+  async function handleGenerateWithAi() {
+    if (!examTopic.trim()) {
+      setAiError('لطفاً مبحث یا عنوان آزمون را مشخص کنید.')
+      return
+    }
+    setAiError('')
+    setIsAiGenerating(true)
+    try {
+      const generatedQuestions = await generateAiExamQuestions({
+        subject: examSubject,
+        topic: examTopic.trim(),
+        count: examCount,
+        types: selectedTypes,
+        difficulty: examDifficulty,
+        extraInstructions: extraInstructions.trim(),
+        teacherPassword,
+      })
+
+      const totalPoints = generatedQuestions.reduce((sum, q) => sum + (Number(q.points) || 2), 0)
+
+      const rawPrompt = examTopic.trim()
+      let cleanTitle = examCustomTitle.trim()
+      if (!cleanTitle) {
+        if (rawPrompt.length <= 30 && !isPromptLike(rawPrompt)) {
+          cleanTitle = `آزمون ${examSubject} - ${rawPrompt}`
+        } else {
+          cleanTitle = `آزمون درس ${examSubject}`
+        }
+      }
+
+      const newDraft: Exam = {
+        id: typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : generateUuid(),
+        title: cleanTitle,
+        subject: examSubject,
+        description: `آزمون کلاسی شامل ${generatedQuestions.length} سوال متنوع طراحی‌شده برای دانش‌آموزان پایه ششم.`,
+        scheduledStartTime: new Date().toISOString(),
+        durationMinutes: 30,
+        questions: generatedQuestions,
+        totalPoints,
+        createdAt: new Date().toISOString(),
+        published: false,
+      }
+
+      setDraftExam(newDraft)
+      setExamTitle(newDraft.title)
+      setScheduleType('now')
+      setConfirmedQuestionIds(new Set())
+      setRejectedQuestionIds(new Set())
+      setCreatingStep('questions')
+    } catch (err: any) {
+      setAiError('خطا در تولید با هوش مصنوعی: ' + (err.message || 'لطفاً دوباره تلاش کنید.'))
+    } finally {
+      setIsAiGenerating(false)
+    }
+  }
+
+  function handleCreateManualBlank() {
+
+    const rawPrompt = examTopic.trim()
+    let cleanTitle = examCustomTitle.trim()
+    if (!cleanTitle) {
+      if (rawPrompt.length <= 30 && !isPromptLike(rawPrompt)) {
+        cleanTitle = `آزمون ${examSubject} - ${rawPrompt}`
+      } else {
+        cleanTitle = `آزمون درس ${examSubject}`
+      }
+    }
+
+    const blankDraft: Exam = {
+      id: typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : generateUuid(),
+      title: cleanTitle,
+      subject: examSubject,
+      description: 'آزمون طراحی‌شده توسط آموزگار',
+      scheduledStartTime: new Date().toISOString(),
+      durationMinutes: 30,
+      questions: [],
+      totalPoints: 0,
+      createdAt: new Date().toISOString(),
+      published: false,
+    }
+
+    setDraftExam(blankDraft)
+    setExamTitle(blankDraft.title)
+    setScheduleType('now')
+    setConfirmedQuestionIds(new Set())
+    setRejectedQuestionIds(new Set())
+    setCreatingStep('questions')
+  }
+
+  function handleConfirmQuestion(qId: string) {
+    setConfirmedQuestionIds((prev) => {
+      const next = new Set(prev)
+      next.add(qId)
+      return next
+    })
+    setRejectedQuestionIds((prev) => {
+      const next = new Set(prev)
+      next.delete(qId)
+      return next
+    })
+  }
+
+  function handleRejectQuestion(qId: string) {
+    setRejectedQuestionIds((prev) => {
+      const next = new Set(prev)
+      next.add(qId)
+      return next
+    })
+    setConfirmedQuestionIds((prev) => {
+      const next = new Set(prev)
+      next.delete(qId)
+      return next
+    })
+  }
+
+  function handleUnconfirmQuestion(qId: string) {
+    setConfirmedQuestionIds((prev) => {
+      const next = new Set(prev)
+      next.delete(qId)
+      return next
+    })
+    setRejectedQuestionIds((prev) => {
+      const next = new Set(prev)
+      next.delete(qId)
+      return next
+    })
+  }
+
+  function toggleConfirmQuestion(qId: string) {
+    if (confirmedQuestionIds.has(qId)) {
+      handleRejectQuestion(qId)
+    } else {
+      handleConfirmQuestion(qId)
+    }
+  }
+
+  async function handleRegenerateQuestion(q: ExamQuestion) {
+    if (!draftExam) return
+    setRegeneratingQId(q.id)
+    setAiError('')
+    setRegenSuccessMsg(null)
+    try {
+      const newQ = await regenerateSingleAiQuestion({
+        subject: draftExam.subject || examSubject,
+        topic: examTopic || draftExam.title,
+        type: q.type,
+        difficulty: examDifficulty,
+        points: q.points,
+        previousQuestion: q.question,
+        extraInstructions: extraInstructions.trim(),
+        teacherPassword,
+      })
+
+      const updated = draftExam.questions.map((item) => (item.id === q.id ? newQ : item))
+      const pts = updated.reduce((sum, item) => sum + (Number(item.points) || 0), 0)
+      setDraftExam({
+        ...draftExam,
+        questions: updated,
+        totalPoints: pts,
+      })
+
+      // The regenerated question replaces the unconfirmed/rejected question and starts unconfirmed for review
+      setConfirmedQuestionIds((prev) => {
+        const next = new Set(prev)
+        next.delete(q.id)
+        next.delete(newQ.id)
+        return next
+      })
+      setRejectedQuestionIds((prev) => {
+        const next = new Set(prev)
+        next.delete(q.id)
+        next.delete(newQ.id)
+        return next
+      })
+
+      setRegenSuccessMsg('سوال جایگزین با موفقیت توسط هوش مصنوعی بازسازی شد. لطفاً آن را بررسی و مجدداً تایید یا رد فرمایید.')
+      setTimeout(() => setRegenSuccessMsg(null), 6000)
+    } catch (err: any) {
+      setAiError(err?.message || 'خطا در بازتولید تکی سوال با هوش مصنوعی')
+    } finally {
+      setRegeneratingQId(null)
+    }
+  }
+
+  function handleDeleteQuestion(qId: string) {
+    if (!draftExam) return
+    const updated = draftExam.questions.filter((q) => q.id !== qId)
+    const pts = updated.reduce((sum, q) => sum + (Number(q.points) || 2), 0)
+    setDraftExam({ ...draftExam, questions: updated, totalPoints: pts })
+    setConfirmedQuestionIds((prev) => {
+      const next = new Set(prev)
+      next.delete(qId)
+      return next
+    })
+    setRejectedQuestionIds((prev) => {
+      const next = new Set(prev)
+      next.delete(qId)
+      return next
+    })
+  }
+
+  function handleSaveQuestionModal(savedQ: ExamQuestion) {
+    if (!draftExam) return
+    let resolvedCorrectIndex = 0
+    let resolvedCorrectText = ''
+    if (savedQ.type === 'multiple_choice') {
+      const res = resolveCorrectOptionIndex(savedQ)
+      resolvedCorrectIndex = res.isValid && res.index >= 0 ? res.index : 0
+      resolvedCorrectText = res.cleanText || cleanOptionText(savedQ.options?.[resolvedCorrectIndex] || '')
+    }
+
+    const sanitizedQ: ExamQuestion = {
+      ...savedQ,
+      points: safeScore(savedQ.points, 10, 2),
+      correctAnswer:
+        savedQ.type === 'multiple_choice'
+          ? resolvedCorrectIndex
+          : savedQ.correctAnswer,
+      correctOptionIndex: savedQ.type === 'multiple_choice' ? resolvedCorrectIndex : undefined,
+      correctOptionText: savedQ.type === 'multiple_choice' ? resolvedCorrectText : undefined,
+    }
+    let updatedList: ExamQuestion[] = []
+    if (isNewQuestionModal) {
+      updatedList = [...draftExam.questions, sanitizedQ]
+    } else {
+      updatedList = draftExam.questions.map((q) => (q.id === sanitizedQ.id ? sanitizedQ : q))
+    }
+    const pts = updatedList.reduce((sum, q) => sum + safeScore(q.points, 10, 2), 0)
+    setDraftExam({ ...draftExam, questions: updatedList, totalPoints: roundScore2(pts) })
+    setEditingQ(null)
+    setIsNewQuestionModal(false)
+  }
+
+  function openNewQuestionModal() {
+    const newQ: ExamQuestion = {
+      id: `q_${Date.now()}`,
+      type: 'multiple_choice',
+      question: '',
+      options: ['گزینه ۱', 'گزینه ۲', 'گزینه ۳', 'گزینه ۴'],
+      correctAnswer: 0,
+      rubricOrHint: '',
+      points: 2,
+    }
+    setEditingQ(newQ)
+    setIsNewQuestionModal(true)
+  }
+
+  function calculateScheduledTime(): string {
+    const now = new Date()
+    if (scheduleType === 'now') {
+      // Backdate by 2 minutes to defeat minor device clock skew so students can start immediately
+      return new Date(getServerNowMs() - 10 * 60 * 1000).toISOString()
+    } else if (scheduleType === 'tomorrow_10') {
+      const d = new Date(now)
+      d.setDate(d.getDate() + 1)
+      d.setHours(10, 0, 0, 0)
+      return d.toISOString()
+    } else if (scheduleType === 'tomorrow_17') {
+      const d = new Date(now)
+      d.setDate(d.getDate() + 1)
+      d.setHours(17, 0, 0, 0)
+      return d.toISOString()
+    } else {
+      if (customDateTime) {
+        const parsed = new Date(customDateTime)
+        if (!isNaN(parsed.getTime())) return parsed.toISOString()
+      }
+      return new Date(getServerNowMs() - 10 * 60 * 1000).toISOString()
+    }
+  }
+
+  function handleProceedToSchedule() {
+    if (!draftExam) return
+    const approvedCount = draftExam.questions.filter((q) => confirmedQuestionIds.has(q.id) && !rejectedQuestionIds.has(q.id)).length
+    const rejectedCount = draftExam.questions.filter((q) => rejectedQuestionIds.has(q.id)).length
+    const pendingCount = draftExam.questions.filter((q) => !confirmedQuestionIds.has(q.id) && !rejectedQuestionIds.has(q.id)).length
+
+    if (approvedCount === 0) {
+      alert('⚠️ هیچ سوالی هنوز تایید نشده است!\nبرای ورود به مرحله زمان‌بندی و انتشار، حداقل یک سوال را تایید (✓) کنید.')
+      return
+    }
+
+    if (pendingCount > 0 || rejectedCount > 0) {
+      const confirmed = window.confirm(
+        `توجه آموزگار گرامی:\n` +
+        `از مجموع ${draftExam.questions.length} سوال موجود:\n` +
+        `• ${approvedCount} سوال تایید شده (وارد آزمون نهایی می‌شوند)\n` +
+        `• ${rejectedCount} سوال رد شده (از آزمون نهایی حذف می‌شوند)\n` +
+        `• ${pendingCount} سوال در انتظار بررسی (وارد آزمون نهایی نخواهند شد)\n\n` +
+        `آیا می‌خواهید فقط با ${approvedCount} سوال تاییدشده ادامه دهید؟`
+      )
+      if (!confirmed) return
+    }
+
+    setCreatingStep('schedule')
+  }
+
+  async function handleFinalPublish() {
+    if (savingExam) return
+    if (!draftExam || draftExam.questions.length === 0) {
+      alert('آزمون باید حداقل یک سوال داشته باشد.')
+      return
+    }
+    setSavingExam(true)
+    try {
+      const finalStartTime = calculateScheduledTime()
+      let computedDueDate: string | undefined = undefined
+      if (examMode === 'assignment') {
+        if (customDueDateTime) {
+          const parsed = new Date(customDueDateTime)
+          if (!isNaN(parsed.getTime())) computedDueDate = parsed.toISOString()
+        }
+        if (!computedDueDate) {
+          const d = new Date()
+          d.setDate(d.getDate() + (assignmentDays || 5))
+          computedDueDate = d.toISOString()
+        }
+      }
+
+      // Strict Approval Filter (Priority 2): Only explicitly approved questions enter the final exam!
+      const approvedQuestions = draftExam.questions.filter(
+        (q) => confirmedQuestionIds.has(q.id) && !rejectedQuestionIds.has(q.id)
+      )
+
+      if (approvedQuestions.length === 0) {
+        alert('⚠️ هیچ سوال تاییدشده‌ای برای این آزمون وجود ندارد.\nلطفاً پیش از انتشار، حداقل ۱ سوال را با کلیک روی دکمه «تایید سوال» تایید فرمایید.')
+        setSavingExam(false)
+        return
+      }
+
+      const isUntimedFinal = examMode === 'assignment' || isUntimed
+      const readyExam: Exam = {
+        ...draftExam,
+        title: examTitle.trim() || draftExam.title,
+        mode: examMode,
+        isUntimed: isUntimedFinal,
+        dueDate: computedDueDate,
+        scheduledStartTime: finalStartTime,
+        durationMinutes: isUntimedFinal ? 0 : (Number(durationMinutes) || 30),
+        published: true,
+        questions: approvedQuestions,
+        totalPoints: approvedQuestions.reduce((sum, q) => sum + (Number(q.points) || 1), 0),
+      }
+
+      // Strict validation before publication
+      const valRes = validateExam(readyExam)
+      if (!valRes.isValid) {
+        const errorList = [
+          ...valRes.examErrors,
+          ...Object.values(valRes.questionResults).flatMap((r) => r.errors),
+        ]
+        alert('⚠️ خطا در اعتبارسنجی سوالات:\n' + errorList.join('\n'))
+        setSavingExam(false)
+        return
+      }
+
+      await saveExam(readyExam, teacherPassword)
+      realtimeSync.broadcast({
+        type: 'exam',
+        action: isEditingExisting ? 'update' : 'create',
+        item: readyExam,
+        id: readyExam.id,
+      }).catch(() => {})
+      await loadExams()
+      setDraftExam(null)
+      setIsEditingExisting(false)
+      setActiveView('list')
+      setCreatingStep('prompt')
+      if (onDone) onDone()
+    } catch (err: any) {
+      console.error('Save exam error:', err)
+      alert('خطا در ذخیره آزمون: ' + (err?.message || 'خطای شبکه'))
+    } finally {
+      setSavingExam(false)
+    }
+  }
+
+  async function loadGradebookStatus() {
+    setGradebookFetchState('loading')
+    setGradebookFetchError(null)
+    const res = await fetchTeacherGradebookRows(teacherPassword)
+    if (res.ok) {
+      setGradebookRows(res.rows)
+      setGradebookFetchState('loaded')
+      setGradebookFetchError(null)
+    } else {
+      setGradebookRows([])
+      setGradebookFetchState('error')
+      setGradebookFetchError(res.error || 'خطا در بررسی وضعیت جدول grades')
+    }
+  }
+
+  function openSubmissionsView(exam: Exam) {
+    setSelectedExamForSubs(exam)
+    setSelectedSubForGrading(null)
+    setActiveView('review_subs')
+    setReleaseFeedbackMsg('')
+    setGradeSyncErrorBanner(null)
+    // Fresh fetch from Supabase to load all student submissions & verify grades table
+    setIsRefreshingSubs(true)
+    Promise.all([
+      fetchExamSubmissions(exam.id, undefined, true, teacherPassword),
+      loadGradebookStatus(),
+    ])
+      .catch((err) => console.warn('Could not fetch submissions from Supabase:', err))
+      .finally(() => setIsRefreshingSubs(false))
+  }
+
+  async function handleRefreshSubmissions() {
+    if (!selectedExamForSubs) return
+    setIsRefreshingSubs(true)
+    setReleaseFeedbackMsg('')
+    setGradeSyncErrorBanner(null)
+    try {
+      await Promise.all([
+        fetchExamSubmissions(selectedExamForSubs.id, undefined, true, teacherPassword),
+        loadGradebookStatus(),
+      ])
+      setReleaseFeedbackMsg('✓ پاسخ‌های دانش‌آموزان و وضعیت جدول grades از پایگاه‌داده به‌روز شدند.')
+    } catch (err: any) {
+      setGradeSyncErrorBanner('خطا در دریافت پاسخ‌ها از سرور: ' + (err?.message || 'خطای شبکه'))
+    } finally {
+      setIsRefreshingSubs(false)
+    }
+  }
+
+  async function handleSyncMissingGradesToTable(examId: string) {
+    if (isSyncingGradesTable) return
+    setIsSyncingGradesTable(true)
+    setGradeSyncErrorBanner(null)
+    setReleaseFeedbackMsg('')
+    try {
+      const summary = await syncExamApprovedGradesToGradebook(examId, teacherPassword)
+      await loadGradebookStatus()
+      if (summary.failed > 0 || !summary.verifiedInGradesTable) {
+        const errDetail = summary.errors.length > 0 ? summary.errors.slice(0, 3).join(' | ') : 'تأیید نهایی در جدول grades برقرار نشد.'
+        setGradeSyncErrorBanner(
+          `⚠️ همگام‌سازی جدول grades: ${toPersianDigits(summary.succeeded)} موفق، ${toPersianDigits(summary.failed)} ناموفق — ${errDetail}`
+        )
+      } else {
+        setReleaseFeedbackMsg(
+          `✓ ${toPersianDigits(summary.succeeded)} نمره تاییدشده با موفقیت در جدول اصلی grades ثبت و تأیید شد.`
+        )
+      }
+    } catch (err: any) {
+      setGradeSyncErrorBanner('خطا در ثبت نمرات در جدول grades: ' + (err?.message || 'خطای شبکه'))
+    } finally {
+      setIsSyncingGradesTable(false)
+    }
+  }
+
+  async function handleToggleReleaseResults() {
+    if (!selectedExamForSubs) return
+    const isCurrentlyReleased = !!(selectedExamForSubs.resultsPublished || selectedExamForSubs.isResultsReleased)
+    const promptMsg = isCurrentlyReleased
+      ? 'آیا مایلید کارنامه و کلید پاسخ‌ها را مجدداً برای دانش‌آموزان قفل و مخفی کنید؟'
+      : 'آیا مایلید کارنامه، نمرات و کلید سوالات برای تمامی دانش‌آموزان تایید و منتشر شود؟\nپس از تایید، دانش‌آموزان قادر خواهند بود کارنامه کامل خود را مشاهده نمایند.'
+
+    if (!window.confirm(promptMsg)) return
+
+    setIsReleasingResults(true)
+    setReleaseFeedbackMsg('')
+    setGradeSyncErrorBanner(null)
+    try {
+      const res = await releaseExamResultsForAll(selectedExamForSubs.id, teacherPassword, isCurrentlyReleased)
+      setSelectedExamForSubs((prev) =>
+        prev
+          ? {
+              ...prev,
+              resultsPublished: !isCurrentlyReleased,
+              isResultsReleased: !isCurrentlyReleased,
+              results_published: !isCurrentlyReleased,
+            }
+          : null
+      )
+      await loadExams()
+      await Promise.all([
+        fetchExamSubmissions(selectedExamForSubs.id, undefined, true, teacherPassword),
+        loadGradebookStatus(),
+      ])
+      if (!isCurrentlyReleased) {
+        const gs = res.gradeSyncSummary
+        if (gs && (gs.failed > 0 || !gs.verifiedInGradesTable)) {
+          setGradeSyncErrorBanner(
+            `⚠️ کارنامه پاسخ‌نامه منتشر شد اما ثبت در جدول grades برای ${toPersianDigits(gs.failed)} مورد با خطا مواجه شد: ${gs.errors.slice(0, 2).join(' | ')}`
+          )
+          setReleaseFeedbackMsg('پاسخ‌نامه‌ها تایید شدند؛ برای ثبت کامل در جدول اصلی grades خطای بالا را بررسی کنید.')
+        } else {
+          setReleaseFeedbackMsg(
+            `🎉 کارنامه و کلید سوالات تایید و ${gs ? `(${toPersianDigits(gs.succeeded)} نمره در جدول grades) ` : ''}با موفقیت ثبت و منتشر شد.`
+          )
+        }
+      } else {
+        setReleaseFeedbackMsg('🔒 انتشار کارنامه لغو شد و دسترسی دانش‌آموزان مجدداً به حالت انتظار درآمد.')
+      }
+    } catch (err: any) {
+      setGradeSyncErrorBanner('خطا در انتشار کارنامه: ' + (err?.message || 'مشکل در ارتباط با سرور'))
+    } finally {
+      setIsReleasingResults(false)
+    }
+  }
+
+  async function handleApproveAllPendingSubs() {
+    if (!selectedExamForSubs) return
+    if (!window.confirm('آیا مایلید تمامی پاسخ‌نامه‌هایی که هنوز در انتظار تأیید هستند، تأیید و نمره آن‌ها در کارنامه دانش‌آموزان ثبت و منتشر شود؟')) return
+
+    setIsReleasingResults(true)
+    setReleaseFeedbackMsg('')
+    setGradeSyncErrorBanner(null)
+    try {
+      const res = await releaseExamResultsForAll(selectedExamForSubs.id, teacherPassword, false)
+      setSelectedExamForSubs((prev) =>
+        prev
+          ? {
+              ...prev,
+              resultsPublished: true,
+              isResultsReleased: true,
+              results_published: true,
+            }
+          : null
+      )
+      await loadExams()
+      await Promise.all([
+        fetchExamSubmissions(selectedExamForSubs.id, undefined, true, teacherPassword),
+        loadGradebookStatus(),
+      ])
+      const gs = res.gradeSyncSummary
+      if (gs && (gs.failed > 0 || !gs.verifiedInGradesTable)) {
+        setGradeSyncErrorBanner(
+          `⚠️ پاسخ‌نامه‌ها تأیید شدند اما ${toPersianDigits(gs.failed)} نمره در جدول grades ثبت نشد: ${gs.errors.slice(0, 2).join(' | ')}`
+        )
+      } else {
+        setReleaseFeedbackMsg(
+          `🎉 نمرات تمامی پاسخ‌نامه‌های در انتظار تایید و در جدول grades ثبت شد (${toPersianDigits(gs?.succeeded || 0)} مورد).`
+        )
+      }
+    } catch (err: any) {
+      setGradeSyncErrorBanner('خطا در تأیید پاسخ‌های در انتظار: ' + (err?.message || 'مشکل در ارتباط با سرور'))
+    } finally {
+      setIsReleasingResults(false)
+    }
+  }
+
+  function startGradingSubmission(sub: StudentExamSubmission, exam: Exam) {
+    setSelectedSubForGrading(sub)
+    const eff = getSubmissionEffectiveScore(exam, sub)
+    setTeacherScoresDraft({ ...eff.questionScores })
+    setTeacherNoteDraft(sub.teacherGrading?.teacherNotes || sub.aiGrading?.summary || '')
+    setGradingSuccessMsg('')
+  }
+
+  async function handleApproveGrading() {
+    if (!selectedExamForSubs || !selectedSubForGrading) return
+    setGradingSuccessMsg('')
+    setGradeSyncErrorBanner(null)
+    try {
+      const savedSub: any = await approveExamSubmission({
+        submissionId: selectedSubForGrading.id,
+        exam: selectedExamForSubs,
+        studentId: selectedSubForGrading.studentId,
+        approvedScores: teacherScoresDraft,
+        teacherNotes: teacherNoteDraft,
+        teacherPassword,
+      })
+      realtimeSync.broadcast({
+        type: 'grade',
+        action: 'update',
+        studentId: selectedSubForGrading.studentId,
+        id: selectedExamForSubs.id,
+      }).catch(() => {})
+
+      await loadGradebookStatus()
+      const gs = savedSub?.gradeSync
+      if (gs && !gs.ok) {
+        const errText = `تأیید پاسخ‌نامه ذخیره شد، اما ثبت در جدول اصلی grades ناموفق بود: ${gs.error || 'خطای نامشخص'}`
+        setGradeSyncErrorBanner(errText)
+        setGradingSuccessMsg(`⚠️ ${errText}`)
+      } else {
+        setGradingSuccessMsg('نمره با موفقیت تایید و در جدول اصلی کارنامه (grades) ثبت شد ✓')
+      }
+      setSubsRefreshKey((k) => k + 1)
+      // Update local state
+      const updatedList = getExamSubmissions(selectedExamForSubs.id)
+      const reloadedSub = updatedList.find((s) => s.id === selectedSubForGrading.id)
+      if (reloadedSub) setSelectedSubForGrading(reloadedSub)
+    } catch (err: any) {
+      const errText = 'خطا در ثبت نمره: ' + (err?.message || 'خطای سرور')
+      setGradeSyncErrorBanner(errText)
+    }
+  }
+
+  async function handleOpenRegradeModal(examId: string) {
+    setIsLoadingRegrade(true)
+    setRegradeResultSummary(null)
+    setOverrideApprovedRegrade(false)
+    try {
+      const preview = await previewRegradeExamSubmissions(examId, teacherPassword)
+      setRegradePreview(preview)
+    } catch (err: any) {
+      alert('خطا در محاسبه پیش‌نمایش بازتصحیح: ' + (err?.message || 'خطای سرور'))
+    } finally {
+      setIsLoadingRegrade(false)
+    }
+  }
+
+  async function handleApplyRegrade() {
+    if (!regradePreview) return
+    setIsApplyingRegrade(true)
+    setGradeSyncErrorBanner(null)
+    try {
+      const res = await applyRegradeExamSubmissions({
+        examId: regradePreview.examId,
+        overrideApproved: overrideApprovedRegrade,
+        teacherPassword,
+      })
+      await Promise.all([
+        fetchExamSubmissions(regradePreview.examId, undefined, true, teacherPassword),
+        loadGradebookStatus(),
+      ])
+      const gs = res.gradeSyncSummary
+      if (gs && gs.failed > 0) {
+        setGradeSyncErrorBanner(
+          `⚠️ بازتصحیح اعمال شد اما بروزرسانی جدول grades برای ${toPersianDigits(gs.failed)} مورد با خطا مواجه شد: ${gs.errors.slice(0, 2).join(' | ')}`
+        )
+      }
+      setRegradeResultSummary(`✓ بازتصحیح هوشمند با موفقیت روی ${res.updatedCount} پاسخ‌نامه اعمال و ذخیره شد.`)
+      setTimeout(() => {
+        setRegradePreview(null)
+        setRegradeResultSummary(null)
+      }, 1500)
+    } catch (err: any) {
+      alert('خطا در اعمال بازتصحیح: ' + (err?.message || 'خطای پایگاه‌داده'))
+    } finally {
+      setIsApplyingRegrade(false)
+    }
+  }
+
+  return (
+    <div className="w-full max-w-full overflow-hidden box-border py-1">
+      {/* View Switcher Top Bar */}
+      <div className="flex flex-col sm:flex-row gap-2.5 mb-5 w-full max-w-full box-border">
+        <button
+          type="button"
+          className={`btn flex-1 py-2.5 px-3 text-xs sm:text-sm font-bold truncate transition-all cursor-pointer ${activeView === 'list' ? '' : 'secondary'}`}
+          onClick={() => {
+            setActiveView('list')
+            loadExams()
+          }}
+        >
+          📋 آزمون‌های تعریف‌شده ({exams.length})
+        </button>
+
+        <button
+          type="button"
+          className={`btn flex-1 py-2.5 px-3 text-xs sm:text-sm font-bold truncate transition-all cursor-pointer ${activeView === 'create' ? '' : 'secondary'}`}
+          onClick={() => {
+            setActiveView('create')
+            setCreatingStep('prompt')
+          }}
+        >
+          ✨ طراحی آزمون جدید با هوش مصنوعی
+        </button>
+      </div>
+
+      {/* ========================================================
+          VIEW 1: LIST OF CREATED EXAMS
+          ======================================================== */}
+      {activeView === 'list' && (
+        <div>
+          {/* Explicit Sync Source & Status Bar */}
+          {(() => {
+            const publishedCount = exams.filter((e) => e.published !== false).length
+            const draftCount = exams.filter((e) => e.published === false).length
+            const isServerOk = examsSyncState === 'server_loaded' || examsSyncState === 'empty_confirmed'
+            const isCached = examsSyncState === 'cached_fallback'
+            const isError = examsSyncState === 'error'
+            const bg = isError
+              ? '#FEF2F2'
+              : isCached
+              ? '#FFFBEB'
+              : isServerOk
+              ? '#F0FDF4'
+              : '#F8FAFC'
+            const border = isError
+              ? '#FCA5A5'
+              : isCached
+              ? '#FCD34D'
+              : isServerOk
+              ? '#BBF7D0'
+              : '#E2E8F0'
+            const color = isError
+              ? '#991B1B'
+              : isCached
+              ? '#92400E'
+              : isServerOk
+              ? '#166534'
+              : '#475569'
+
+            return (
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
+                  gap: 8,
+                  padding: '10px 14px',
+                  marginBottom: 14,
+                  borderRadius: 12,
+                  background: bg,
+                  border: `1.5px solid ${border}`,
+                  color,
+                  fontSize: 12.5,
+                  fontWeight: 700,
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <span>
+                    {isLoadingExams && exams.length === 0
+                      ? '⏳ در حال دریافت لیست آزمون‌ها از سرور...'
+                      : examsSyncState === 'loading'
+                      ? '⏳ نمایش فوری آخرین نسخه — در حال همگام‌سازی با سرور...'
+                      : isError
+                      ? '❌ خطا در دریافت لیست آزمون‌ها از سرور'
+                      : isCached
+                      ? '⚠️ نمایش حافظه موقت (ارتباط با سرور برقرار نشد)'
+                      : examsSyncState === 'empty_confirmed'
+                      ? '✅ متصل به سرور — هیچ آزمونی ثبت نشده است'
+                      : `✅ داده‌های سرور بارگذاری شد (${toPersianDigits(publishedCount)} منتشرشده${draftCount > 0 ? ` · ${toPersianDigits(draftCount)} پیش‌نویس` : ''})`}
+                  </span>
+                  {examsLastSyncedAt && isServerOk && (
+                    <span style={{ fontSize: 11, opacity: 0.8 }}>
+                      آخرین همگام‌سازی: {examsLastSyncedAt}
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => loadExams()}
+                  disabled={isLoadingExams}
+                  style={{
+                    padding: '5px 11px',
+                    borderRadius: 9,
+                    border: `1.5px solid ${border}`,
+                    background: '#FFFFFF',
+                    color: '#0F172A',
+                    fontSize: 12,
+                    fontWeight: 800,
+                    cursor: isLoadingExams ? 'wait' : 'pointer',
+                  }}
+                >
+                  {isLoadingExams ? '⏳ در حال بررسی...' : '🔄 بروزرسانی از سرور'}
+                </button>
+              </div>
+            )
+          })()}
+
+          {examsSyncState === 'cached_fallback' && examsSyncError && (
+            <div
+              style={{
+                background: '#FFFBEB',
+                border: '1px solid #F59E0B',
+                color: '#92400E',
+                borderRadius: 10,
+                padding: '8px 12px',
+                fontSize: 12,
+                fontWeight: 700,
+                marginBottom: 12,
+              }}
+            >
+              جزئیات خطای اتصال: {examsSyncError} — آزمون‌های ذخیره‌شده قبلی موقتاً نمایش داده می‌شوند.
+            </div>
+          )}
+
+          {exams.length === 0 && examsSyncState === 'loading' ? (
+            <div className="mobile-empty-state" style={{ padding: '36px 16px', textAlign: 'center' }}>
+              <div style={{ fontSize: 38, marginBottom: 10 }}>⏳</div>
+              <h3 style={{ fontSize: 16, fontWeight: 900, color: 'var(--black)', margin: '0 0 6px 0' }}>
+                در حال دریافت لیست آزمون‌ها از پایگاه داده...
+              </h3>
+              <p style={{ fontSize: 13, color: '#64748B', maxWidth: 360, margin: '0 auto' }}>
+                لطفاً چند لحظه صبر کنید تا لیست کامل آزمون‌ها و تکالیف آنلاین از سرور بارگذاری شود.
+              </p>
+            </div>
+          ) : exams.length === 0 && examsSyncState === 'error' ? (
+            <div
+              className="mobile-empty-state"
+              style={{
+                padding: '32px 16px',
+                textAlign: 'center',
+                background: '#FEF2F2',
+                border: '2px solid #FCA5A5',
+                borderRadius: 16,
+              }}
+            >
+              <div style={{ fontSize: 40, marginBottom: 10 }}>📡</div>
+              <h3 style={{ fontSize: 16, fontWeight: 900, color: '#991B1B', margin: '0 0 6px 0' }}>
+                خطا در دریافت لیست آزمون‌ها از سرور
+              </h3>
+              <p style={{ fontSize: 13, color: '#7F1D1D', maxWidth: 420, margin: '0 auto 14px auto', lineHeight: 1.6 }}>
+                {examsSyncError || 'ارتباط با پایگاه داده برقرار نشد. آزمون‌های شما حذف نشده‌اند؛ لطفاً اتصال اینترنت را بررسی کرده و دوباره تلاش کنید.'}
+              </p>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => loadExams()}
+                disabled={isLoadingExams}
+                style={{ background: '#DC2626', borderColor: '#991B1B' }}
+              >
+                {isLoadingExams ? '⏳ در حال تلاش مجدد...' : '🔄 تلاش مجدد برای دریافت از سرور'}
+              </button>
+            </div>
+          ) : exams.length === 0 ? (
+            <div className="mobile-empty-state" style={{ padding: '36px 16px', textAlign: 'center' }}>
+              <div style={{ fontSize: 44, marginBottom: 12 }}>📝</div>
+              <h3 style={{ fontSize: 17, fontWeight: 900, color: 'var(--black)', margin: '0 0 6px 0' }}>
+                هنوز هیچ آزمونی در سرور ثبت نشده است
+              </h3>
+              <p style={{ fontSize: 13, color: '#64748B', maxWidth: 360, margin: '0 auto 18px auto' }}>
+                می‌توانید با دستیار هوش مصنوعی تنها با وارد کردن درس و مبحث، آزمون‌های استاندارد چهارگزینه‌ای، جای خالی و تشریحی بسازید.
+              </p>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => {
+                  setActiveView('create')
+                  setCreatingStep('prompt')
+                }}
+              >
+                🚀 شروع ساخت آزمون هوشمند
+              </button>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              {exams.map((exam) => {
+                const subs = getExamSubmissions(exam.id)
+                const pendingSubs = subs.filter((s) => !s.teacherGrading?.approved)
+                const approvedSubs = subs.filter((s) => s.teacherGrading?.approved)
+                const startMs = parseExamTimestampMs(exam.scheduledStartTime || exam.createdAt) ?? Date.now()
+                const startTimeDate = new Date(startMs)
+                const isUpcoming = startMs > Date.now()
+                const isPublished = exam.published !== false
+
+                return (
+                  <div
+                    key={exam.id}
+                    className="mobile-card hard"
+                    style={{
+                      padding: 16,
+                      background: '#FFFFFF',
+                      borderRadius: 16,
+                      border: isPublished ? '2px solid var(--black)' : '2px dashed #94A3B8',
+                      boxShadow: '0 4px 0 var(--black)',
+                    }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
+                      <div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
+                          <span
+                            style={{
+                              background: '#DBEAFE',
+                              color: '#1E40AF',
+                              fontSize: 12,
+                              fontWeight: 800,
+                              padding: '2px 8px',
+                              borderRadius: 999,
+                            }}
+                          >
+                            {exam.subject}
+                          </span>
+                          <span
+                            style={{
+                              background: !isPublished
+                                ? '#F1F5F9'
+                                : exam.mode === 'assignment'
+                                ? '#ECFDF5'
+                                : isUpcoming
+                                ? '#FEF3C7'
+                                : '#DCFCE7',
+                              color: !isPublished
+                                ? '#475569'
+                                : exam.mode === 'assignment'
+                                ? '#065F46'
+                                : isUpcoming
+                                ? '#92400E'
+                                : '#166534',
+                              fontSize: 12,
+                              fontWeight: 800,
+                              padding: '2px 8px',
+                              borderRadius: 999,
+                            }}
+                          >
+                            {!isPublished
+                              ? '🔒 پیش‌نویس (منتشرنشده)'
+                              : exam.mode === 'assignment'
+                              ? '📝 تکلیف تعاملی منتشرشده'
+                              : isUpcoming
+                              ? '⏳ آزمون زمان‌بندی‌شده (منتشرشده)'
+                              : '🟢 آزمون فعال (منتشرشده)'}
+                          </span>
+                        </div>
+                        <h3 style={{ fontSize: 16, fontWeight: 900, margin: '2px 0 6px 0', color: '#0F172A' }}>
+                          {sanitizeExamTitle(exam.title, exam.subject)}
+                        </h3>
+                        <p style={{ fontSize: 12.5, color: '#64748B', margin: 0 }}>
+                          {exam.mode === 'assignment' && exam.dueDate ? (
+                            <>🗓️ مهلت تحویل: {new Date(exam.dueDate).toLocaleDateString('fa-IR')} • ❓ {exam.questions.length} سوال ({exam.totalPoints} نمره)</>
+                          ) : (
+                            <>⏰ شروع: {startTimeDate.toLocaleString('fa-IR')} • ⏱️ مدت: {exam.durationMinutes} دقیقه • ❓ {exam.questions.length} سوال ({exam.totalPoints} نمره)</>
+                          )}
+                        </p>
+                      </div>
+
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                        <button
+                          type="button"
+                          onClick={() => handleExportWhatsappExam(exam)}
+                          style={{
+                            padding: '6px 12px',
+                            borderRadius: 10,
+                            background: '#ECFDF5',
+                            border: '1.5px solid #A7F3D0',
+                            color: '#065F46',
+                            fontSize: 13,
+                            fontWeight: 800,
+                            cursor: 'pointer',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 4,
+                            boxShadow: '0 1px 2px rgba(5,150,105,0.08)',
+                          }}
+                          title="خروجی عکس واتساپ"
+                        >
+                          <span>📸</span>
+                          <span>خروجی عکس واتساپ</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleStartEditExam(exam)}
+                          style={{
+                            padding: '6px 12px',
+                            borderRadius: 10,
+                            background: '#EFF6FF',
+                            border: '1.5px solid #BFDBFE',
+                            color: '#1D4ED8',
+                            fontSize: 13,
+                            fontWeight: 800,
+                            cursor: 'pointer',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 4,
+                            boxShadow: '0 1px 2px rgba(37,99,235,0.08)',
+                          }}
+                          title="ویرایش سوالات، بارم، زمان‌بندی و مشخصات آزمون"
+                        >
+                          <span>✏️</span>
+                          <span>ویرایش</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setDeleteConfirmExam(exam)}
+                          style={{
+                            padding: '6px 12px',
+                            borderRadius: 10,
+                            background: '#FEF2F2',
+                            border: '1.5px solid #FECACA',
+                            color: '#DC2626',
+                            fontSize: 13,
+                            fontWeight: 800,
+                            cursor: 'pointer',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 4,
+                            boxShadow: '0 1px 2px rgba(220,38,38,0.08)',
+                          }}
+                          title="حذف آزمون و پاسخ‌های آن"
+                        >
+                          <span>🗑️</span>
+                          <span>حذف</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Submissions & Actions Bar */}
+                    <div
+                      style={{
+                        marginTop: 14,
+                        paddingTop: 12,
+                        borderTop: '1px solid #E2E8F0',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        flexWrap: 'wrap',
+                        gap: 10,
+                      }}
+                    >
+                      <div style={{ fontSize: 13 }}>
+                        <strong>پاسخ‌های دریافتی:</strong>{' '}
+                        <span style={{ color: pendingSubs.length > 0 ? '#DC2626' : '#166534', fontWeight: 800 }}>
+                          {subs.length} پاسخ ({pendingSubs.length} نیازمند تایید معلم)
+                        </span>
+                      </div>
+
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                        <button
+                          type="button"
+                          className="btn secondary"
+                          style={{
+                            fontSize: 13,
+                            padding: '6px 12px',
+                          }}
+                          onClick={() => handleStartEditExam(exam)}
+                          title="ویرایش یا افزودن سوالات بیشتر به این آزمون"
+                        >
+                          ✏️ ویرایش و افزودن سوال ({exam.questions.length})
+                        </button>
+
+                        <button
+                          type="button"
+                          className="btn"
+                          style={{
+                            fontSize: 13,
+                            padding: '6px 14px',
+                            background: pendingSubs.length > 0 ? '#F59E0B' : '#3B82F6',
+                          }}
+                          onClick={() => openSubmissionsView(exam)}
+                        >
+                          🔍 بررسی و تصحیح نمرات ({subs.length})
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ========================================================
+          VIEW 2: CREATE / EDIT EXAM FLOW
+          ======================================================== */}
+      {activeView === 'create' && (
+        <div className="mobile-card hard" style={{ padding: 18, background: '#FFFFFF', borderRadius: 18 }}>
+          {/* Active Editing Mode Banner */}
+          {isEditingExisting && (
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                padding: '12px 16px',
+                background: '#EFF6FF',
+                border: '2px solid #BFDBFE',
+                borderRadius: 14,
+                marginBottom: 18,
+                flexWrap: 'wrap',
+                gap: 10,
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: 20 }}>✏️</span>
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 900, color: '#1E40AF' }}>
+                    ویرایش آزمون: {draftExam?.title}
+                  </div>
+                  <div style={{ fontSize: 12, color: '#3B82F6' }}>
+                    می‌توانید سوالات، بارم، گزینه‌ها و زمان‌بندی را اصلاح و ذخیره نمایید.
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                className="btn secondary"
+                onClick={handleCancelEdit}
+                style={{ padding: '6px 14px', fontSize: 13, fontWeight: 800 }}
+              >
+                انصراف از ویرایش
+              </button>
+            </div>
+          )}
+
+          {/* Steps Indicator */}
+          <div style={{ display: 'flex', gap: 8, marginBottom: 20, borderBottom: '1.5px solid #F1F5F9', paddingBottom: 12 }}>
+            <span
+              style={{
+                fontSize: 13,
+                fontWeight: 900,
+                color: creatingStep === 'prompt' ? '#2563EB' : '#94A3B8',
+              }}
+            >
+              ۱. تنظیم موضوع و هوش مصنوعی
+            </span>
+            <span>➔</span>
+            <span
+              style={{
+                fontSize: 13,
+                fontWeight: 900,
+                color: creatingStep === 'questions' ? '#2563EB' : '#94A3B8',
+              }}
+            >
+              ۲. بررسی، ویرایش و تایید سوالات
+            </span>
+            <span>➔</span>
+            <span
+              style={{
+                fontSize: 13,
+                fontWeight: 900,
+                color: creatingStep === 'schedule' ? '#2563EB' : '#94A3B8',
+              }}
+            >
+              ۳. زمان‌بندی و انتشار
+            </span>
+          </div>
+
+          {/* STEP 1: PROMPT & GENERATION */}
+          {creatingStep === 'prompt' && (
+            <div>
+              <h3 style={{ fontSize: 17, fontWeight: 900, margin: '0 0 14px 0' }}>
+                {examMode === 'assignment' || isUntimed
+                  ? 'طراحی تکلیف تعاملی بدون زمان با موتور آزمون'
+                  : 'طراحی آزمون کلاسی با مدل هوش مصنوعی'}
+              </h3>
+
+              {/* Exam vs Untimed Interactive Assignment selector */}
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ display: 'block', fontSize: 13, fontWeight: 900, marginBottom: 8, color: '#0F172A' }}>
+                  قالب ایجاد:
+                </label>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10 }}>
+                  <div
+                    onClick={() => {
+                      setExamMode('exam')
+                      setIsUntimed(false)
+                    }}
+                    style={{
+                      padding: '12px 14px',
+                      borderRadius: 14,
+                      border: examMode === 'exam' && !isUntimed ? '2.5px solid #2563EB' : '1.5px solid #CBD5E1',
+                      background: examMode === 'exam' && !isUntimed ? '#EFF6FF' : '#FFFFFF',
+                      cursor: 'pointer',
+                      transition: 'all 0.15s ease',
+                    }}
+                  >
+                    <div style={{ fontWeight: 900, fontSize: 14, color: '#1E40AF', display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span>⏱️ آزمون رسمی زمان‌دار</span>
+                    </div>
+                    <p style={{ margin: '4px 0 0 0', fontSize: 12, color: '#64748B', lineHeight: 1.5 }}>
+                      شامل تایمر ثانیه‌شمار و محدودیت زمانی در حین پاسخگویی
+                    </p>
+                  </div>
+
+                  <div
+                    onClick={() => {
+                      setExamMode('assignment')
+                      setIsUntimed(true)
+                    }}
+                    style={{
+                      padding: '12px 14px',
+                      borderRadius: 14,
+                      border: examMode === 'assignment' || isUntimed ? '2.5px solid #16A34A' : '1.5px solid #CBD5E1',
+                      background: examMode === 'assignment' || isUntimed ? '#F0FDF4' : '#FFFFFF',
+                      cursor: 'pointer',
+                      transition: 'all 0.15s ease',
+                    }}
+                  >
+                    <div style={{ fontWeight: 900, fontSize: 14, color: '#15803D', display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span>🌱 تکلیف تعاملی بدون زمان</span>
+                    </div>
+                    <p style={{ margin: '4px 0 0 0', fontSize: 12, color: '#64748B', lineHeight: 1.5 }}>
+                      دقیقاً با موتور آزمون (تستی، جای خالی، تشریحی) بدون استرس تایمر و با مهلت چند روزه
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ display: 'block', fontSize: 13, fontWeight: 800, marginBottom: 6 }}>درس</label>
+
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                  {SUBJECT_PRESETS.map((sub) => (
+                    <button
+                      key={sub}
+                      type="button"
+                      onClick={() => setExamSubject(sub)}
+                      style={{
+                        padding: '6px 12px',
+                        borderRadius: 10,
+                        fontSize: 13,
+                        fontWeight: 800,
+                        border: '2px solid var(--black)',
+                        background: examSubject === sub ? '#DBEAFE' : '#FFFFFF',
+                        color: examSubject === sub ? '#1E40AF' : '#334155',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {sub}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ display: 'block', fontSize: 13, fontWeight: 800, marginBottom: 6 }}>
+                  عنوان آزمون (برای نمایش در بالای صفحه دانش‌آموز)
+                </label>
+                <input
+                  type="text"
+                  value={examCustomTitle}
+                  onChange={(e) => setExamCustomTitle(e.target.value)}
+                  placeholder={`مثلاً: آزمون کلاسی ${examSubject} فصل ۳ یا آزمون جامع استعداد تحلیلی`}
+                  style={{
+                    width: '100%',
+                    padding: 10,
+                    borderRadius: 10,
+                    border: '2px solid var(--black)',
+                    fontSize: 14,
+                    boxSizing: 'border-box',
+                  }}
+                />
+                <span style={{ fontSize: 11.5, color: '#64748B', marginTop: 4, display: 'block' }}>
+                  این عنوان رسمی در بالای آزمون دانش‌آموز نمایش داده می‌شود (اختیاری).
+                </span>
+              </div>
+
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ display: 'block', fontSize: 13, fontWeight: 800, marginBottom: 6 }}>
+                  دستور یا موضوع شما به هوش مصنوعی (پرامپت)
+                </label>
+                <textarea
+                  value={examTopic}
+                  onChange={(e) => handleTopicChange(e.target.value)}
+                  placeholder="مثلاً: سوالات هوش ریاضی و تحلیلی، ضرب کسرها، یا ۱۰ سوال تستی با پاسخ تشریحی..."
+                  style={{
+                    width: '100%',
+                    padding: 12,
+                    borderRadius: 12,
+                    border: '2px solid var(--black)',
+                    fontSize: 14,
+                    minHeight: 80,
+                    boxSizing: 'border-box',
+                  }}
+                />
+                <span style={{ fontSize: 11.5, color: '#059669', fontWeight: 700, marginTop: 4, display: 'block' }}>
+                  🛡️ این پرامپت فقط برای راهنمایی هوش مصنوعی است و به دانش‌آموز نشان داده نمی‌شود.
+                </span>
+
+                {TOPIC_SUGGESTIONS[examSubject] && (
+                  <div style={{ marginTop: 8 }}>
+                    <div style={{ fontSize: 11.5, fontWeight: 800, color: '#64748B', marginBottom: 4 }}>
+                      موضوعات پیشنهادی برای {examSubject}:
+                    </div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                      {TOPIC_SUGGESTIONS[examSubject].map((sug) => (
+                        <button
+                          key={sug}
+                          type="button"
+                          onClick={() => setExamTopic(sug)}
+                          style={{
+                            padding: '4px 10px',
+                            borderRadius: 8,
+                            fontSize: 12,
+                            fontWeight: 700,
+                            background: examTopic === sug ? '#EFF6FF' : '#F1F5F9',
+                            border: examTopic === sug ? '1.5px solid #2563EB' : '1px solid #CBD5E1',
+                            color: examTopic === sug ? '#1D4ED8' : '#334155',
+                            cursor: 'pointer',
+                          }}
+                        >
+                          + {sug}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5 mb-4 w-full max-w-full box-border">
+                <div className="col-span-1 min-w-0">
+                  <label style={{ display: 'block', fontSize: 13, fontWeight: 800, marginBottom: 6 }}>
+                    تعداد سوالات
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="20"
+                    value={examCount}
+                    onChange={(e) => setExamCount(Math.max(1, parseInt(e.target.value) || 5))}
+                    style={{
+                      width: '100%',
+                      padding: 10,
+                      borderRadius: 10,
+                      border: '2px solid var(--black)',
+                      fontSize: 14,
+                      boxSizing: 'border-box',
+                    }}
+                  />
+                </div>
+
+                <div className="col-span-1 sm:col-span-2 min-w-0">
+                  <label style={{ display: 'block', fontSize: 13, fontWeight: 800, marginBottom: 6 }}>
+                    تنوع انواع سوالات در آزمون
+                  </label>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                    <button
+                      type="button"
+                      onClick={() => handleToggleType('multiple_choice')}
+                      style={{
+                        padding: '6px 10px',
+                        borderRadius: 8,
+                        fontSize: 12,
+                        fontWeight: 800,
+                        border: '1.5px solid var(--black)',
+                        background: selectedTypes.includes('multiple_choice') ? '#FEF08A' : '#F1F5F9',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {selectedTypes.includes('multiple_choice') ? '✓ ' : ''}چهارگزینه‌ای
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleToggleType('fill_in_the_blank')}
+                      style={{
+                        padding: '6px 10px',
+                        borderRadius: 8,
+                        fontSize: 12,
+                        fontWeight: 800,
+                        border: '1.5px solid var(--black)',
+                        background: selectedTypes.includes('fill_in_the_blank') ? '#BAE6FD' : '#F1F5F9',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {selectedTypes.includes('fill_in_the_blank') ? '✓ ' : ''}جای خالی
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleToggleType('descriptive')}
+                      style={{
+                        padding: '6px 10px',
+                        borderRadius: 8,
+                        fontSize: 12,
+                        fontWeight: 800,
+                        border: '1.5px solid var(--black)',
+                        background: selectedTypes.includes('descriptive') ? '#BBF7D0' : '#F1F5F9',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {selectedTypes.includes('descriptive') ? '✓ ' : ''}تشریحی
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleToggleType('image')}
+                      style={{
+                        padding: '6px 10px',
+                        borderRadius: 8,
+                        fontSize: 12,
+                        fontWeight: 800,
+                        border: '1.5px solid var(--black)',
+                        background: selectedTypes.includes('image') ? '#FED7AA' : '#F1F5F9',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {selectedTypes.includes('image') ? '✓ ' : ''}آپلود عکس/تصویری
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* سطح دشواری و دستورات تکمیلی معلم */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 14, marginBottom: 16 }}>
+                <div>
+                  <label style={{ display: 'block', fontSize: 13, fontWeight: 800, marginBottom: 6 }}>
+                    سطح دشواری آزمون
+                  </label>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    {[
+                      { id: 'easy', label: '🟢 ساده و مفهومی' },
+                      { id: 'medium', label: '🟡 استاندارد ششم' },
+                      { id: 'hard', label: '🔴 تیزهوشانی و پیشرفته' },
+                    ].map((lvl) => (
+                      <button
+                        key={lvl.id}
+                        type="button"
+                        onClick={() => setExamDifficulty(lvl.id as any)}
+                        style={{
+                          flex: 1,
+                          padding: '8px 6px',
+                          borderRadius: 8,
+                          fontSize: 12,
+                          fontWeight: 800,
+                          border: examDifficulty === lvl.id ? '2px solid #2563EB' : '1px solid #CBD5E1',
+                          background: examDifficulty === lvl.id ? '#EFF6FF' : '#F8FAFC',
+                          color: examDifficulty === lvl.id ? '#1D4ED8' : '#475569',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {lvl.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <label style={{ display: 'block', fontSize: 13, fontWeight: 800, marginBottom: 6 }}>
+                    دستورات و توضیحات خاص به هوش مصنوعی (اختیاری)
+                  </label>
+                  <input
+                    type="text"
+                    value={extraInstructions}
+                    onChange={(e) => setExtraInstructions(e.target.value)}
+                    placeholder="مثلاً: مسئله‌های کاربردی با عدد، تله‌های آموزشی، تمرکز روی ابیات شعر و..."
+                    style={{
+                      width: '100%',
+                      padding: 10,
+                      borderRadius: 10,
+                      border: '1.5px solid #CBD5E1',
+                      fontSize: 13,
+                      boxSizing: 'border-box',
+                    }}
+                  />
+                </div>
+              </div>
+
+              {aiError && (
+                <div style={{ color: '#DC2626', fontSize: 13, fontWeight: 700, marginBottom: 12 }}>
+                  {aiError}
+                </div>
+              )}
+
+              <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={isAiGenerating}
+                  onClick={handleGenerateWithAi}
+                  style={{ flex: 2, padding: '12px 18px', fontSize: 15 }}
+                >
+                  {isAiGenerating ? '🤖 هوش مصنوعی در حال طراحی سوالات...' : '✨ تولید هوشمند آزمون با هوش مصنوعی'}
+                </button>
+
+                <button
+                  type="button"
+                  className="btn secondary"
+                  disabled={isAiGenerating}
+                  onClick={handleCreateManualBlank}
+                  style={{ flex: 1, padding: '12px 14px', fontSize: 13 }}
+                >
+                  ➕ ایجاد آزمون خالی
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* STEP 2: REVIEW, EDIT, CONFIRM QUESTIONS */}
+          {creatingStep === 'questions' && draftExam && (
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, flexWrap: 'wrap', gap: 8 }}>
+                <div>
+                  <h3 style={{ fontSize: 17, fontWeight: 900, margin: 0 }}>
+                    بررسی و ویرایش سوالات آزمون ({draftExam.questions.length} سوال)
+                  </h3>
+                  <p style={{ fontSize: 12.5, color: '#64748B', margin: '4px 0 0 0' }}>
+                    می‌توانید تک‌تک سوالات را مشاهده، تایید، ویرایش، حذف کرده یا سوال جدید دستی اضافه کنید.
+                  </p>
+                </div>
+
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <span
+                    style={{
+                      fontSize: 12,
+                      fontWeight: 800,
+                      padding: '4px 10px',
+                      borderRadius: 8,
+                      background: confirmedQuestionIds.size === draftExam.questions.length && draftExam.questions.length > 0 ? '#DCFCE7' : '#FEF3C7',
+                      color: confirmedQuestionIds.size === draftExam.questions.length && draftExam.questions.length > 0 ? '#166534' : '#92400E',
+                    }}
+                  >
+                    تایید شده: {confirmedQuestionIds.size} از {draftExam.questions.length}
+                    {rejectedQuestionIds.size > 0 && ` (${rejectedQuestionIds.size} رد شده)`}
+                  </span>
+
+                  <button
+                    type="button"
+                    className="btn secondary"
+                    onClick={() => {
+                      const allIds = new Set(draftExam.questions.map((q) => q.id))
+                      setConfirmedQuestionIds(allIds)
+                      setRejectedQuestionIds(new Set())
+                    }}
+                    style={{ fontSize: 12.5, padding: '6px 12px' }}
+                  >
+                    ✓ تایید همه سوالات
+                  </button>
+
+                  <button
+                    type="button"
+                    className="btn secondary"
+                    onClick={() => {
+                      const unconfirmedIds = draftExam.questions
+                        .filter((q) => !confirmedQuestionIds.has(q.id))
+                        .map((q) => q.id)
+                      setRejectedQuestionIds((prev) => {
+                        const next = new Set(prev)
+                        unconfirmedIds.forEach((id) => next.add(id))
+                        return next
+                      })
+                    }}
+                    style={{ fontSize: 12.5, padding: '6px 12px' }}
+                  >
+                    ✕ رد سوالات تاییدنشده
+                  </button>
+
+                  <button
+                    type="button"
+                    className="btn secondary"
+                    onClick={openNewQuestionModal}
+                    style={{ fontSize: 12.5, padding: '6px 12px' }}
+                  >
+                    ➕ افزودن سوال جدید
+                  </button>
+                </div>
+              </div>
+
+              {/* Questions List */}
+              {regenSuccessMsg && (
+                <div
+                  style={{
+                    padding: '10px 14px',
+                    marginBottom: 12,
+                    borderRadius: 12,
+                    background: '#EFF6FF',
+                    border: '1.5px solid #93C5FD',
+                    color: '#1E40AF',
+                    fontSize: 13,
+                    fontWeight: 700,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    animation: 'fadeIn 0.25s ease',
+                  }}
+                >
+                  <span style={{ fontSize: 16 }}>✨</span>
+                  <span>{regenSuccessMsg}</span>
+                </div>
+              )}
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 20 }}>
+                {draftExam.questions.length === 0 ? (
+                  <div style={{ textAlign: 'center', padding: 24, background: '#F8FAFC', borderRadius: 12 }}>
+                    هنوز سوالی اضافه نشده است. روی «افزودن سوال جدید» کلیک کنید.
+                  </div>
+                ) : (
+                  draftExam.questions.map((q, idx) => {
+                    const isConfirmed = confirmedQuestionIds.has(q.id)
+                    const isRejected = rejectedQuestionIds.has(q.id)
+                    const isThisRegenerating = regeneratingQId === q.id
+                    return (
+                      <div
+                        key={q.id}
+                        style={{
+                          padding: 14,
+                          borderRadius: 14,
+                          border: isConfirmed ? '2px solid #10B981' : isRejected ? '2px solid #EF4444' : '1.5px solid #CBD5E1',
+                          background: isConfirmed ? '#F0FDF4' : isRejected ? '#FEF2F2' : '#FFFFFF',
+                          boxShadow: '0 2px 6px rgba(0,0,0,0.04)',
+                          position: 'relative',
+                        }}
+                      >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                            <span style={{ fontSize: 14, fontWeight: 900, color: '#1E293B' }}>
+                              سوال {idx + 1}
+                            </span>
+                            <span
+                              style={{
+                                fontSize: 11,
+                                fontWeight: 800,
+                                padding: '2px 8px',
+                                borderRadius: 6,
+                                background:
+                                  q.type === 'multiple_choice'
+                                    ? '#FEF08A'
+                                    : q.type === 'fill_in_the_blank'
+                                    ? '#BAE6FD'
+                                    : q.type === 'image'
+                                    ? '#FED7AA'
+                                    : '#BBF7D0',
+                                color: '#1E293B',
+                              }}
+                            >
+                              {q.type === 'multiple_choice'
+                                ? 'چهارگزینه‌ای'
+                                : q.type === 'fill_in_the_blank'
+                                ? 'جای خالی'
+                                : q.type === 'image'
+                                ? 'آپلود عکس/تصویری'
+                                : 'تشریحی'}
+                            </span>
+                            <span style={{ fontSize: 12, color: '#64748B', fontWeight: 700 }}>
+                              ({q.points} نمره)
+                            </span>
+                            {isConfirmed ? (
+                              <span style={{ fontSize: 11, fontWeight: 800, padding: '2px 8px', borderRadius: 6, background: '#DCFCE7', color: '#166534' }}>
+                                ✓ تایید شده
+                              </span>
+                            ) : isRejected ? (
+                              <span style={{ fontSize: 11, fontWeight: 800, padding: '2px 8px', borderRadius: 6, background: '#FEE2E2', color: '#991B1B' }}>
+                                ❌ رد شده (تایید نشده)
+                              </span>
+                            ) : (
+                              <span style={{ fontSize: 11, fontWeight: 800, padding: '2px 8px', borderRadius: 6, background: '#FEF3C7', color: '#92400E' }}>
+                                ⚠️ تایید نشده (در انتظار بررسی)
+                              </span>
+                            )}
+                          </div>
+
+                          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                            {/* Regenerate unconfirmed or rejected question with AI */}
+                            {!isConfirmed && (
+                              <button
+                                type="button"
+                                disabled={isThisRegenerating || isAiGenerating}
+                                onClick={() => handleRegenerateQuestion(q)}
+                                style={{
+                                  padding: '5px 12px',
+                                  borderRadius: 8,
+                                  fontSize: 12,
+                                  fontWeight: 800,
+                                  border: '1.5px solid #60A5FA',
+                                  background: isThisRegenerating ? '#F1F5F9' : '#EFF6FF',
+                                  color: isThisRegenerating ? '#64748B' : '#1D4ED8',
+                                  cursor: isThisRegenerating || isAiGenerating ? 'not-allowed' : 'pointer',
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: 6,
+                                  boxShadow: '0 1px 3px rgba(37, 99, 235, 0.12)',
+                                  transition: 'all 0.15s ease',
+                                }}
+                                title="تولید مجدد این سوال با هوش مصنوعی و جایگزینی خودکار"
+                              >
+                                {isThisRegenerating ? (
+                                  <>
+                                    <span
+                                      style={{
+                                        width: 12,
+                                        height: 12,
+                                        border: '2px solid #93C5FD',
+                                        borderTopColor: '#1D4ED8',
+                                        borderRadius: '50%',
+                                        animation: 'spin 0.8s linear infinite',
+                                        display: 'inline-block',
+                                      }}
+                                    />
+                                    <span>در حال بازتولید سوال...</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <span style={{ fontSize: 13 }}>🔄</span>
+                                    <span>تولید مجدد این سوال با هوش مصنوعی</span>
+                                  </>
+                                )}
+                              </button>
+                            )}
+
+                            {!isConfirmed ? (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => handleConfirmQuestion(q.id)}
+                                  style={{
+                                    padding: '5px 10px',
+                                    borderRadius: 8,
+                                    fontSize: 12,
+                                    fontWeight: 800,
+                                    border: '1.5px solid #059669',
+                                    background: '#10B981',
+                                    color: '#FFFFFF',
+                                    cursor: 'pointer',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: 4,
+                                  }}
+                                >
+                                  <span>✓</span>
+                                  <span>تایید سوال</span>
+                                </button>
+                                {!isRejected ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRejectQuestion(q.id)}
+                                    style={{
+                                      padding: '5px 10px',
+                                      borderRadius: 8,
+                                      fontSize: 12,
+                                      fontWeight: 800,
+                                      border: '1.5px solid #FCA5A5',
+                                      background: '#FFF1F2',
+                                      color: '#B91C1C',
+                                      cursor: 'pointer',
+                                      display: 'inline-flex',
+                                      alignItems: 'center',
+                                      gap: 4,
+                                    }}
+                                  >
+                                    <span>✕</span>
+                                    <span>رد سوال</span>
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleUnconfirmQuestion(q.id)}
+                                    style={{
+                                      padding: '5px 10px',
+                                      borderRadius: 8,
+                                      fontSize: 12,
+                                      fontWeight: 800,
+                                      border: '1.5px solid #CBD5E1',
+                                      background: '#F8FAFC',
+                                      color: '#64748B',
+                                      cursor: 'pointer',
+                                    }}
+                                    title="خروج از وضعیت رد شده به در انتظار بررسی"
+                                  >
+                                    لغو رد
+                                  </button>
+                                )}
+                              </>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => handleRejectQuestion(q.id)}
+                                style={{
+                                  padding: '5px 10px',
+                                  borderRadius: 8,
+                                  fontSize: 12,
+                                  fontWeight: 800,
+                                  border: '1.5px solid #FCA5A5',
+                                  background: '#FFF1F2',
+                                  color: '#B91C1C',
+                                  cursor: 'pointer',
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: 4,
+                                }}
+                                title="رد کردن یا لغو تایید این سوال"
+                              >
+                                <span>✕</span>
+                                <span>رد سوال / لغو تایید</span>
+                              </button>
+                            )}
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingQ(q)
+                                setIsNewQuestionModal(false)
+                              }}
+                              style={{
+                                padding: '5px 8px',
+                                borderRadius: 8,
+                                fontSize: 12,
+                                background: '#F1F5F9',
+                                border: '1px solid #CBD5E1',
+                                cursor: 'pointer',
+                              }}
+                            >
+                              ✏️ ویرایش
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteQuestion(q.id)}
+                              style={{
+                                padding: '5px 8px',
+                                borderRadius: 8,
+                                fontSize: 12,
+                                background: '#FEE2E2',
+                                border: '1px solid #FCA5A5',
+                                color: '#DC2626',
+                                cursor: 'pointer',
+                              }}
+                            >
+                              🗑️
+                            </button>
+                          </div>
+                        </div>
+
+                        {isRejected && (
+                          <div
+                            style={{
+                              padding: '8px 12px',
+                              marginBottom: 10,
+                              borderRadius: 8,
+                              background: '#FFF1F2',
+                              border: '1px solid #FECDD3',
+                              color: '#9F1239',
+                              fontSize: 12,
+                              fontWeight: 700,
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: 6,
+                            }}
+                          >
+                            <span>⚠️</span>
+                            <span>این سوال توسط آموزگار تایید نشده است. می‌توانید با کلیک روی دکمه «تولید مجدد این سوال با هوش مصنوعی» یک سوال جایگزین جدید دریافت کنید.</span>
+                          </div>
+                        )}
+
+                        <div style={{ fontSize: 14, fontWeight: 700, color: '#0F172A', marginBottom: 8, lineHeight: 1.8 }}>
+                          <MathRenderer text={q.question} />
+                        </div>
+
+                        {(q.awardFullScoreToAll || q.allOptionsCorrect) && (
+                          <div style={{ fontSize: 12, color: '#047857', background: '#D1FAE5', border: '1px solid #6EE7B7', padding: '6px 12px', borderRadius: 8, margin: '6px 0 10px 0', fontWeight: 800 }}>
+                            🎁 نمره کامل این سوال با تصمیم آموزگار به تمامی دانش‌آموزان تعلق می‌گیرد (نمره آزاد / اصلاح کلید).
+                          </div>
+                        )}
+
+                        {/* Options preview for multiple choice */}
+                        {q.type === 'multiple_choice' && q.options && (
+                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 6, margin: '8px 0' }}>
+                            {q.options.map((opt, optIdx) => {
+                              const isCorrect = resolveCorrectOptionIndex(q).index === optIdx
+                              return (
+                                <div
+                                  key={optIdx}
+                                  style={{
+                                    padding: '6px 10px',
+                                    borderRadius: 8,
+                                    fontSize: 12.5,
+                                    background: isCorrect ? '#DCFCE7' : '#F8FAFC',
+                                    border: isCorrect ? '1.5px solid #22C55E' : '1px solid #E2E8F0',
+                                    fontWeight: isCorrect ? 800 : 500,
+                                    color: isCorrect ? '#166534' : '#334155',
+                                  }}
+                                >
+                                  {optIdx + 1}) <MathRenderer text={opt} /> {isCorrect && '✓ (پاسخ صحیح)'}
+                                </div>
+                              )
+                            })}
+                          </div>
+                        )}
+
+
+                        {q.type === 'fill_in_the_blank' && (
+                          <div style={{ fontSize: 12.5, color: '#0369A1', background: '#F0F9FF', padding: '6px 10px', borderRadius: 8 }}>
+                            🔑 کلیدواژه جای خالی: <strong>{String(q.correctAnswer || 'تعیین نشده')}</strong>
+                          </div>
+                        )}
+
+                        {q.rubricOrHint && (
+                          <div style={{ fontSize: 11.5, color: '#64748B', marginTop: 6 }}>
+                            💡 کلید و راهنمای تصحیح سوال: {q.rubricOrHint}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })
+                )}
+              </div>
+
+              {/* Bottom Buttons */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
+                <button
+                  type="button"
+                  className="btn secondary"
+                  onClick={() => setCreatingStep('prompt')}
+                >
+                  ➔ بازگشت به تنظیمات
+                </button>
+
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={draftExam.questions.length === 0}
+                  onClick={handleProceedToSchedule}
+                  style={{ padding: '10px 20px' }}
+                >
+                  مرحله بعد: زمان‌بندی و انتشار آزمون 🚀
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* STEP 3: SCHEDULE & PUBLISH */}
+          {creatingStep === 'schedule' && draftExam && (
+            <div>
+              <h3 style={{ fontSize: 17, fontWeight: 900, margin: '0 0 14px 0' }}>
+                زمان‌بندی برگزاری آزمون برای دانش‌آموزان
+              </h3>
+
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ display: 'block', fontSize: 13, fontWeight: 900, marginBottom: 8, color: '#0F172A' }}>
+                  نوع آزمون یا تکلیف:
+                </label>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: 10 }}>
+                  <div
+                    onClick={() => {
+                      setExamMode('exam')
+                      setIsUntimed(false)
+                    }}
+                    style={{
+                      padding: '12px 14px',
+                      borderRadius: 12,
+                      border: examMode === 'exam' && !isUntimed ? '2.5px solid #2563EB' : '1.5px solid #CBD5E1',
+                      background: examMode === 'exam' && !isUntimed ? '#EFF6FF' : '#FFFFFF',
+                      cursor: 'pointer',
+                      transition: 'all 0.15s ease',
+                    }}
+                  >
+                    <div style={{ fontWeight: 900, fontSize: 13.5, color: '#1E40AF', display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span>⏱️ آزمون زمان‌دار کلاسی</span>
+                    </div>
+                    <p style={{ margin: '4px 0 0 0', fontSize: 11.5, color: '#64748B', lineHeight: 1.5 }}>
+                      تایمر ثانیه‌شمار و محدودیت زمانی در طول برگزاری آزمون
+                    </p>
+                  </div>
+
+                  <div
+                    onClick={() => {
+                      setExamMode('assignment')
+                      setIsUntimed(true)
+                      if (!isEditingExisting) setScheduleType('now')
+                    }}
+                    style={{
+                      padding: '12px 14px',
+                      borderRadius: 12,
+                      border: examMode === 'assignment' || isUntimed ? '2.5px solid #16A34A' : '1.5px solid #CBD5E1',
+                      background: examMode === 'assignment' || isUntimed ? '#F0FDF4' : '#FFFFFF',
+                      cursor: 'pointer',
+                      transition: 'all 0.15s ease',
+                    }}
+                  >
+                    <div style={{ fontWeight: 900, fontSize: 13.5, color: '#15803D', display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span>🌱 تکلیف تعاملی بدون زمان</span>
+                    </div>
+                    <p style={{ margin: '4px 0 0 0', fontSize: 11.5, color: '#64748B', lineHeight: 1.5 }}>
+                      موتور آزمون (تستی، جای خالی، تشریحی) بدون استرس تایمر و با مهلت چند روزه
+                    </p>
+                  </div>
+
+                </div>
+              </div>
+
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ display: 'block', fontSize: 13, fontWeight: 800, marginBottom: 6 }}>
+                  {examMode === 'assignment' ? 'عنوان تکلیف تعاملی' : 'عنوان آزمون'}
+                </label>
+                <input
+                  type="text"
+                  value={examTitle}
+                  onChange={(e) => setExamTitle(e.target.value)}
+                  style={{
+                    width: '100%',
+                    padding: 10,
+                    borderRadius: 10,
+                    border: '2px solid var(--black)',
+                    fontSize: 14,
+                    boxSizing: 'border-box',
+                  }}
+                />
+              </div>
+
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ display: 'block', fontSize: 13, fontWeight: 800, marginBottom: 6 }}>
+                  زمان فعال‌شدن آزمون
+                </label>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 10 }}>
+                  <button
+                    type="button"
+                    onClick={() => setScheduleType('now')}
+                    style={{
+                      padding: '8px 14px',
+                      borderRadius: 10,
+                      fontSize: 13,
+                      fontWeight: 800,
+                      border: '2px solid var(--black)',
+                      background: scheduleType === 'now' ? '#DCFCE7' : '#FFFFFF',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    همین الان فعال شود (پیشنهادی) 🟢
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setScheduleType('tomorrow_10')}
+                    style={{
+                      padding: '8px 14px',
+                      borderRadius: 10,
+                      fontSize: 13,
+                      fontWeight: 800,
+                      border: '2px solid var(--black)',
+                      background: scheduleType === 'tomorrow_10' ? '#DBEAFE' : '#FFFFFF',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    فردا ساعت ۱۰:۰۰ صبح ☀️
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setScheduleType('tomorrow_17')}
+                    style={{
+                      padding: '8px 14px',
+                      borderRadius: 10,
+                      fontSize: 13,
+                      fontWeight: 800,
+                      border: '2px solid var(--black)',
+                      background: scheduleType === 'tomorrow_17' ? '#DBEAFE' : '#FFFFFF',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    فردا ساعت ۱۷:۰۰ عصر 🌇
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setScheduleType('custom')}
+                    style={{
+                      padding: '8px 14px',
+                      borderRadius: 10,
+                      fontSize: 13,
+                      fontWeight: 800,
+                      border: '2px solid var(--black)',
+                      background: scheduleType === 'custom' ? '#DBEAFE' : '#FFFFFF',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    انتخاب تاریخ دلخواه 📅
+                  </button>
+                </div>
+
+                {scheduleType === 'custom' && (
+                  <input
+                    type="datetime-local"
+                    value={customDateTime}
+                    onChange={(e) => setCustomDateTime(e.target.value)}
+                    style={{
+                      padding: 10,
+                      borderRadius: 10,
+                      border: '2px solid var(--black)',
+                      fontSize: 14,
+                    }}
+                  />
+                )}
+              </div>
+
+              {examMode === 'exam' ? (
+                <div style={{ marginBottom: 20 }}>
+                  <label style={{ display: 'block', fontSize: 13, fontWeight: 800, marginBottom: 6 }}>
+                    مدت زمان پاسخگویی دانش‌آموز (به دقیقه)
+                  </label>
+                  <input
+                    type="number"
+                    min="5"
+                    max="180"
+                    value={durationMinutes}
+                    onChange={(e) => setDurationMinutes(Math.max(5, parseInt(e.target.value) || 30))}
+                    style={{
+                      width: 140,
+                      padding: 10,
+                      borderRadius: 10,
+                      border: '2px solid var(--black)',
+                      fontSize: 14,
+                    }}
+                  />
+                  <span style={{ marginRight: 8, fontSize: 13, color: '#64748B' }}>دقیقه</span>
+                </div>
+              ) : (
+                <div style={{ marginBottom: 20 }}>
+                  <div
+                    style={{
+                      background: '#F0FDF4',
+                      border: '1.5px solid #BBF7D0',
+                      padding: '10px 14px',
+                      borderRadius: 12,
+                      marginBottom: 12,
+                      fontSize: 12.5,
+                      color: '#166534',
+                      lineHeight: 1.6,
+                    }}
+                  >
+                    🌱 <strong>تکلیف تعاملی بدون استرس و تایمر:</strong> دانش‌آموز سوالات تستی، جای خالی و تشریحی را دقیقاً با موتور آزمون اما با آرامش و بدون محدودیت زمانی حل می‌کند و می‌تواند در طول مهلت تعیین‌شده پاسخ‌های خود را تکمیل و ویرایش نماید.
+                  </div>
+
+                  <label style={{ display: 'block', fontSize: 13, fontWeight: 800, marginBottom: 6 }}>
+                    مهلت تحویل و ویرایش توسط دانش‌آموز (پایان فرصت)
+                  </label>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAssignmentDays(2)
+                        setCustomDueDateTime('')
+                      }}
+                      style={{
+                        padding: '8px 14px',
+                        borderRadius: 10,
+                        fontSize: 13,
+                        fontWeight: 800,
+                        border: '2px solid var(--black)',
+                        background: assignmentDays === 2 && !customDueDateTime ? '#DCFCE7' : '#FFFFFF',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      ۲ روز مهلت ⏳
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAssignmentDays(5)
+                        setCustomDueDateTime('')
+                      }}
+                      style={{
+                        padding: '8px 14px',
+                        borderRadius: 10,
+                        fontSize: 13,
+                        fontWeight: 800,
+                        border: '2px solid var(--black)',
+                        background: assignmentDays === 5 && !customDueDateTime ? '#DCFCE7' : '#FFFFFF',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      ۵ روز مهلت (پیشنهادی) 🗓️
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAssignmentDays(7)
+                        setCustomDueDateTime('')
+                      }}
+                      style={{
+                        padding: '8px 14px',
+                        borderRadius: 10,
+                        fontSize: 13,
+                        fontWeight: 800,
+                        border: '2px solid var(--black)',
+                        background: assignmentDays === 7 && !customDueDateTime ? '#DCFCE7' : '#FFFFFF',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      ۱ هفته مهلت 📅
+                    </button>
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 12, color: '#64748B', display: 'block', marginBottom: 4 }}>
+                      یا انتخاب مهلت دقیق تاریخ و ساعت:
+                    </label>
+                    <input
+                      type="datetime-local"
+                      value={customDueDateTime}
+                      onChange={(e) => setCustomDueDateTime(e.target.value)}
+                      style={{
+                        padding: 8,
+                        borderRadius: 10,
+                        border: '2px solid var(--black)',
+                        fontSize: 13,
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
+                <button
+                  type="button"
+                  className="btn secondary"
+                  onClick={() => setCreatingStep('questions')}
+                >
+                  ➔ بازگشت به سوالات
+                </button>
+
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={savingExam}
+                  onClick={handleFinalPublish}
+                  style={{
+                    padding: '12px 24px',
+                    fontSize: 15,
+                    background: isEditingExisting ? '#16A34A' : undefined,
+                    borderColor: isEditingExisting ? '#15803D' : undefined,
+                  }}
+                >
+                  {savingExam
+                    ? 'در حال ذخیره...'
+                    : isEditingExisting
+                    ? '💾 ذخیره تغییرات و به‌روزرسانی آزمون'
+                    : '🚀 انتشار آزمون در کلاس درس'}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ========================================================
+          VIEW 3: REVIEW & APPROVE SUBMISSIONS (TEACHER APPROVAL PANEL)
+          ======================================================== */}
+      {activeView === 'review_subs' && selectedExamForSubs && (
+        <div className="mobile-card hard" style={{ padding: 18, background: '#FFFFFF', borderRadius: 18 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, flexWrap: 'wrap', gap: 8 }}>
+            <div>
+              <button
+                type="button"
+                className="link"
+                onClick={() => {
+                  setSelectedSubForGrading(null)
+                  setActiveView('list')
+                }}
+                style={{ fontSize: 13, fontWeight: 800, marginBottom: 4 }}
+              >
+                ➔ بازگشت به لیست آزمون‌ها
+              </button>
+              <h3 style={{ fontSize: 17, fontWeight: 900, margin: 0 }}>
+                بررسی پاسخ‌های آزمون: {selectedExamForSubs.title}
+              </h3>
+            </div>
+
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                className="btn secondary"
+                onClick={() => handleOpenRegradeModal(selectedExamForSubs.id)}
+                disabled={isLoadingRegrade}
+                style={{
+                  fontSize: 12,
+                  padding: '6px 12px',
+                  background: '#FEF3C7',
+                  color: '#92400E',
+                  borderColor: '#F59E0B',
+                  fontWeight: 800,
+                }}
+                title="بازمحاسبه نمرات دانش‌آموزان بر اساس الگوریتم تصحیح مفهومی و بدون نمره منفی ناعادلانه"
+              >
+                {isLoadingRegrade ? '⏳ در حال محاسبه پیش‌نمایش...' : '🔄 بازتصحیح هوشمند پاسخ‌ها'}
+              </button>
+
+              <button
+                type="button"
+                className="btn secondary"
+                onClick={handleRefreshSubmissions}
+                disabled={isRefreshingSubs}
+                style={{ fontSize: 12, padding: '6px 12px' }}
+              >
+                {isRefreshingSubs ? '⏳ در حال دریافت پاسخ‌ها...' : '🔄 بروزرسانی پاسخ‌ها از سرور'}
+              </button>
+            </div>
+          </div>
+
+          {/* Release and Statistics Banner */}
+          {(() => {
+            const currentSubmissions = getExamSubmissions(selectedExamForSubs.id)
+            const realSubs = currentSubmissions.filter((s) => !isTestStudentRecord(s.studentId, s.studentName))
+            const pendingUnapprovedCount = realSubs.filter((s) => !isSubmissionApprovedByTeacher(s)).length
+            const isReleased = !!(selectedExamForSubs.resultsPublished || selectedExamForSubs.isResultsReleased)
+            const totalClassStudents = CLASS_STUDENTS_ROSTER.length || 40
+            const submissionCount = realSubs.length
+
+            return (
+              <div
+                style={{
+                  background: isReleased ? '#F0FDF4' : '#FFFBEB',
+                  border: isReleased ? '2px solid #22C55E' : '2px solid #F59E0B',
+                  borderRadius: 14,
+                  padding: '14px 16px',
+                  marginBottom: 16,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 10,
+                }}
+              >
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    flexWrap: 'wrap',
+                    gap: 12,
+                  }}
+                >
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                      <span
+                        style={{
+                          fontSize: 12,
+                          fontWeight: 900,
+                          padding: '3px 10px',
+                          borderRadius: 999,
+                          background: isReleased ? '#DCFCE7' : '#FEF3C7',
+                          color: isReleased ? '#15803D' : '#B45309',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 4,
+                        }}
+                      >
+                        {isReleased ? '🟢 کارنامه منتشر شده است' : '🔒 کارنامه قفل است (در انتظار تایید معلم)'}
+                      </span>
+                      <span style={{ fontSize: 13, fontWeight: 800, color: '#1E293B' }}>
+                        تعداد پاسخ‌های دریافتی: <strong>{submissionCount}</strong> از <strong>{totalClassStudents}</strong> دانش‌آموز ({Math.round((submissionCount / totalClassStudents) * 100)}%)
+                      </span>
+                    </div>
+                    <p style={{ margin: 0, fontSize: 12, color: '#475569', lineHeight: 1.5 }}>
+                      {isReleased
+                        ? 'دانش‌آموزانی که پاسخ‌نامه آن‌ها تأیید شده باشد، کارنامه و نمره خود را مشاهده می‌کنند.'
+                        : 'تا زمانی که دکمه «تایید و انتشار کارنامه برای همه» را نزنید، دانش‌آموزان به نمرات و کلید سوالات دسترسی نخواهند داشت و پیام «در انتظار تایید معلم» می‌بینند.'}
+                    </p>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                    {isReleased && pendingUnapprovedCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleApproveAllPendingSubs}
+                        disabled={isReleasingResults}
+                        style={{
+                          background: '#16A34A',
+                          color: '#FFFFFF',
+                          border: '2px solid var(--black)',
+                          borderRadius: 10,
+                          padding: '8px 14px',
+                          fontSize: 12.5,
+                          fontWeight: 900,
+                          cursor: isReleasingResults ? 'wait' : 'pointer',
+                        }}
+                      >
+                        {`✅ تایید و انتشار ${pendingUnapprovedCount} پاسخ در انتظار`}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={handleToggleReleaseResults}
+                      disabled={isReleasingResults}
+                      style={{
+                        background: isReleased ? '#DC2626' : '#16A34A',
+                        color: '#FFFFFF',
+                        border: '2px solid var(--black)',
+                        borderRadius: 10,
+                        padding: '8px 16px',
+                        fontSize: 13,
+                        fontWeight: 900,
+                        cursor: isReleasingResults ? 'wait' : 'pointer',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 6,
+                      }}
+                    >
+                      {isReleasingResults
+                        ? 'در حال اعمال...'
+                        : isReleased
+                        ? '🔒 لغو انتشار و مخفی‌سازی کارنامه'
+                        : '📢 تایید و انتشار کارنامه برای همه'}
+                    </button>
+                  </div>
+                </div>
+
+                {isReleased && pendingUnapprovedCount > 0 && (
+                  <div style={{ background: '#FEF3C7', border: '1px solid #F59E0B', borderRadius: 10, padding: '8px 12px', fontSize: 12, fontWeight: 700, color: '#92400E' }}>
+                    ⚠️ توجه: {pendingUnapprovedCount} پاسخ‌نامه هنوز در وضعیت «در انتظار تأیید» هستند و تا زمان تأیید شما، نمره آن‌ها برای دانش‌آموزان مخفی می‌ماند.
+                  </div>
+                )}
+
+                {(() => {
+                  const approvedRealSubs = realSubs.filter((s) => isSubmissionApprovedByTeacher(s) && isExamResultsReleased(selectedExamForSubs, s))
+                  const missingInGradesCount =
+                    gradebookFetchState === 'loaded'
+                      ? approvedRealSubs.filter((s) => !findGradebookRowForExamSubmission(gradebookRows, selectedExamForSubs, s.studentId, s.studentName)).length
+                      : 0
+
+                  if (gradebookFetchState === 'error') {
+                    return (
+                      <div style={{ background: '#FEF2F2', border: '1px solid #FCA5A5', borderRadius: 10, padding: '8px 12px', fontSize: 12, fontWeight: 700, color: '#991B1B' }}>
+                        ⚠️ بررسی ثبت واقعی در جدول اصلی grades ممکن نشد: {gradebookFetchError}
+                      </div>
+                    )
+                  }
+
+                  if (gradebookFetchState === 'loaded' && missingInGradesCount > 0) {
+                    return (
+                      <div style={{ background: '#FFF7ED', border: '1.5px solid #FB923C', borderRadius: 10, padding: '10px 12px', fontSize: 12, fontWeight: 700, color: '#9A3412', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
+                        <span>
+                          ⚠️ برای {toPersianDigits(missingInGradesCount)} دانش‌آموز تأییدشده، رکوردی در جدول اصلی <code>grades</code> یافت نشد و نمره فعلاً از منبع جایگزین پاسخ‌نامه خوانده می‌شود.
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleSyncMissingGradesToTable(selectedExamForSubs.id)}
+                          disabled={isSyncingGradesTable}
+                          style={{
+                            background: '#EA580C',
+                            color: '#FFFFFF',
+                            border: '2px solid var(--black)',
+                            borderRadius: 8,
+                            padding: '6px 12px',
+                            fontSize: 12,
+                            fontWeight: 900,
+                            cursor: isSyncingGradesTable ? 'wait' : 'pointer',
+                          }}
+                        >
+                          {isSyncingGradesTable ? '⏳ در حال ثبت...' : '📥 ثبت نمرات تاییدشده در جدول اصلی grades'}
+                        </button>
+                      </div>
+                    )
+                  }
+                  return null
+                })()}
+              </div>
+            )
+          })()}
+
+          {gradeSyncErrorBanner && (
+            <div
+              style={{
+                background: '#FEF2F2',
+                color: '#991B1B',
+                border: '1.5px solid #F87171',
+                borderRadius: 10,
+                padding: '8px 12px',
+                fontSize: 12.5,
+                fontWeight: 800,
+                marginBottom: 14,
+              }}
+            >
+              {gradeSyncErrorBanner}
+            </div>
+          )}
+
+          {releaseFeedbackMsg && (
+            <div
+              style={{
+                background: '#EFF6FF',
+                color: '#1E40AF',
+                border: '1.5px solid #93C5FD',
+                borderRadius: 10,
+                padding: '8px 12px',
+                fontSize: 12.5,
+                fontWeight: 700,
+                marginBottom: 14,
+              }}
+            >
+              {releaseFeedbackMsg}
+            </div>
+          )}
+
+          {/* If a specific student submission is open for grading */}
+          {selectedSubForGrading ? (
+            <div style={{ background: '#F8FAFC', padding: 16, borderRadius: 16, border: '2px solid var(--black)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, flexWrap: 'wrap', gap: 8 }}>
+                <div>
+                  <h4 style={{ fontSize: 16, fontWeight: 900, margin: 0, color: '#0F172A' }}>
+                    پاسخ‌نامه {selectedSubForGrading.studentName}
+                  </h4>
+                  <p style={{ fontSize: 12, color: '#64748B', margin: '2px 0 0 0' }}>
+                    تاریخ ارسال: {selectedSubForGrading.submittedAt ? new Date(selectedSubForGrading.submittedAt).toLocaleString('fa-IR') : 'نامشخص'}
+                  </p>
+                </div>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  {(() => {
+                    const isSubApproved = isSubmissionApprovedByTeacher(selectedSubForGrading)
+                    const isSubReleased = isExamResultsReleased(selectedExamForSubs, selectedSubForGrading)
+                    const hasGradesRow =
+                      gradebookFetchState === 'loaded' &&
+                      Boolean(findGradebookRowForExamSubmission(gradebookRows, selectedExamForSubs, selectedSubForGrading.studentId, selectedSubForGrading.studentName))
+                    let badgeBg = '#FEF3C7'
+                    let badgeColor = '#92400E'
+                    let badgeText = '⏳ ارسال شد (نیاز به بازبینی و تایید)'
+                    if (isSubApproved && isSubReleased) {
+                      if (gradebookFetchState === 'loaded') {
+                        badgeBg = hasGradesRow ? '#DCFCE7' : '#FFEDD5'
+                        badgeColor = hasGradesRow ? '#166534' : '#9A3412'
+                        badgeText = hasGradesRow ? '✓ ثبت در کارنامه (جدول grades)' : '⚠️ نمایش از پاسخ‌نامه (در جدول grades ثبت نشده)'
+                      } else if (gradebookFetchState === 'error') {
+                        badgeBg = '#FEF2F2'
+                        badgeColor = '#991B1B'
+                        badgeText = '⚠️ تاییدشده (خطا در بررسی جدول grades)'
+                      } else {
+                        badgeBg = '#DBEAFE'
+                        badgeColor = '#1D4ED8'
+                        badgeText = '⏳ در حال بررسی ثبت در جدول grades...'
+                      }
+                    } else if (isSubApproved) {
+                      badgeBg = '#DBEAFE'
+                      badgeColor = '#1D4ED8'
+                      badgeText = '✔ تایید معلم (کارنامه قفل)'
+                    }
+                    return (
+                      <span
+                        style={{
+                          fontSize: 12,
+                          fontWeight: 800,
+                          padding: '4px 10px',
+                          borderRadius: 999,
+                          background: badgeBg,
+                          color: badgeColor,
+                        }}
+                      >
+                        {badgeText}
+                      </span>
+                    )
+                  })()}
+                  <button
+                    type="button"
+                    className="btn secondary"
+                    onClick={() => setSelectedSubForGrading(null)}
+                    style={{ fontSize: 12, padding: '4px 10px' }}
+                  >
+                    بستن کارنامه
+                  </button>
+                </div>
+              </div>
+
+              {/* Questions Breakdown */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                {(() => {
+                  const freshEvalForSub = selectedSubForGrading && selectedExamForSubs
+                    ? evaluateEntireExamSubmission(selectedExamForSubs, selectedSubForGrading.answers || {})
+                    : null
+
+                  return selectedExamForSubs.questions.map((q, idx) => {
+                    const sAnswer = selectedSubForGrading.answers[q.id]
+                    const qFreshEval = freshEvalForSub?.questionGrading?.[q.id]
+                    const aiScore = qFreshEval?.score !== undefined
+                      ? qFreshEval.score
+                      : (selectedSubForGrading.aiGrading?.questionScores?.[q.id] ?? 0)
+                    const aiFeedback = qFreshEval?.feedback || selectedSubForGrading.aiGrading?.questionFeedbacks?.[q.id]
+                    const currentTeacherScore = teacherScoresDraft[q.id] ?? aiScore
+                    const maxPts = Number(q.points) || 2
+
+                    return (
+                      <div
+                        key={q.id}
+                        style={{
+                          background: '#FFFFFF',
+                          border: '1.5px solid #CBD5E1',
+                          borderRadius: 12,
+                          padding: 14,
+                        }}
+                      >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 6 }}>
+                          <span style={{ fontSize: 13, fontWeight: 900, color: '#1E293B' }}>
+                            سوال {toPersianDigits(idx + 1)}: {q.question} ({toPersianDigits(maxPts)} نمره)
+                          </span>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                            <span style={{ fontSize: 12, fontWeight: 700 }}>نمره آموزگار:</span>
+                            <input
+                              type="number"
+                              step="0.25"
+                              min="0"
+                              max={maxPts}
+                              value={currentTeacherScore}
+                              onChange={(e) =>
+                                setTeacherScoresDraft({
+                                  ...teacherScoresDraft,
+                                  [q.id]: Math.min(maxPts, Math.max(0, parseFloat(e.target.value) || 0)),
+                                })
+                              }
+                              style={{
+                                width: 60,
+                                padding: '4px 6px',
+                                borderRadius: 6,
+                                border: '2px solid var(--black)',
+                                fontSize: 13,
+                                fontWeight: 800,
+                                textAlign: 'center',
+                              }}
+                            />
+                            <span style={{ fontSize: 12 }}>از {toPersianDigits(q.points)}</span>
+                          </div>
+                        </div>
+
+                        {/* Student's answer display */}
+                        <div style={{ background: '#F1F5F9', padding: '10px 12px', borderRadius: 8, margin: '8px 0', fontSize: 13 }}>
+                          <strong>پاسخ دانش‌آموز:</strong>{' '}
+                          {q.type === 'multiple_choice' ? (
+                            (() => {
+                              const resStudent = resolveStudentSelectedOption(sAnswer, q.options)
+                              const resCorrect = resolveCorrectOptionIndex(q)
+                              return (
+                                <span>
+                                  {resStudent.isValid ? (
+                                    <span style={{ fontWeight: 800, color: '#1E293B' }}>
+                                      {resStudent.label}{resStudent.text ? `: ${resStudent.text}` : ''}
+                                    </span>
+                                  ) : (
+                                    <span style={{ color: '#64748B' }}>بدون پاسخ</span>
+                                  )}
+                                  {resCorrect.isValid && (
+                                    <span style={{ marginRight: 12, fontSize: 12, color: '#15803D', background: '#DCFCE7', padding: '2px 8px', borderRadius: 6, fontWeight: 700 }}>
+                                      کلید صحیح: {resCorrect.label}{resCorrect.text ? `: ${resCorrect.text}` : ''}
+                                    </span>
+                                  )}
+                                </span>
+                              )
+                            })()
+                          ) : (
+                            <span>{sAnswer?.textAnswer || 'بدون پاسخ متنی'}</span>
+                          )}
+
+                          {sAnswer?.imageAttachment && (
+                            <div style={{ marginTop: 8 }}>
+                              <img
+                                src={sAnswer.imageAttachment}
+                                alt="تصویر پاسخ"
+                                style={{ maxWidth: '100%', maxHeight: 200, borderRadius: 8 }}
+                              />
+                            </div>
+                          )}
+                        </div>
+
+                        {/* AI evaluation suggestion */}
+                        {aiFeedback && (
+                          <div style={{ fontSize: 12, color: '#0369A1', background: '#F0F9FF', padding: '6px 10px', borderRadius: 6 }}>
+                            💡 تحلیل پاسخ و نمره پیشنهادی ({toPersianDigits(aiScore)} از {toPersianDigits(q.points)}): {aiFeedback}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })
+                })()}
+              </div>
+
+              {/* Teacher Summary Notes & Approve Button */}
+              <div style={{ marginTop: 16, paddingTop: 14, borderTop: '2px solid #E2E8F0' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <label style={{ fontSize: 13, fontWeight: 800 }}>
+                    یادداشت و توصیه من برای دانش‌آموز (جهت درج در کارنامه)
+                  </label>
+                  <span style={{ fontSize: 11.5, color: '#166534', background: '#DCFCE7', padding: '2px 8px', borderRadius: 6, fontWeight: 700 }}>
+                    ✨ پیش‌نویس بر اساس قوت و ضعف دانش‌آموز آماده شده — قابل ویرایش
+                  </span>
+                </div>
+                <textarea
+                  value={teacherNoteDraft}
+                  onChange={(e) => setTeacherNoteDraft(e.target.value)}
+                  placeholder="یادداشت و بازخورد آموزگار برای دانش‌آموز..."
+                  style={{
+                    width: '100%',
+                    padding: 10,
+                    borderRadius: 10,
+                    border: '2px solid var(--black)',
+                    fontSize: 13,
+                    boxSizing: 'border-box',
+                    minHeight: 70,
+                    lineHeight: 1.5,
+                  }}
+                />
+
+                {gradingSuccessMsg && (
+                  <div style={{ color: '#166534', fontWeight: 800, fontSize: 13, margin: '10px 0' }}>
+                    {gradingSuccessMsg}
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 12, flexWrap: 'wrap', gap: 10 }}>
+                  {(() => {
+                    const maxPts = getExamMaxPoints(selectedExamForSubs)
+                    const sumDraft = roundScore2(
+                      Object.values(teacherScoresDraft).reduce((sum, v) => sum + (v || 0), 0)
+                    )
+                    const scaledDraft = safeScaled20(sumDraft, maxPts)
+                    return (
+                      <div style={{ fontSize: 15, fontWeight: 900 }}>
+                        مجموع نمره نهایی:{' '}
+                        <span style={{ color: '#2563EB' }}>
+                          {toPersianDigits(sumDraft)} از {toPersianDigits(maxPts)}
+                        </span>{' '}
+                        <span style={{ fontSize: 13, color: '#059669' }}>
+                          (معادل {toPersianDigits(scaledDraft)} از ۲۰)
+                        </span>
+                      </div>
+                    )
+                  })()}
+
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={handleApproveGrading}
+                    style={{ padding: '10px 20px', fontSize: 14 }}
+                  >
+                    ✅ تایید نهایی نمره و ارسال به کارنامه دانش‌آموز
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : (
+            /* Submissions list */
+            <div>
+              {getExamSubmissions(selectedExamForSubs.id).length === 0 ? (
+                <div style={{ textAlign: 'center', padding: 32, background: '#F8FAFC', borderRadius: 12 }}>
+                  <div style={{ fontSize: 36, marginBottom: 8 }}>⏳</div>
+                  <h4 style={{ margin: 0, fontSize: 15, fontWeight: 800 }}>
+                    هنوز هیچ دانش‌آموزی پاسخی ارسال نکرده است
+                  </h4>
+                  <p style={{ fontSize: 12.5, color: '#64748B', margin: '4px 0 0 0' }}>
+                    به محض اتمام آزمون توسط دانش‌آموزان، پاسخ‌ها در این صفحه نمایش داده می‌شوند.
+                  </p>
+                </div>
+              ) : (
+                <div>
+                  {/* View layout toggle header */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
+                    <div style={{ fontSize: 13, fontWeight: 800, color: '#334155' }}>
+                      📋 نمایش فهرست پاسخ‌نامه‌ها: <strong>{toPersianDigits(getExamSubmissions(selectedExamForSubs.id).length)} دانش‌آموز</strong>
+                    </div>
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <button
+                        type="button"
+                        onClick={() => setSubsDisplayLayout('table')}
+                        style={{
+                          padding: '6px 12px',
+                          borderRadius: 8,
+                          fontSize: 12,
+                          fontWeight: 800,
+                          cursor: 'pointer',
+                          background: subsDisplayLayout === 'table' ? '#1E293B' : '#F1F5F9',
+                          color: subsDisplayLayout === 'table' ? '#FFFFFF' : '#334155',
+                          border: '1.5px solid #CBD5E1',
+                        }}
+                      >
+                        📊 جدول مقایسه کامل نمرات
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSubsDisplayLayout('cards')}
+                        style={{
+                          padding: '6px 12px',
+                          borderRadius: 8,
+                          fontSize: 12,
+                          fontWeight: 800,
+                          cursor: 'pointer',
+                          background: subsDisplayLayout === 'cards' ? '#1E293B' : '#F1F5F9',
+                          color: subsDisplayLayout === 'cards' ? '#FFFFFF' : '#334155',
+                          border: '1.5px solid #CBD5E1',
+                        }}
+                      >
+                        📋 نمای کارت‌ها
+                      </button>
+                    </div>
+                  </div>
+
+                  {subsDisplayLayout === 'table' ? (
+                    /* Comparative Table View */
+                    <div style={{ overflowX: 'auto', background: '#FFFFFF', borderRadius: 14, border: '1.5px solid #CBD5E1', boxShadow: '0 2px 4px rgba(0,0,0,0.04)' }}>
+                      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, textAlign: 'right' }}>
+                        <thead>
+                          <tr style={{ background: '#F8FAFC', borderBottom: '2px solid #CBD5E1', color: '#1E293B' }}>
+                            <th style={{ padding: '10px 12px', width: 40, textAlign: 'center' }}>ردیف</th>
+                            <th style={{ padding: '10px 12px' }}>نام دانش‌آموز</th>
+                            <th style={{ padding: '10px 12px', textAlign: 'center' }}>نمره رسمی کارنامه</th>
+                            <th style={{ padding: '10px 12px', textAlign: 'center' }}>امتیاز پیشنهادی هوشمند</th>
+                            <th style={{ padding: '10px 12px', textAlign: 'center' }}>مجموع نمرات سؤالات</th>
+                            <th style={{ padding: '10px 12px', textAlign: 'center' }}>وضعیت تایید و انتشار</th>
+                            <th style={{ padding: '10px 12px', textAlign: 'center' }}>عملیات</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {sortByLastName(getExamSubmissions(selectedExamForSubs.id), 'studentName').map((sub, sIdx) => {
+                            const eff = getSubmissionEffectiveScore(selectedExamForSubs, sub)
+                            const isApproved = eff.isApproved
+                            const isReleased = isExamResultsReleased(selectedExamForSubs, sub)
+                            const maxPts = eff.maxPoints
+                            const freshEval = evaluateEntireExamSubmission(selectedExamForSubs, sub.answers || {})
+                            const newProposedScore = freshEval.earnedPoints
+                            const sumQuestions = Object.values(eff.questionScores).reduce((acc, v: any) => acc + (Number(v) || 0), 0)
+                            const roundedSumQuestions = roundScore2(sumQuestions)
+                            const storedLegacyTotal = sub.teacherGrading?.totalScore
+
+                            return (
+                              <tr
+                                key={sub.id}
+                                style={{
+                                  borderBottom: '1px solid #E2E8F0',
+                                  background: isApproved && isReleased ? '#F0FDF4' : isApproved ? '#EFF6FF' : sIdx % 2 === 0 ? '#FFFFFF' : '#FAFAFA',
+                                }}
+                              >
+                                <td style={{ padding: '10px 12px', textAlign: 'center', color: '#64748B', fontWeight: 700 }}>
+                                  {toPersianDigits(sIdx + 1)}
+                                </td>
+                                <td style={{ padding: '10px 12px', fontWeight: 900, color: '#0F172A' }}>
+                                  👤 {sub.studentName}
+                                  {(() => {
+                                    const liveRow = integrityLogs.byKey.get(`${selectedExamForSubs.id}::${sub.studentId}`)
+                                    const events: IntegrityEvent[] =
+                                      (liveRow?.events && liveRow.events.length > 0
+                                        ? liveRow.events
+                                        : (sub as any).integrity?.events) || []
+                                    if (!Array.isArray(events) || events.length === 0) return null
+                                    const summary = summarizeIntegrityEvents(events)
+                                    return (
+                                      <details style={{ marginTop: 4 }}>
+                                        <summary
+                                          style={{
+                                            cursor: 'pointer',
+                                            fontSize: 11,
+                                            fontWeight: 900,
+                                            color: '#B91C1C',
+                                            background: '#FEF2F2',
+                                            border: '1px solid #FCA5A5',
+                                            borderRadius: 999,
+                                            padding: '2px 8px',
+                                            display: 'inline-block',
+                                          }}
+                                        >
+                                          ⚠️ {toPersianDigits(summary.text || `${summary.total} مورد`)}
+                                          {summary.awaySeconds > 0 ? ` · ${toPersianDigits(summary.awaySeconds)} ثانیه بیرون از آزمون` : ''}
+                                        </summary>
+                                        <ul style={{ margin: '6px 0 0', padding: '0 16px 0 0', fontSize: 11, fontWeight: 600, color: '#7F1D1D' }}>
+                                          {events.slice(-15).map((ev) => (
+                                            <li key={ev.id}>
+                                              {toPersianDigits(
+                                                new Date(ev.server_at || ev.at).toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+                                              )}{' '}
+                                              — {describeIntegrityEvent(ev)}
+                                            </li>
+                                          ))}
+                                        </ul>
+                                      </details>
+                                    )
+                                  })()}
+                                  {isTestStudentRecord(sub.studentId, sub.studentName) && (
+                                    <span style={{ marginRight: 6, fontSize: 10.5, padding: '2px 8px', borderRadius: 999, background: '#E0E7FF', color: '#4338CA', fontWeight: 800 }}>
+                                      🧪 حساب آزمایشی معلم
+                                    </span>
+                                  )}
+                                </td>
+                                <td style={{ padding: '10px 12px', textAlign: 'center', fontWeight: 900 }}>
+                                  {isApproved ? (
+                                    <div style={{ color: isReleased ? '#166534' : '#1D4ED8' }}>
+                                      {toPersianDigits(eff.scaledScore20)} از ۲۰
+                                      <div style={{ fontSize: 11, color: '#64748B', fontWeight: 700 }}>
+                                        ({toPersianDigits(eff.totalScore)} از {toPersianDigits(maxPts)})
+                                      </div>
+                                    </div>
+                                  ) : (
+                                    <div style={{ color: '#92400E' }}>
+                                      ثبت‌نشده
+                                      {typeof storedLegacyTotal === 'number' && (
+                                        <div style={{ fontSize: 10.5, color: '#94A3B8', fontWeight: 700 }}>
+                                          (نمره قبلی سامانه: {toPersianDigits(storedLegacyTotal)} از {toPersianDigits(maxPts)})
+                                        </div>
+                                      )}
+                                    </div>
+                                  )}
+                                </td>
+                                <td style={{ padding: '10px 12px', textAlign: 'center', color: '#1E40AF', fontWeight: 900 }}>
+                                  {toPersianDigits(freshEval.scaledScore20)} از ۲۰
+                                  <div style={{ fontSize: 11, color: '#64748B', fontWeight: 700 }}>
+                                    ({toPersianDigits(newProposedScore)} از {toPersianDigits(maxPts)})
+                                  </div>
+                                </td>
+                                <td style={{ padding: '10px 12px', textAlign: 'center', color: isApproved ? '#166534' : '#475569', fontWeight: 900 }}>
+                                  {toPersianDigits(isApproved ? roundedSumQuestions : newProposedScore)} از {toPersianDigits(maxPts)}
+                                  {!isApproved && (
+                                    <div style={{ fontSize: 10.5, color: '#94A3B8', fontWeight: 700 }}>
+                                      (پیشنهادی)
+                                    </div>
+                                  )}
+                                </td>
+                                <td style={{ padding: '10px 12px', textAlign: 'center' }}>
+                                  {(() => {
+                                    const isTestRow = isTestStudentRecord(sub.studentId, sub.studentName)
+                                    const hasGradesRow =
+                                      gradebookFetchState === 'loaded' &&
+                                      Boolean(findGradebookRowForExamSubmission(gradebookRows, selectedExamForSubs, sub.studentId, sub.studentName))
+                                    let bg = '#FEF3C7'
+                                    let fg = '#92400E'
+                                    let label = '⏳ نیازمند بررسی معلم'
+                                    if (isApproved && isReleased) {
+                                      if (isTestRow) {
+                                        bg = '#E0E7FF'
+                                        fg = '#4338CA'
+                                        label = '🧪 تاییدشده (حساب آزمایشی)'
+                                      } else if (gradebookFetchState === 'loaded') {
+                                        bg = hasGradesRow ? '#DCFCE7' : '#FFEDD5'
+                                        fg = hasGradesRow ? '#166534' : '#9A3412'
+                                        label = hasGradesRow ? '✓ ثبت در کارنامه' : '⚠️ نمایش از پاسخ‌نامه (در جدول grades ثبت نشده)'
+                                      } else if (gradebookFetchState === 'error') {
+                                        bg = '#FEF2F2'
+                                        fg = '#991B1B'
+                                        label = '⚠️ تاییدشده (خطا در بررسی grades)'
+                                      } else {
+                                        bg = '#DBEAFE'
+                                        fg = '#1D4ED8'
+                                        label = '⏳ در حال بررسی grades...'
+                                      }
+                                    } else if (isApproved) {
+                                      bg = '#DBEAFE'
+                                      fg = '#1D4ED8'
+                                      label = '✔ تایید معلم (کارنامه قفل)'
+                                    }
+                                    return (
+                                      <span
+                                        style={{
+                                          fontSize: 11,
+                                          fontWeight: 800,
+                                          padding: '3px 8px',
+                                          borderRadius: 999,
+                                          background: bg,
+                                          color: fg,
+                                          display: 'inline-block',
+                                        }}
+                                      >
+                                        {label}
+                                      </span>
+                                    )
+                                  })()}
+                                </td>
+                                <td style={{ padding: '10px 12px', textAlign: 'center' }}>
+                                  <button
+                                    type="button"
+                                    className="btn"
+                                    style={{ fontSize: 12, padding: '5px 12px' }}
+                                    onClick={() => startGradingSubmission(sub, selectedExamForSubs)}
+                                  >
+                                    {isApproved ? 'مشاهده / ویرایش' : 'بررسی و تایید'}
+                                  </button>
+                                </td>
+                              </tr>
+                            )
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    /* Cards View */
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                      {sortByLastName(getExamSubmissions(selectedExamForSubs.id), 'studentName').map((sub) => {
+                        const eff = getSubmissionEffectiveScore(selectedExamForSubs, sub)
+                        const isApproved = eff.isApproved
+                        const isReleased = isExamResultsReleased(selectedExamForSubs, sub)
+                        const freshEval = evaluateEntireExamSubmission(selectedExamForSubs, sub.answers || {})
+
+                        return (
+                          <div
+                            key={sub.id}
+                            style={{
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'center',
+                              padding: 12,
+                              borderRadius: 12,
+                              background: isApproved && isReleased ? '#F0FDF4' : isApproved ? '#EFF6FF' : '#FFFBEB',
+                              border: isApproved && isReleased ? '1.5px solid #86EFAC' : isApproved ? '1.5px solid #93C5FD' : '1.5px solid #FDE68A',
+                              flexWrap: 'wrap',
+                              gap: 10,
+                            }}
+                          >
+                            <div>
+                              <div style={{ fontSize: 14, fontWeight: 900, color: '#0F172A', display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
+                                <span>👤 {sub.studentName}</span>
+                                {isTestStudentRecord(sub.studentId, sub.studentName) && (
+                                  <span style={{ fontSize: 10.5, padding: '2px 8px', borderRadius: 999, background: '#E0E7FF', color: '#4338CA', fontWeight: 800 }}>
+                                    🧪 حساب آزمایشی معلم
+                                  </span>
+                                )}
+                              </div>
+                              <div style={{ fontSize: 12, color: '#64748B' }}>
+                                ارسال‌شده در {sub.submittedAt ? new Date(sub.submittedAt).toLocaleTimeString('fa-IR') : 'نامشخص'} •{' '}
+                                {isApproved ? (
+                                  <>
+                                    نمره رسمی:{' '}
+                                    <strong style={{ color: '#2563EB' }}>{toPersianDigits(eff.scaledScore20)} از ۲۰</strong>{' '}
+                                    <span>({toPersianDigits(eff.totalScore)} از {toPersianDigits(eff.maxPoints)})</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    پیشنهادی هوشمند:{' '}
+                                    <strong style={{ color: '#1E40AF' }}>{toPersianDigits(freshEval.scaledScore20)} از ۲۰</strong>{' '}
+                                    <span>({toPersianDigits(freshEval.earnedPoints)} از {toPersianDigits(eff.maxPoints)})</span>
+                                    {' '}• در انتظار تایید معلم
+                                  </>
+                                )}
+                              </div>
+                            </div>
+
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                              {(() => {
+                                const isTestRow = isTestStudentRecord(sub.studentId, sub.studentName)
+                                const hasGradesRow =
+                                  gradebookFetchState === 'loaded' &&
+                                  Boolean(findGradebookRowForExamSubmission(gradebookRows, selectedExamForSubs, sub.studentId, sub.studentName))
+                                let bg = '#FEF3C7'
+                                let fg = '#92400E'
+                                let label = '⏳ نیازمند تایید معلم'
+                                if (isApproved && isReleased) {
+                                  if (isTestRow) {
+                                    bg = '#E0E7FF'
+                                    fg = '#4338CA'
+                                    label = '🧪 تاییدشده (حساب آزمایشی)'
+                                  } else if (gradebookFetchState === 'loaded') {
+                                    bg = hasGradesRow ? '#DCFCE7' : '#FFEDD5'
+                                    fg = hasGradesRow ? '#166534' : '#9A3412'
+                                    label = hasGradesRow ? '✓ ثبت در کارنامه' : '⚠️ نمایش از پاسخ‌نامه (در جدول grades ثبت نشده)'
+                                  } else if (gradebookFetchState === 'error') {
+                                    bg = '#FEF2F2'
+                                    fg = '#991B1B'
+                                    label = '⚠️ تاییدشده (خطا در بررسی grades)'
+                                  } else {
+                                    bg = '#DBEAFE'
+                                    fg = '#1D4ED8'
+                                    label = '⏳ در حال بررسی grades...'
+                                  }
+                                } else if (isApproved) {
+                                  bg = '#DBEAFE'
+                                  fg = '#1D4ED8'
+                                  label = '✔ تایید معلم (قفل)'
+                                }
+                                return (
+                                  <span
+                                    style={{
+                                      fontSize: 11,
+                                      fontWeight: 800,
+                                      padding: '2px 8px',
+                                      borderRadius: 999,
+                                      background: bg,
+                                      color: fg,
+                                    }}
+                                  >
+                                    {label}
+                                  </span>
+                                )
+                              })()}
+
+                              <button
+                                type="button"
+                                className="btn"
+                                style={{ fontSize: 12, padding: '6px 12px' }}
+                                onClick={() => startGradingSubmission(sub, selectedExamForSubs)}
+                              >
+                                {isApproved ? 'مشاهده و ویرایش نمره' : 'بررسی و تایید نمره'}
+                              </button>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ========================================================
+          MODAL: ADD / EDIT QUESTION MODAL
+          ======================================================== */}
+      {editingQ && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.6)',
+            zIndex: 9999,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 16,
+          }}
+          onClick={() => setEditingQ(null)}
+        >
+          <div
+            style={{
+              background: '#FFFFFF',
+              borderRadius: 20,
+              border: '2px solid var(--black)',
+              padding: 20,
+              maxWidth: 540,
+              width: '100%',
+              maxHeight: '90vh',
+              overflowY: 'auto',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 style={{ fontSize: 17, fontWeight: 900, margin: '0 0 14px 0' }}>
+              {isNewQuestionModal ? 'افزودن سوال جدید' : 'ویرایش سوال'}
+            </h3>
+
+            <div style={{ marginBottom: 12 }}>
+              <label style={{ display: 'block', fontSize: 13, fontWeight: 800, marginBottom: 4 }}>نوع سوال</label>
+              <select
+                value={editingQ.type}
+                onChange={(e) => {
+                  const t = e.target.value as QuestionType
+                  setEditingQ({
+                    ...editingQ,
+                    type: t,
+                    options: t === 'multiple_choice' ? editingQ.options || ['گزینه ۱', 'گزینه ۲', 'گزینه ۳', 'گزینه ۴'] : undefined,
+                  })
+                }}
+                style={{ width: '100%', padding: 8, borderRadius: 8, border: '2px solid var(--black)', fontSize: 13 }}
+              >
+                <option value="multiple_choice">چهارگزینه‌ای</option>
+                <option value="fill_in_the_blank">جای خالی</option>
+                <option value="descriptive">تشریحی / متنی</option>
+                <option value="image">آپلود عکس / حل تصویری</option>
+              </select>
+            </div>
+
+            <div style={{ marginBottom: 12 }}>
+              <label style={{ display: 'block', fontSize: 13, fontWeight: 800, marginBottom: 4 }}>صورت سوال</label>
+              <textarea
+                value={editingQ.question}
+                onChange={(e) => setEditingQ({ ...editingQ, question: e.target.value })}
+                style={{ width: '100%', padding: 10, borderRadius: 10, border: '2px solid var(--black)', fontSize: 13, minHeight: 60 }}
+              />
+            </div>
+
+            {/* Multiple Choice Options */}
+            {editingQ.type === 'multiple_choice' && (
+              <div style={{ marginBottom: 12 }}>
+                <label style={{ display: 'block', fontSize: 13, fontWeight: 800, marginBottom: 4 }}>گزینه‌ها</label>
+                {(editingQ.options || ['', '', '', '']).map((opt, i) => {
+                  const resolvedIndex = resolveCorrectOptionIndex(editingQ).index
+                  return (
+                    <div key={i} style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 6 }}>
+                      <input
+                        type="radio"
+                        name="correctOption"
+                        checked={resolvedIndex === i}
+                        onChange={() =>
+                          setEditingQ({
+                            ...editingQ,
+                            correctAnswer: i,
+                            correctOptionIndex: i,
+                            correctOptionText: cleanOptionText(opt || ''),
+                          })
+                        }
+                        title="انتخاب به عنوان گزینه درست"
+                      />
+                      <input
+                        type="text"
+                        value={opt}
+                        onChange={(e) => {
+                          const newOpts = [...(editingQ.options || [])]
+                          newOpts[i] = e.target.value
+                          const isCur = resolveCorrectOptionIndex(editingQ).index === i
+                          setEditingQ({
+                            ...editingQ,
+                            options: newOpts,
+                            correctOptionText: isCur ? cleanOptionText(e.target.value) : editingQ.correctOptionText,
+                          })
+                        }}
+                        placeholder={`گزینه ${i + 1}`}
+                        style={{ flex: 1, padding: 6, borderRadius: 6, border: '1.5px solid #CBD5E1', fontSize: 13 }}
+                      />
+                    </div>
+                  )
+                })}
+                <span style={{ fontSize: 11, color: '#64748B' }}>دایره کنار گزینه صحیح را تیک بزنید.</span>
+              </div>
+            )}
+
+            {editingQ.type === 'fill_in_the_blank' && (
+              <div style={{ marginBottom: 12 }}>
+                <label style={{ display: 'block', fontSize: 13, fontWeight: 800, marginBottom: 4 }}>
+                  کلیدواژه پاسخ صحیح جای خالی
+                </label>
+                <input
+                  type="text"
+                  value={String(editingQ.correctAnswer || '')}
+                  onChange={(e) => {
+                    const rawVal = e.target.value
+                    const alts = rawVal.split(/[\/،,;]/).map((s) => s.trim()).filter(Boolean)
+                    setEditingQ({
+                      ...editingQ,
+                      correctAnswer: rawVal,
+                      acceptableAnswers: alts.length > 0 ? alts : undefined,
+                    })
+                  }}
+                  placeholder="پاسخ مورد انتظار (برای چند پاسخ معتبر از / استفاده کنید، مثلاً: بزرگتر / بیشتر)"
+                  style={{ width: '100%', padding: 8, borderRadius: 8, border: '2px solid var(--black)', fontSize: 13 }}
+                />
+                <span style={{ fontSize: 11, color: '#64748B' }}>
+                  می‌توانید پاسخ‌های هم‌معنی دیگر را با علامت / جدا کنید (مثلاً: افزایش می‌یابد / زیاد می‌شود).
+                </span>
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: 10, marginBottom: 14 }}>
+              <div style={{ flex: 1 }}>
+                <label style={{ display: 'block', fontSize: 13, fontWeight: 800, marginBottom: 4 }}>بارم نمره</label>
+                <input
+                  type="number"
+                  step="0.5"
+                  min="0.5"
+                  max="10"
+                  value={editingQ.points}
+                  onChange={(e) => setEditingQ({ ...editingQ, points: parseFloat(e.target.value) || 2 })}
+                  style={{ width: '100%', padding: 8, borderRadius: 8, border: '2px solid var(--black)', fontSize: 13 }}
+                />
+              </div>
+            </div>
+
+            {/* Award full score to all students toggle */}
+            <div style={{ marginBottom: 14, background: '#F0FDF4', padding: '10px 12px', borderRadius: 8, border: '1.5px solid #86EFAC' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer', color: '#14532D' }}>
+                <input
+                  type="checkbox"
+                  checked={Boolean(editingQ.awardFullScoreToAll || editingQ.allOptionsCorrect)}
+                  onChange={(e) => {
+                    const checked = e.target.checked
+                    setEditingQ({
+                      ...editingQ,
+                      awardFullScoreToAll: checked,
+                      allOptionsCorrect: checked,
+                    })
+                  }}
+                  style={{ width: 18, height: 18, cursor: 'pointer' }}
+                />
+                🎁 اعطای نمره کامل این سوال به تمامی دانش‌آموزان (نمره آزاد / سوال دارای ابهام یا تصمیم آموزگار)
+              </label>
+              <div style={{ fontSize: 11, color: '#166534', marginTop: 4, marginRight: 26 }}>
+                در صورت انتخاب، تمام دانش‌آموزان در پاسخ به این سوال نمره کامل بارم را دریافت خواهند کرد.
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button type="button" className="btn secondary" onClick={() => setEditingQ(null)}>
+                انصراف
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => {
+                  if (!editingQ.question.trim()) {
+                    alert('لطفاً متن سوال را وارد کنید.')
+                    return
+                  }
+                  handleSaveQuestionModal(editingQ)
+                }}
+              >
+                ذخیره سوال
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Exam Confirmation Modal */}
+      {deleteConfirmExam && (() => {
+        const affectedSubs = getExamSubmissions(deleteConfirmExam.id)
+        return (
+          <div
+            style={{
+              position: 'fixed',
+              inset: 0,
+              backgroundColor: 'rgba(15, 23, 42, 0.65)',
+              backdropFilter: 'blur(4px)',
+              zIndex: 9999,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: 16,
+            }}
+          >
+            <div
+              className="mobile-card hard"
+              style={{
+                background: '#FFFFFF',
+                borderRadius: 20,
+                maxWidth: 440,
+                width: '100%',
+                padding: 24,
+                boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.2)',
+                border: '2px solid #0F172A',
+              }}
+            >
+              <div style={{ fontSize: 40, textAlign: 'center', marginBottom: 12 }}>⚠️</div>
+              <h3 style={{ fontSize: 18, fontWeight: 900, textAlign: 'center', margin: '0 0 10px 0', color: '#0F172A' }}>
+                حذف آزمون
+              </h3>
+              <p style={{ fontSize: 13.5, color: '#475569', lineHeight: 1.6, textAlign: 'center', margin: '0 0 16px 0' }}>
+                آیا از حذف کامل آزمون «<strong>{sanitizeExamTitle(deleteConfirmExam.title, deleteConfirmExam.subject)}</strong>» اطمینان دارید؟
+                این عملیات غیرقابل بازگشت است.
+              </p>
+
+              {affectedSubs.length > 0 && (
+                <div style={{ background: '#FEF2F2', border: '1.5px solid #FCA5A5', borderRadius: 10, padding: '10px 12px', marginBottom: 16, textAlign: 'right' }}>
+                  <strong style={{ color: '#991B1B', fontSize: 13 }}>⚠️ توجه:</strong>
+                  <p style={{ margin: '4px 0 0 0', color: '#B91C1C', fontSize: 12.5, lineHeight: 1.5 }}>
+                    این آزمون دارای <strong>{affectedSubs.length}</strong> پاسخ ثبت‌شده از دانش‌آموزان است که همگی همراه با این آزمون حذف خواهند شد.
+                  </p>
+                </div>
+              )}
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <button
+                  type="button"
+                  className="btn secondary"
+                  onClick={() => setDeleteConfirmExam(null)}
+                  style={{ fontWeight: 800 }}
+                >
+                  انصراف
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={async () => {
+                    const target = deleteConfirmExam
+                    setDeleteConfirmExam(null)
+                    setExams((prev) => prev.filter((e) => e.id !== target.id))
+                    await deleteExam(target.id, teacherPassword)
+                    await loadExams()
+                  }}
+                  style={{
+                    background: '#DC2626',
+                    color: '#FFFFFF',
+                    borderColor: '#991B1B',
+                    fontWeight: 800,
+                  }}
+                >
+                  بله، حذف شود
+                </button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* Edit Active Exam Warning Modal */}
+      {examEditWarningExam && (() => {
+        const subsCount = getExamSubmissions(examEditWarningExam.id).length
+        return (
+          <div
+            style={{
+              position: 'fixed',
+              inset: 0,
+              backgroundColor: 'rgba(15, 23, 42, 0.65)',
+              backdropFilter: 'blur(4px)',
+              zIndex: 9999,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: 16,
+            }}
+          >
+            <div
+              className="mobile-card hard"
+              style={{
+                background: '#FFFFFF',
+                borderRadius: 20,
+                maxWidth: 460,
+                width: '100%',
+                padding: 24,
+                boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.2)',
+                border: '2px solid #0F172A',
+              }}
+            >
+              <div style={{ fontSize: 40, textAlign: 'center', marginBottom: 12 }}>⚠️</div>
+              <h3 style={{ fontSize: 18, fontWeight: 900, textAlign: 'center', margin: '0 0 10px 0', color: '#0F172A' }}>
+                هشدار ویرایش آزمون دارای شرکت‌کننده
+              </h3>
+              <p style={{ fontSize: 13.5, color: '#475569', lineHeight: 1.6, textAlign: 'center', margin: '0 0 14px 0' }}>
+                آزمون «<strong>{sanitizeExamTitle(examEditWarningExam.title, examEditWarningExam.subject)}</strong>» دارای{' '}
+                <strong style={{ color: '#DC2626' }}>{subsCount}</strong> پاسخ ثبت‌شده از دانش‌آموزان است.
+              </p>
+              <div style={{ background: '#FFFBEB', border: '1.5px solid #FCD34D', borderRadius: 10, padding: 12, marginBottom: 20, fontSize: 12.5, color: '#92400E', lineHeight: 1.6 }}>
+                تغییر در تعداد سؤال‌ها، گزینه‌ها یا بارم‌بندی ممکن است نتایج و کارنامه‌های دانش‌آموزان را تحت تأثیر قرار دهد.
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <button
+                  type="button"
+                  className="btn secondary"
+                  onClick={() => setExamEditWarningExam(null)}
+                  style={{ fontWeight: 800 }}
+                >
+                  انصراف
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => proceedWithEditExam(examEditWarningExam)}
+                  style={{ background: '#2563EB', color: '#FFFFFF', borderColor: '#1D4ED8', fontWeight: 800 }}
+                >
+                  ادامه ویرایش
+                </button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* Regrade Preview & Apply Modal */}
+      {regradePreview && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            backgroundColor: 'rgba(15, 23, 42, 0.65)',
+            backdropFilter: 'blur(4px)',
+            zIndex: 9999,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 16,
+          }}
+        >
+          <div
+            className="mobile-card hard"
+            style={{
+              background: '#FFFFFF',
+              borderRadius: 20,
+              maxWidth: 720,
+              width: '100%',
+              maxHeight: '90vh',
+              overflowY: 'auto',
+              padding: 24,
+              boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.2)',
+              border: '2px solid #0F172A',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+              <div>
+                <h3 style={{ fontSize: 18, fontWeight: 900, margin: 0, color: '#0F172A' }}>
+                  🔄 پیش‌نمایش بازتصحیح هوشمند پاسخ‌ها
+                </h3>
+                <p style={{ fontSize: 13, color: '#64748B', margin: '4px 0 0 0' }}>
+                  آزمون: {regradePreview.examTitle} • کل پاسخ‌ها: {regradePreview.totalSubmissions} • تغییرات: {regradePreview.submissionsWithChanges} دانش‌آموز
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn secondary"
+                onClick={() => setRegradePreview(null)}
+                style={{ padding: '4px 10px', fontSize: 13 }}
+              >
+                ✕ بستن
+              </button>
+            </div>
+
+            <div style={{ background: '#F8FAFC', borderRadius: 12, padding: 12, marginBottom: 16, border: '1px solid #E2E8F0', fontSize: 12.5, lineHeight: 1.6, color: '#334155' }}>
+              💡 <strong>نحوه عملکرد:</strong> نمرات مجدداً با الگوریتم اصلاح‌شده (بدون وابستگی به جابجایی گزینه‌ها، پذیرش مترادف‌ها و بارم‌بندی دقیق) ارزیابی شده‌اند.
+              پیش از کلیک بر روی دکمه تأیید، هیچ داده‌ای در سرور یا پایگاه داده تغییر نکرده است.
+            </div>
+
+            {regradePreview.items.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: 24, color: '#64748B' }}>
+                پاسخی برای این آزمون ثبت نشده است.
+              </div>
+            ) : (
+              <div style={{ overflowX: 'auto', marginBottom: 16 }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                  <thead>
+                    <tr style={{ background: '#F1F5F9', borderBottom: '2px solid #CBD5E1', textAlign: 'right' }}>
+                      <th style={{ padding: '8px 10px' }}>دانش‌آموز</th>
+                      <th style={{ padding: '8px 10px' }}>نمره فعلی</th>
+                      <th style={{ padding: '8px 10px' }}>نمره جدید</th>
+                      <th style={{ padding: '8px 10px' }}>اختلاف</th>
+                      <th style={{ padding: '8px 10px' }}>وضعیت</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {regradePreview.items.map((item) => (
+                      <tr key={item.submissionId} style={{ borderBottom: '1px solid #E2E8F0' }}>
+                        <td style={{ padding: '8px 10px', fontWeight: 800 }}>{item.studentName}</td>
+                        <td style={{ padding: '8px 10px' }}>{item.oldScore}</td>
+                        <td style={{ padding: '8px 10px', fontWeight: 800, color: item.scoreDiff > 0 ? '#15803D' : item.scoreDiff < 0 ? '#DC2626' : '#334155' }}>
+                          {item.newScore}
+                        </td>
+                        <td style={{ padding: '8px 10px' }}>
+                          {item.scoreDiff > 0 ? (
+                            <span style={{ color: '#15803D', fontWeight: 800 }}>+{item.scoreDiff}</span>
+                          ) : item.scoreDiff < 0 ? (
+                            <span style={{ color: '#DC2626', fontWeight: 800 }}>{item.scoreDiff}</span>
+                          ) : (
+                            <span style={{ color: '#64748B' }}>بدون تغییر</span>
+                          )}
+                        </td>
+                        <td style={{ padding: '8px 10px' }}>
+                          {item.isApproved ? (
+                            <span style={{ fontSize: 11, background: '#DCFCE7', color: '#166534', padding: '2px 8px', borderRadius: 999, fontWeight: 700 }}>
+                              تایید معلم
+                            </span>
+                          ) : (
+                            <span style={{ fontSize: 11, background: '#FEF3C7', color: '#92400E', padding: '2px 8px', borderRadius: 999, fontWeight: 700 }}>
+                              در انتظار تایید
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* Override Teacher Approved Checkbox */}
+            {regradePreview.approvedCount > 0 && (
+              <div style={{ background: '#FFFBEB', border: '1.5px solid #FCD34D', borderRadius: 10, padding: 12, marginBottom: 16 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13, fontWeight: 700, color: '#92400E' }}>
+                  <input
+                    type="checkbox"
+                    checked={overrideApprovedRegrade}
+                    onChange={(e) => setOverrideApprovedRegrade(e.target.checked)}
+                    style={{ width: 16, height: 16, cursor: 'pointer' }}
+                  />
+                  <span>بازنویسی نمره‌های دستی تأییدشده معلم ({regradePreview.approvedCount} نمره) با محاسبات جدید</span>
+                </label>
+                <p style={{ margin: '4px 24px 0 0', fontSize: 11.5, color: '#78350F' }}>
+                  در صورت عدم انتخاب این گزینه، نمرات دستی شما برای دانش‌آموزان تاییدشده بدون تغییر باقی می‌مانند.
+                </p>
+              </div>
+            )}
+
+            {regradeResultSummary && (
+              <div style={{ background: '#DCFCE7', color: '#15803D', padding: 10, borderRadius: 8, fontWeight: 800, fontSize: 13, marginBottom: 14 }}>
+                {regradeResultSummary}
+              </div>
+            )}
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                className="btn secondary"
+                onClick={() => setRegradePreview(null)}
+                disabled={isApplyingRegrade}
+              >
+                انصراف
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={handleApplyRegrade}
+                disabled={isApplyingRegrade}
+                style={{ background: '#16A34A', color: '#FFFFFF', borderColor: '#15803D', fontWeight: 800 }}
+              >
+                {isApplyingRegrade ? 'در حال اعمال بازتصحیح...' : '✅ تایید و اعمال نمرات در سیستم'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* WhatsApp Visual Poster Modal */}
+      <WhatsappPosterModal
+        isOpen={Boolean(whatsappModalData)}
+        onClose={() => setWhatsappModalData(null)}
+        data={whatsappModalData}
+      />
+    </div>
+  )
+}
+

@@ -6,6 +6,14 @@
   NODE_VERSION = "22"
   VITE_API_BASE_URL = "https://class.nemat-darkhah.workers.dev"
 
+# Same-origin Supabase proxy: lets students who opened the site on this host reach the database
+# through the very same host (no extra domain that an ISP might block). Must come BEFORE the SPA rule.
+[[redirects]]
+  from = "/sb/*"
+  to = "https://ephgqrnbpxvxlzloflhy.supabase.co/:splat"
+  status = 200
+  force = true
+
 [[redirects]]
   from = "/*"
   to = "/index.html"
